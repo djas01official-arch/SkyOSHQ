@@ -1,0 +1,89 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: Arial, Helvetica, sans-serif;
+  --radius-control: 0.75rem;
+  --radius-card: 1rem;
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.03), 0 8px 24px rgb(15 23 42 / 0.03);
+  --shadow-panel: -12px 0 32px rgb(15 23 42 / 0.12);
+}
+
+@theme inline {
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-background: var(--background);
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+}
+
+:root {
+  --background: #f7f8fb;
+  --surface: #ffffff;
+  --surface-raised: #f2f4f8;
+  --foreground: #182033;
+  --muted-foreground: #647089;
+  --border: #e2e6ee;
+  --accent: #4355db;
+  --accent-hover: #3647c7;
+  --accent-foreground: #ffffff;
+  --accent-soft: #e9ecff;
+  --success: #167a50;
+  --success-soft: #ddf6e8;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --type-caption: 0.75rem;
+  --type-body: 0.875rem;
+  --type-title: 2.25rem;
+}
+
+.dark {
+  --background: #0d1220;
+  --surface: #131a2b;
+  --surface-raised: #1a2338;
+  --foreground: #eef2ff;
+  --muted-foreground: #a7b1c8;
+  --border: #29344d;
+  --accent: #92a0ff;
+  --accent-hover: #b0baff;
+  --accent-foreground: #10152b;
+  --accent-soft: #232e60;
+  --success: #67d49d;
+  --success-soft: #173c31;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--background);
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--foreground);
+}
