@@ -14,8 +14,11 @@ import {
   archiveKnowledgeDocument,
   createKnowledgeDocument,
   getKnowledgeDocument,
+  getKnowledgeDocumentVersion,
   listKnowledgeDocuments,
+  listKnowledgeDocumentVersions,
   restoreKnowledgeDocument,
+  restoreKnowledgeDocumentVersion,
   searchKnowledgeDocuments,
   updateKnowledgeDocument,
 } from '../knowledge/knowledge-documents';
@@ -341,6 +344,188 @@ test('stale document updates fail through optimistic concurrency without replaci
       where: { action: AuditAction.KNOWLEDGE_DOCUMENT_UPDATED, targetId: document.id },
     }),
     1,
+  );
+});
+
+test('document updates create immutable versions ordered newest first', async () => {
+  const ownerId = await createUser();
+  const organizationId = await createOrganization(ownerId);
+  const workspaceId = await createWorkspace(organizationId, ownerId);
+  const document = await createKnowledgeDocument(prisma, ownerId, workspaceId, {
+    content: 'Version one',
+    title: 'History',
+  });
+
+  const second = await updateKnowledgeDocument(
+    prisma,
+    ownerId,
+    workspaceId,
+    document.slug,
+    document.version,
+    { content: 'Version two', title: 'History revised' },
+  );
+  const third = await updateKnowledgeDocument(
+    prisma,
+    ownerId,
+    workspaceId,
+    document.slug,
+    second.version,
+    { content: 'Version three', title: 'History final' },
+  );
+
+  const history = await listKnowledgeDocumentVersions(prisma, ownerId, workspaceId, document.slug);
+  assert.deepEqual(
+    history.map((version) => version.versionNumber),
+    [3, 2, 1],
+  );
+  assert.deepEqual(
+    history.map((version) => version.markdownContent),
+    ['Version three', 'Version two', 'Version one'],
+  );
+  assert.equal(third.version, history[0]?.versionNumber);
+
+  await assert.rejects(
+    prisma.knowledgeDocumentVersion.update({
+      where: { id: history[0]!.id },
+      data: { title: 'Mutated history' },
+    }),
+  );
+  await assert.rejects(prisma.knowledgeDocumentVersion.delete({ where: { id: history[0]!.id } }));
+  await assert.rejects(
+    prisma.knowledgeDocument.update({
+      where: { id: document.id },
+      data: { content: 'Missing history snapshot', version: { increment: 1 } },
+    }),
+  );
+});
+
+test('restoring history creates a new latest version and an audit event', async () => {
+  const ownerId = await createUser();
+  const organizationId = await createOrganization(ownerId);
+  const workspaceId = await createWorkspace(organizationId, ownerId);
+  const document = await createKnowledgeDocument(prisma, ownerId, workspaceId, {
+    content: 'Original body',
+    title: 'Original title',
+  });
+  const edited = await updateKnowledgeDocument(
+    prisma,
+    ownerId,
+    workspaceId,
+    document.slug,
+    document.version,
+    { content: 'Edited body', title: 'Edited title' },
+  );
+
+  const restored = await restoreKnowledgeDocumentVersion(
+    prisma,
+    ownerId,
+    workspaceId,
+    document.slug,
+    1,
+    edited.version,
+  );
+
+  assert.equal(restored.content, 'Original body');
+  assert.equal(restored.title, 'Original title');
+  assert.equal(restored.version, 3);
+  const history = await listKnowledgeDocumentVersions(prisma, ownerId, workspaceId, document.slug);
+  assert.deepEqual(
+    history.map((version) => version.versionNumber),
+    [3, 2, 1],
+  );
+  assert.equal(history[0]?.authorUserId, ownerId);
+
+  const audit = await prisma.auditEvent.findFirst({
+    where: {
+      action: AuditAction.KNOWLEDGE_DOCUMENT_VERSION_RESTORED,
+      targetId: document.id,
+    },
+  });
+  assert.ok(audit);
+  assert.deepEqual(audit.metadata, {
+    afterVersion: 3,
+    beforeVersion: 2,
+    sourceVersion: 1,
+  });
+  await assert.rejects(
+    restoreKnowledgeDocumentVersion(prisma, ownerId, workspaceId, document.slug, 2, edited.version),
+    KnowledgeConflictError,
+  );
+  assert.equal(
+    await prisma.knowledgeDocumentVersion.count({ where: { documentId: document.id } }),
+    3,
+  );
+});
+
+test('version history is isolated to the effective workspace', async () => {
+  const ownerId = await createUser();
+  const organizationId = await createOrganization(ownerId);
+  const firstWorkspaceId = await createWorkspace(organizationId, ownerId);
+  const secondWorkspaceId = await createWorkspace(organizationId, ownerId);
+  const document = await createKnowledgeDocument(prisma, ownerId, firstWorkspaceId, {
+    content: 'Private history',
+    title: 'Private document',
+  });
+
+  await assert.rejects(
+    listKnowledgeDocumentVersions(prisma, ownerId, secondWorkspaceId, document.slug),
+    KnowledgeNotFoundError,
+  );
+  await assert.rejects(
+    getKnowledgeDocumentVersion(prisma, ownerId, secondWorkspaceId, document.slug, 1),
+    KnowledgeNotFoundError,
+  );
+  await assert.rejects(
+    restoreKnowledgeDocumentVersion(
+      prisma,
+      ownerId,
+      secondWorkspaceId,
+      document.slug,
+      1,
+      document.version,
+    ),
+    KnowledgeNotFoundError,
+  );
+});
+
+test('viewers may read history but cannot restore a version', async () => {
+  const ownerId = await createUser();
+  const viewerId = await createUser();
+  const organizationId = await createOrganization(ownerId);
+  const workspaceId = await createWorkspace(organizationId, ownerId);
+  await addWorkspaceUser(organizationId, workspaceId, viewerId, WorkspaceRole.VIEWER);
+  const document = await createKnowledgeDocument(prisma, ownerId, workspaceId, {
+    content: 'Visible history',
+    title: 'Permissions',
+  });
+  const edited = await updateKnowledgeDocument(
+    prisma,
+    ownerId,
+    workspaceId,
+    document.slug,
+    document.version,
+    { content: 'Visible revision', title: 'Permissions' },
+  );
+
+  assert.equal(
+    (await listKnowledgeDocumentVersions(prisma, viewerId, workspaceId, document.slug)).length,
+    2,
+  );
+  assert.equal(
+    (await getKnowledgeDocumentVersion(prisma, viewerId, workspaceId, document.slug, 1)).version
+      .markdownContent,
+    'Visible history',
+  );
+  await assert.rejects(
+    restoreKnowledgeDocumentVersion(
+      prisma,
+      viewerId,
+      workspaceId,
+      document.slug,
+      1,
+      edited.version,
+    ),
+    KnowledgeAuthorizationError,
   );
 });
 

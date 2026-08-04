@@ -49,26 +49,27 @@ enum KnowledgeDocumentStatus {
 }
 
 model User {
-  id                      String                   @id @default(uuid()) @db.Uuid
-  name                    String?
-  email                   String?                  @unique
-  emailVerified           DateTime?                @db.Timestamptz(6)
-  image                   String?
-  passwordHash            String?                  @db.Text
-  identitySubject         String?                  @unique
-  displayName             String?
-  status                  UserStatus               @default(ACTIVE)
-  deletedAt               DateTime?                @db.Timestamptz(6)
-  createdAt               DateTime                 @default(now()) @db.Timestamptz(6)
-  updatedAt               DateTime                 @updatedAt @db.Timestamptz(6)
-  createdOrganizations    Organization[]           @relation("OrganizationCreator")
-  createdWorkspaces       Workspace[]              @relation("WorkspaceCreator")
-  accounts                Account[]
-  auditEvents             AuditEvent[]             @relation("AuditActor")
-  knowledgeDocuments      KnowledgeDocument[]      @relation("KnowledgeDocumentAuthor")
-  organizationMemberships OrganizationMembership[]
-  sessions                Session[]
-  workspaceMemberships    WorkspaceMembership[]
+  id                        String                     @id @default(uuid()) @db.Uuid
+  name                      String?
+  email                     String?                    @unique
+  emailVerified             DateTime?                  @db.Timestamptz(6)
+  image                     String?
+  passwordHash              String?                    @db.Text
+  identitySubject           String?                    @unique
+  displayName               String?
+  status                    UserStatus                 @default(ACTIVE)
+  deletedAt                 DateTime?                  @db.Timestamptz(6)
+  createdAt                 DateTime                   @default(now()) @db.Timestamptz(6)
+  updatedAt                 DateTime                   @updatedAt @db.Timestamptz(6)
+  createdOrganizations      Organization[]             @relation("OrganizationCreator")
+  createdWorkspaces         Workspace[]                @relation("WorkspaceCreator")
+  accounts                  Account[]
+  auditEvents               AuditEvent[]               @relation("AuditActor")
+  knowledgeDocuments        KnowledgeDocument[]        @relation("KnowledgeDocumentAuthor")
+  knowledgeDocumentVersions KnowledgeDocumentVersion[] @relation("KnowledgeDocumentVersionAuthor")
+  organizationMemberships   OrganizationMembership[]
+  sessions                  Session[]
+  workspaceMemberships      WorkspaceMembership[]
 
   @@index([email])
   @@index([status])
@@ -199,25 +200,43 @@ model Workspace {
 }
 
 model KnowledgeDocument {
-  id           String                   @id @default(uuid()) @db.Uuid
-  workspaceId  String                   @db.Uuid
-  authorUserId String                   @db.Uuid
+  id           String                     @id @default(uuid()) @db.Uuid
+  workspaceId  String                     @db.Uuid
+  authorUserId String                     @db.Uuid
   title        String
   slug         String
-  content      String                   @db.Text
-  status       KnowledgeDocumentStatus  @default(ACTIVE)
-  archivedAt   DateTime?                @db.Timestamptz(6)
-  version      Int                      @default(1)
-  searchVector Unsupported("tsvector")? @map("searchVector")
-  createdAt    DateTime                 @default(now()) @db.Timestamptz(6)
-  updatedAt    DateTime                 @updatedAt @db.Timestamptz(6)
-  author       User                     @relation("KnowledgeDocumentAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  workspace    Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  content      String                     @db.Text
+  status       KnowledgeDocumentStatus    @default(ACTIVE)
+  archivedAt   DateTime?                  @db.Timestamptz(6)
+  version      Int                        @default(1)
+  searchVector Unsupported("tsvector")?   @map("searchVector")
+  createdAt    DateTime                   @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime                   @updatedAt @db.Timestamptz(6)
+  author       User                       @relation("KnowledgeDocumentAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  workspace    Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  versions     KnowledgeDocumentVersion[]
 
   @@unique([workspaceId, slug])
   @@index([workspaceId, status, updatedAt])
   @@index([authorUserId, createdAt])
   @@map("knowledge_documents")
+}
+
+model KnowledgeDocumentVersion {
+  id              String            @id @default(uuid()) @db.Uuid
+  documentId      String            @db.Uuid
+  versionNumber   Int
+  title           String
+  markdownContent String            @db.Text
+  authorUserId    String            @db.Uuid
+  createdAt       DateTime          @default(now()) @db.Timestamptz(6)
+  document        KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  author          User              @relation("KnowledgeDocumentVersionAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([documentId, versionNumber])
+  @@index([documentId, createdAt])
+  @@index([authorUserId, createdAt])
+  @@map("knowledge_document_versions")
 }
 
 model WorkspaceMembership {

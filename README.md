@@ -116,6 +116,7 @@ Audit events are append-only. SkyOS application services do not expose update or
 - Documents belong to exactly one workspace and are never moved between workspaces.
 - Normal lists exclude archived documents. An authorized user may restore an archived document through its detail URL.
 - Create, update, archive, and restore operations are version-checked and write immutable audit events in the same transaction.
+- Every revision-bearing mutation appends an immutable document snapshot. `/knowledge/[slug]/history` lists snapshots newest first, and a user with `knowledge.write` may restore an older snapshot by creating a new latest version; history is never overwritten.
 - Markdown is rendered as sanitized CommonMark. Raw HTML is discarded, unsafe URL schemes are rejected, remote images are not loaded, and external HTTP(S) links open with `noopener noreferrer nofollow`.
 - The Knowledge page searches active document titles and Markdown source with a PostgreSQL full-text GIN index. Search always uses the effective selected workspace and requires `knowledge.read`.
 - File uploads, rendering extensions, embeddings, vector search, RAG, AI generation, comments, and sharing are intentionally not included.

@@ -167,6 +167,22 @@ async function getUpdatedDocument(transaction: Transaction, documentId: string) 
   });
 }
 
+async function appendDocumentVersion(
+  transaction: Transaction,
+  document: { content: string; id: string; title: string; version: number },
+  authorUserId: string,
+): Promise<void> {
+  await transaction.knowledgeDocumentVersion.create({
+    data: {
+      authorUserId,
+      documentId: document.id,
+      markdownContent: document.content,
+      title: document.title,
+      versionNumber: document.version,
+    },
+  });
+}
+
 export async function listKnowledgeDocuments(
   prisma: PrismaClient,
   actorUserId: string,
@@ -232,6 +248,43 @@ export async function getKnowledgeDocument(
   return findDocument(prisma, workspaceId, slug, includeArchived);
 }
 
+export async function listKnowledgeDocumentVersions(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+  slug: string,
+) {
+  await requireWorkspaceAccess(prisma, actorUserId, workspaceId, false);
+  const document = await findDocument(prisma, workspaceId, slug, true);
+
+  return prisma.knowledgeDocumentVersion.findMany({
+    where: { documentId: document.id },
+    include: { author: { select: { displayName: true, email: true, id: true } } },
+    orderBy: [{ versionNumber: 'desc' }, { createdAt: 'desc' }],
+  });
+}
+
+export async function getKnowledgeDocumentVersion(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+  slug: string,
+  versionNumber: number,
+) {
+  await requireWorkspaceAccess(prisma, actorUserId, workspaceId, false);
+  const document = await findDocument(prisma, workspaceId, slug, true);
+  const version = await prisma.knowledgeDocumentVersion.findUnique({
+    where: { documentId_versionNumber: { documentId: document.id, versionNumber } },
+    include: { author: { select: { displayName: true, email: true, id: true } } },
+  });
+
+  if (!version) {
+    throw new KnowledgeNotFoundError('The requested document version was not found.');
+  }
+
+  return { document, version };
+}
+
 export async function createKnowledgeDocument(
   prisma: PrismaClient,
   actorUserId: string,
@@ -252,6 +305,8 @@ export async function createKnowledgeDocument(
       },
       include: { author: { select: { displayName: true, email: true, id: true } } },
     });
+
+    await appendDocumentVersion(transaction, document, actorUserId);
 
     await appendAuditEvent(transaction, {
       action: AuditAction.KNOWLEDGE_DOCUMENT_CREATED,
@@ -297,6 +352,7 @@ export async function updateKnowledgeDocument(
     }
 
     const persisted = await getUpdatedDocument(transaction, document.id);
+    await appendDocumentVersion(transaction, persisted, actorUserId);
     await appendAuditEvent(transaction, {
       action: AuditAction.KNOWLEDGE_DOCUMENT_UPDATED,
       actorUserId,
@@ -353,6 +409,7 @@ async function transitionKnowledgeDocument(
     }
 
     const persisted = await getUpdatedDocument(transaction, document.id);
+    await appendDocumentVersion(transaction, persisted, actorUserId);
     await appendAuditEvent(transaction, {
       action:
         status === KnowledgeDocumentStatus.ARCHIVED
@@ -402,4 +459,79 @@ export function restoreKnowledgeDocument(
     expectedVersion,
     KnowledgeDocumentStatus.ACTIVE,
   );
+}
+
+export async function restoreKnowledgeDocumentVersion(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+  slug: string,
+  sourceVersionNumber: number,
+  expectedVersion: number,
+) {
+  if (
+    !Number.isSafeInteger(sourceVersionNumber) ||
+    sourceVersionNumber < 1 ||
+    !Number.isSafeInteger(expectedVersion) ||
+    expectedVersion < 1
+  ) {
+    throw new KnowledgeValidationError('Document versions must be positive integers.');
+  }
+
+  return prisma.$transaction(async (transaction) => {
+    const access = await requireWorkspaceAccess(transaction, actorUserId, workspaceId, true);
+    const document = await findDocument(transaction, workspaceId, slug, false);
+
+    if (sourceVersionNumber === document.version) {
+      throw new KnowledgeStateError('The requested version is already current.');
+    }
+
+    const sourceVersion = await transaction.knowledgeDocumentVersion.findUnique({
+      where: {
+        documentId_versionNumber: { documentId: document.id, versionNumber: sourceVersionNumber },
+      },
+    });
+
+    if (!sourceVersion) {
+      throw new KnowledgeNotFoundError('The requested document version was not found.');
+    }
+
+    const updated = await transaction.knowledgeDocument.updateMany({
+      where: {
+        id: document.id,
+        status: KnowledgeDocumentStatus.ACTIVE,
+        version: expectedVersion,
+        workspaceId,
+      },
+      data: {
+        content: sourceVersion.markdownContent,
+        title: sourceVersion.title,
+        version: { increment: 1 },
+      },
+    });
+
+    if (updated.count !== 1) {
+      throw new KnowledgeConflictError(
+        'This document changed before the restore. Refresh and try again.',
+      );
+    }
+
+    const persisted = await getUpdatedDocument(transaction, document.id);
+    await appendDocumentVersion(transaction, persisted, actorUserId);
+    await appendAuditEvent(transaction, {
+      action: AuditAction.KNOWLEDGE_DOCUMENT_VERSION_RESTORED,
+      actorUserId,
+      metadata: {
+        afterVersion: persisted.version,
+        beforeVersion: document.version,
+        sourceVersion: sourceVersion.versionNumber,
+      },
+      organizationId: access.organizationId,
+      targetId: document.id,
+      targetType: AuditTargetType.KNOWLEDGE_DOCUMENT,
+      workspaceId,
+    });
+
+    return persisted;
+  });
 }

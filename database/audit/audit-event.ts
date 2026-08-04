@@ -12,6 +12,7 @@ export const AuditAction = {
   KNOWLEDGE_DOCUMENT_UPDATED: 'knowledge_document.updated',
   KNOWLEDGE_DOCUMENT_ARCHIVED: 'knowledge_document.archived',
   KNOWLEDGE_DOCUMENT_RESTORED: 'knowledge_document.restored',
+  KNOWLEDGE_DOCUMENT_VERSION_RESTORED: 'knowledge_document.version_restored',
   WORKSPACE_CREATED: 'workspace.created',
   WORKSPACE_ARCHIVED: 'workspace.archived',
   WORKSPACE_RESTORED: 'workspace.restored',

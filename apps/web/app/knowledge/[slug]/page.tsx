@@ -62,24 +62,34 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
             {author} · Version {document.version} · Updated {document.updatedAt.toLocaleString()}
           </p>
         </div>
-        {canWrite ? (
-          <div className="flex flex-wrap items-center gap-2">
-            {!isArchived ? (
-              <Link
-                className="inline-flex h-8 items-center rounded-control border border-border bg-surface px-3 text-xs font-medium text-foreground hover:bg-surface-raised"
-                href={`/knowledge/${document.slug}/edit`}
-              >
-                Edit
-              </Link>
-            ) : null}
-            <KnowledgeDocumentLifecycle
-              action={isArchived ? restoreKnowledgeDocumentAction : archiveKnowledgeDocumentAction}
-              label={isArchived ? 'Restore' : 'Archive'}
-              slug={document.slug}
-              version={document.version}
-            />
-          </div>
-        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            className="inline-flex h-8 items-center rounded-control border border-border bg-surface px-3 text-xs font-medium text-foreground hover:bg-surface-raised"
+            href={`/knowledge/${document.slug}/history`}
+          >
+            Version history
+          </Link>
+          {canWrite ? (
+            <>
+              {!isArchived ? (
+                <Link
+                  className="inline-flex h-8 items-center rounded-control border border-border bg-surface px-3 text-xs font-medium text-foreground hover:bg-surface-raised"
+                  href={`/knowledge/${document.slug}/edit`}
+                >
+                  Edit
+                </Link>
+              ) : null}
+              <KnowledgeDocumentLifecycle
+                action={
+                  isArchived ? restoreKnowledgeDocumentAction : archiveKnowledgeDocumentAction
+                }
+                label={isArchived ? 'Restore' : 'Archive'}
+                slug={document.slug}
+                version={document.version}
+              />
+            </>
+          ) : null}
+        </div>
       </div>
 
       {isArchived ? (

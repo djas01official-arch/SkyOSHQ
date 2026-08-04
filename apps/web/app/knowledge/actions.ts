@@ -8,6 +8,7 @@ import {
   archiveKnowledgeDocument,
   createKnowledgeDocument,
   restoreKnowledgeDocument,
+  restoreKnowledgeDocumentVersion,
   updateKnowledgeDocument,
 } from '../../../../database/knowledge/knowledge-documents';
 
@@ -148,4 +149,38 @@ export async function restoreKnowledgeDocumentAction(
   formData: FormData,
 ): Promise<KnowledgeDocumentActionState> {
   return transitionKnowledgeDocumentAction(previousState, formData, 'restore');
+}
+
+export async function restoreKnowledgeDocumentVersionAction(
+  _previousState: KnowledgeDocumentActionState,
+  formData: FormData,
+): Promise<KnowledgeDocumentActionState> {
+  const slug = getString(formData, 'slug');
+  const version = getVersion(formData);
+  const sourceValue = getString(formData, 'sourceVersion');
+  const sourceVersion = sourceValue && /^\d+$/.test(sourceValue) ? Number(sourceValue) : Number.NaN;
+
+  if (!slug || version === null || !Number.isSafeInteger(sourceVersion) || sourceVersion < 1) {
+    return { error: 'The document version is unavailable. Refresh and try again.' };
+  }
+
+  const { userId, workspaceId } = await getWriteScope();
+
+  try {
+    await restoreKnowledgeDocumentVersion(
+      prisma,
+      userId,
+      workspaceId,
+      slug,
+      sourceVersion,
+      version,
+    );
+  } catch (error) {
+    return getErrorState(error);
+  }
+
+  revalidatePath('/knowledge');
+  revalidatePath(`/knowledge/${slug}`);
+  revalidatePath(`/knowledge/${slug}/history`);
+  redirect(`/knowledge/${slug}`);
 }

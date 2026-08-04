@@ -13,15 +13,16 @@ Access is explicit, deny-by-default, and evaluated at the smallest applicable sc
 
 ## Domain vocabulary
 
-| Term               | Meaning                                                                                          |
-| ------------------ | ------------------------------------------------------------------------------------------------ |
-| User               | A SkyOS actor with a stable internal identifier. Identity verification is outside this model.    |
-| Organization       | The top-level tenant that owns workspaces, membership administration, and organization settings. |
-| Workspace          | An organization-owned work boundary for future product data and collaboration.                   |
-| Knowledge document | A workspace-scoped Markdown record of durable operational knowledge.                             |
-| Membership         | A scoped, revocable relationship between a user and an organization or workspace.                |
-| Role               | A named, built-in bundle of permissions assigned through a membership.                           |
-| Permission         | A stable capability key evaluated against either organization or workspace scope.                |
+| Term                       | Meaning                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------------ |
+| User                       | A SkyOS actor with a stable internal identifier. Identity verification is outside this model.    |
+| Organization               | The top-level tenant that owns workspaces, membership administration, and organization settings. |
+| Workspace                  | An organization-owned work boundary for future product data and collaboration.                   |
+| Knowledge document         | A workspace-scoped Markdown record of durable operational knowledge.                             |
+| Knowledge document version | An immutable snapshot of a document revision used for history and restoration.                   |
+| Membership                 | A scoped, revocable relationship between a user and an organization or workspace.                |
+| Role                       | A named, built-in bundle of permissions assigned through a membership.                           |
+| Permission                 | A stable capability key evaluated against either organization or workspace scope.                |
 
 ## Entity model
 
@@ -114,6 +115,24 @@ Every persisted record has an immutable opaque `id`, `createdAt`, and `updatedAt
 
 **Lifecycle:** an actor with an effective workspace `knowledge.write` grant creates an active document. Actors with `knowledge.read` may read active documents, while `knowledge.write` is required to update, archive, or restore. Active documents appear in normal lists; archived documents are omitted and may only be restored through an authorized, version-checked operation. A stale update or transition fails without overwriting a newer version.
 
+### KnowledgeDocumentVersion
+
+**Responsibility:** preserve an immutable Markdown snapshot for every successful revision-bearing document mutation.
+
+| Attribute         | Notes                                                                                 |
+| ----------------- | ------------------------------------------------------------------------------------- |
+| `id`              | Immutable version-record identifier.                                                  |
+| `documentId`      | Immutable parent document identifier.                                                 |
+| `versionNumber`   | Positive revision number, unique within the document.                                 |
+| `title`           | Title captured at this revision.                                                      |
+| `markdownContent` | Unmodified Markdown source captured at this revision.                                 |
+| `authorUserId`    | Actor responsible for this revision, including a restore operation.                   |
+| `createdAt`       | Append timestamp. Version records have no `updatedAt` because they cannot be changed. |
+
+**Relationships:** belongs to exactly one knowledge document and one author user. Workspace and organization scope are derived only through the parent document, and all reads resolve that parent inside the effective selected workspace.
+
+**Lifecycle:** document creation appends version 1. Each content update and each archive or restore transition that advances the document concurrency counter appends the matching snapshot in the same transaction. Restoring historical content requires `knowledge.write`, verifies the expected current version, copies the selected historical title and Markdown into the active document, increments its version, and appends a new snapshot. Historical rows are never overwritten, deleted, or branched. The current document `version` must equal the greatest stored `versionNumber`.
+
 **Rendering boundary:** the stored Markdown source is never interpreted as MDX or arbitrary React components. Presentation uses CommonMark with raw HTML disabled, sanitized output, safe URL-scheme validation, no embedded remote images, and safe `rel` attributes on external HTTP(S) links. Scripts, iframes, forms, event-handler attributes, and executable URL schemes are not rendered.
 
 **Search boundary:** active document titles and Markdown source are indexed with a PostgreSQL-generated `tsvector` and partial GIN index. Every search first requires effective `knowledge.read` access and binds the selected `workspaceId` in the database query. Archived documents are excluded. Search indexes are derived data and do not modify the stored Markdown source.
@@ -194,6 +213,8 @@ erDiagram
     ORGANIZATION ||--o{ WORKSPACE : owns
     WORKSPACE ||--o{ KNOWLEDGE_DOCUMENT : contains
     USER ||--o{ KNOWLEDGE_DOCUMENT : authors
+    KNOWLEDGE_DOCUMENT ||--|{ KNOWLEDGE_DOCUMENT_VERSION : records
+    USER ||--o{ KNOWLEDGE_DOCUMENT_VERSION : authors
     USER ||--o{ WORKSPACE_MEMBERSHIP : holds
     WORKSPACE ||--o{ WORKSPACE_MEMBERSHIP : has
     USER ||--o{ AUDIT_EVENT : performs
@@ -238,6 +259,15 @@ erDiagram
         string content
         string status
         int version
+    }
+    KNOWLEDGE_DOCUMENT_VERSION {
+        string id PK
+        string documentId FK
+        int versionNumber
+        string title
+        string markdownContent
+        string authorUserId FK
+        datetime createdAt
     }
     WORKSPACE_MEMBERSHIP {
         string id PK
@@ -401,10 +431,13 @@ These rules must be enforced transactionally by any future persistence and autho
 17. Archived knowledge documents are omitted from normal workspace lists and reject normal updates. Restore is the only permitted content-lifecycle transition while archived.
 18. Knowledge Markdown rendering must discard raw HTML, sanitize the rendered tree, reject unsafe URL schemes, and never execute scripts, embedded forms, iframes, event handlers, MDX, or arbitrary React components.
 19. Knowledge search requires effective `knowledge.read`, is constrained to the selected workspace in the database query, and returns active documents only. Empty or punctuation-only queries return no results.
+20. Every successful mutation that increments a knowledge document's `version` appends exactly one immutable `KnowledgeDocumentVersion` with the same version number in the transaction. The document version equals the greatest stored version number.
+21. Knowledge version rows are append-only. Application services and database triggers reject updates and deletes; a historical restore creates the next version and never modifies the selected source row.
+22. Version history reads require effective `knowledge.read` in the parent document's workspace. Historical restore additionally requires `knowledge.write`, an active document, and a matching expected current version.
 
 ## Production-readiness audit requirement
 
-The foundation persists an append-only audit event for workspace creation, organization and workspace archive or restoration, organization and workspace role changes, membership suspension, resumption, or revocation, ownership transfer, and knowledge document creation, update, archive, or restoration. Each event records the acting user, organization scope, optional workspace scope, action, target, timestamp, and structured non-secret metadata. The privileged service writes the event in the same transaction as the state transition, so either both writes commit or both roll back. New privileged operations must join this audited service boundary before release.
+The foundation persists an append-only audit event for workspace creation, organization and workspace archive or restoration, organization and workspace role changes, membership suspension, resumption, or revocation, ownership transfer, and knowledge document creation, update, archive, lifecycle restoration, or historical-version restoration. Each event records the acting user, organization scope, optional workspace scope, action, target, timestamp, and structured non-secret metadata. The privileged service writes the event in the same transaction as the state transition, so either both writes commit or both roll back. New privileged operations must join this audited service boundary before release.
 
 ## Assumptions
 
@@ -418,16 +451,16 @@ The foundation persists an append-only audit event for workspace creation, organ
 
 ## Risks and unresolved decisions
 
-| Area                     | Open decision / risk                                                                                                                                                         |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Identity lifecycle       | Define how external identities, verified email, invitations, SCIM, and account recovery map to `User` and membership activation.                                             |
-| Owner recovery           | Define a break-glass or support-controlled owner-recovery process; the invariant prevents accidental loss but does not solve lost-owner scenarios.                           |
-| Deletion and retention   | Specify legal retention, anonymization, slug reuse, audit-event retention, and whether records are ever hard-deleted.                                                        |
-| Service actors           | Decide whether automation uses `User`, a separate service-account entity, or delegated tokens. Do not overload human membership semantics without a policy decision.         |
-| Cross-workspace features | Future global search, analytics, and AI may need an explicit aggregate permission model; they must not bypass workspace checks.                                              |
-| Resource-level sharing   | Document-level, task-level, guest, external collaborator, and link-sharing access are intentionally excluded and should be modeled separately.                               |
-| Role evolution           | Define migration/versioning rules before granting new permissions to existing roles, particularly for sensitive future domains.                                              |
-| Knowledge lifecycle      | Define formal retention, export, and legal-hold policies before expanding document capabilities. Future Markdown extensions must preserve the current sanitization boundary. |
+| Area                     | Open decision / risk                                                                                                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Identity lifecycle       | Define how external identities, verified email, invitations, SCIM, and account recovery map to `User` and membership activation.                                                                       |
+| Owner recovery           | Define a break-glass or support-controlled owner-recovery process; the invariant prevents accidental loss but does not solve lost-owner scenarios.                                                     |
+| Deletion and retention   | Specify legal retention, anonymization, slug reuse, audit-event retention, and whether records are ever hard-deleted.                                                                                  |
+| Service actors           | Decide whether automation uses `User`, a separate service-account entity, or delegated tokens. Do not overload human membership semantics without a policy decision.                                   |
+| Cross-workspace features | Future global search, analytics, and AI may need an explicit aggregate permission model; they must not bypass workspace checks.                                                                        |
+| Resource-level sharing   | Document-level, task-level, guest, external collaborator, and link-sharing access are intentionally excluded and should be modeled separately.                                                         |
+| Role evolution           | Define migration/versioning rules before granting new permissions to existing roles, particularly for sensitive future domains.                                                                        |
+| Knowledge lifecycle      | Define formal retention, export, legal-hold, and immutable-history growth policies before expanding document capabilities. Future Markdown extensions must preserve the current sanitization boundary. |
 
 ## Extension path
 
