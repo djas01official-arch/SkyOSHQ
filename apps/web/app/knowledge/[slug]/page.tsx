@@ -5,22 +5,68 @@ import {
   KnowledgeNotFoundError,
   getKnowledgeDocument,
 } from '../../../../../database/knowledge/knowledge-documents';
-import { KnowledgeDocumentStatus } from '../../../../../database/generated/client/client';
+import { listKnowledgeAttachments } from '../../../../../database/knowledge/knowledge-attachments';
+import {
+  KnowledgeAttachmentProcessingStatus,
+  KnowledgeAttachmentStatus,
+  KnowledgeDocumentStatus,
+} from '../../../../../database/generated/client/client';
 
 import {
   archiveKnowledgeDocumentAction,
   restoreKnowledgeDocumentAction,
 } from '@/app/knowledge/actions';
+import {
+  archiveKnowledgeAttachmentAction,
+  processKnowledgeAttachmentAction,
+  restoreKnowledgeAttachmentAction,
+  uploadKnowledgeAttachmentAction,
+} from '@/app/knowledge/attachment-actions';
+import { KnowledgeAttachmentLifecycle } from '@/components/knowledge/knowledge-attachment-lifecycle';
+import { KnowledgeAttachmentProcessing } from '@/components/knowledge/knowledge-attachment-processing';
+import { KnowledgeAttachmentUpload } from '@/components/knowledge/knowledge-attachment-upload';
 import { KnowledgeDocumentLifecycle } from '@/components/knowledge/knowledge-document-lifecycle';
 import { MarkdownDocument } from '@/components/knowledge/markdown-document';
 import { Card } from '@/components/ui/card';
 import { requireCurrentUser } from '@/lib/auth/current-user';
+import { knowledgeAttachmentDependencies } from '@/lib/knowledge-storage';
 import { hasWorkspaceCapability, requireWorkspaceCapability } from '@/lib/organization-context';
 import { prisma } from '@/lib/prisma';
 
 type KnowledgeDocumentPageProps = Readonly<{
   params: Promise<{ slug: string }>;
 }>;
+
+function formatFileSize(size: bigint): string {
+  const bytes = Number(size);
+  if (bytes < 1024) {
+    return `${bytes} bytes`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatProcessingStatus(status: KnowledgeAttachmentProcessingStatus): string {
+  switch (status) {
+    case KnowledgeAttachmentProcessingStatus.UPLOADED:
+      return 'Uploaded';
+    case KnowledgeAttachmentProcessingStatus.PROCESSING:
+      return 'Processing';
+    case KnowledgeAttachmentProcessingStatus.PROCESSED:
+      return 'Processed';
+    case KnowledgeAttachmentProcessingStatus.FAILED:
+      return 'Failed';
+  }
+}
+
+function isProcessableAttachment(mimeType: string): boolean {
+  return (
+    mimeType === 'application/pdf' ||
+    mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  );
+}
 
 export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumentPageProps) {
   const [{ slug }, user, context] = await Promise.all([
@@ -34,9 +80,14 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
     notFound();
   }
 
+  const canWrite = hasWorkspaceCapability(workspace.role, 'knowledge.write');
   let document;
+  let attachments;
   try {
-    document = await getKnowledgeDocument(prisma, user.id, workspace.id, slug, true);
+    [document, attachments] = await Promise.all([
+      getKnowledgeDocument(prisma, user.id, workspace.id, slug, true),
+      listKnowledgeAttachments(prisma, user.id, workspace.id, slug, canWrite),
+    ]);
   } catch (error) {
     if (error instanceof KnowledgeNotFoundError) {
       notFound();
@@ -44,9 +95,14 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
     throw error;
   }
 
-  const canWrite = hasWorkspaceCapability(workspace.role, 'knowledge.write');
   const isArchived = document.status === KnowledgeDocumentStatus.ARCHIVED;
   const author = document.author.displayName ?? document.author.email ?? 'Unknown author';
+  const activeAttachments = attachments.filter(
+    (attachment) => attachment.status === KnowledgeAttachmentStatus.ACTIVE,
+  );
+  const archivedAttachments = attachments.filter(
+    (attachment) => attachment.status === KnowledgeAttachmentStatus.ARCHIVED,
+  );
 
   return (
     <div className="mx-auto max-w-4xl">
@@ -99,6 +155,132 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
       ) : null}
       <Card className="mt-6">
         <MarkdownDocument content={document.content} />
+      </Card>
+
+      <Card className="mt-6">
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight text-foreground">Attachments</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Workspace-protected source files. Downloads are always served as attachments.
+          </p>
+        </div>
+
+        {canWrite && !isArchived ? (
+          <KnowledgeAttachmentUpload
+            action={uploadKnowledgeAttachmentAction}
+            maxFileSizeBytes={knowledgeAttachmentDependencies.maxFileSizeBytes}
+            slug={document.slug}
+          />
+        ) : null}
+
+        <div className="mt-6 space-y-3">
+          {activeAttachments.length ? (
+            activeAttachments.map((attachment) => {
+              const uploader =
+                attachment.uploader.displayName ?? attachment.uploader.email ?? 'Unknown uploader';
+              const latestExtraction = attachment.extractions[0];
+              const latestJob = attachment.processingJobs[0];
+              const isProcessable = isProcessableAttachment(attachment.mimeType);
+
+              return (
+                <div
+                  className="flex flex-col justify-between gap-3 rounded-control border border-border p-3 sm:flex-row sm:items-center"
+                  key={attachment.id}
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-foreground">
+                      {attachment.originalFilename}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {formatFileSize(attachment.sizeBytes)} · {uploader} · Version{' '}
+                      {attachment.version}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      <span className="font-medium text-foreground">
+                        {formatProcessingStatus(attachment.processingStatus)}
+                      </span>
+                      {latestExtraction
+                        ? ` · Extraction ${latestExtraction.extractionNumber} · ${latestExtraction.parserName} ${latestExtraction.parserVersion}`
+                        : !isProcessable
+                          ? ' · Text extraction is available for PDF and DOCX only.'
+                          : latestJob?.errorMessage
+                            ? ` · ${latestJob.errorMessage}`
+                            : null}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <a
+                      className="text-sm font-medium text-accent hover:underline"
+                      href={`/knowledge/${document.slug}/attachments/${attachment.id}/download`}
+                    >
+                      Download
+                    </a>
+                    {canWrite &&
+                    !isArchived &&
+                    isProcessable &&
+                    attachment.processingStatus !==
+                      KnowledgeAttachmentProcessingStatus.PROCESSING ? (
+                      <KnowledgeAttachmentProcessing
+                        action={processKnowledgeAttachmentAction}
+                        attachmentId={attachment.id}
+                        label={
+                          attachment.processingStatus ===
+                          KnowledgeAttachmentProcessingStatus.PROCESSED
+                            ? 'Reprocess'
+                            : 'Process'
+                        }
+                        slug={document.slug}
+                      />
+                    ) : null}
+                    {canWrite && !isArchived ? (
+                      <KnowledgeAttachmentLifecycle
+                        action={archiveKnowledgeAttachmentAction}
+                        attachmentId={attachment.id}
+                        label="Archive"
+                        slug={document.slug}
+                        version={attachment.version}
+                      />
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <p className="text-sm text-muted-foreground">No active attachments.</p>
+          )}
+        </div>
+
+        {canWrite && archivedAttachments.length ? (
+          <div className="mt-7 border-t border-border pt-5">
+            <h3 className="text-sm font-semibold text-foreground">Archived attachments</h3>
+            <div className="mt-3 space-y-3">
+              {archivedAttachments.map((attachment) => (
+                <div
+                  className="flex flex-col justify-between gap-3 rounded-control border border-border p-3 sm:flex-row sm:items-center"
+                  key={attachment.id}
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-muted-foreground">
+                      {attachment.originalFilename}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {formatFileSize(attachment.sizeBytes)} · Version {attachment.version}
+                    </p>
+                  </div>
+                  {!isArchived ? (
+                    <KnowledgeAttachmentLifecycle
+                      action={restoreKnowledgeAttachmentAction}
+                      attachmentId={attachment.id}
+                      label="Restore"
+                      slug={document.slug}
+                      version={attachment.version}
+                    />
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </Card>
     </div>
   );

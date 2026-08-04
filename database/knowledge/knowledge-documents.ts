@@ -79,7 +79,7 @@ function getSearchTerms(value: string): string[] {
   return (value.normalize('NFKC').match(/[\p{L}\p{N}]+/gu) ?? []).slice(0, 16);
 }
 
-async function requireWorkspaceAccess(
+export async function requireKnowledgeWorkspaceAccess(
   prisma: PrismaClient | Transaction,
   actorUserId: string,
   workspaceId: string,
@@ -136,7 +136,7 @@ async function requireWorkspaceAccess(
   return { organizationId: membership.workspace.organizationId, workspaceId };
 }
 
-async function findDocument(
+export async function findKnowledgeDocument(
   prisma: PrismaClient | Transaction,
   workspaceId: string,
   slug: string,
@@ -188,7 +188,7 @@ export async function listKnowledgeDocuments(
   actorUserId: string,
   workspaceId: string,
 ) {
-  await requireWorkspaceAccess(prisma, actorUserId, workspaceId, false);
+  await requireKnowledgeWorkspaceAccess(prisma, actorUserId, workspaceId, false);
 
   return prisma.knowledgeDocument.findMany({
     where: { status: KnowledgeDocumentStatus.ACTIVE, workspaceId },
@@ -212,7 +212,7 @@ export async function searchKnowledgeDocuments(
   workspaceId: string,
   query: string,
 ): Promise<KnowledgeSearchResult[]> {
-  await requireWorkspaceAccess(prisma, actorUserId, workspaceId, false);
+  await requireKnowledgeWorkspaceAccess(prisma, actorUserId, workspaceId, false);
   const terms = getSearchTerms(query);
 
   if (!terms.length) {
@@ -244,8 +244,8 @@ export async function getKnowledgeDocument(
   slug: string,
   includeArchived = false,
 ) {
-  await requireWorkspaceAccess(prisma, actorUserId, workspaceId, false);
-  return findDocument(prisma, workspaceId, slug, includeArchived);
+  await requireKnowledgeWorkspaceAccess(prisma, actorUserId, workspaceId, false);
+  return findKnowledgeDocument(prisma, workspaceId, slug, includeArchived);
 }
 
 export async function listKnowledgeDocumentVersions(
@@ -254,8 +254,8 @@ export async function listKnowledgeDocumentVersions(
   workspaceId: string,
   slug: string,
 ) {
-  await requireWorkspaceAccess(prisma, actorUserId, workspaceId, false);
-  const document = await findDocument(prisma, workspaceId, slug, true);
+  await requireKnowledgeWorkspaceAccess(prisma, actorUserId, workspaceId, false);
+  const document = await findKnowledgeDocument(prisma, workspaceId, slug, true);
 
   return prisma.knowledgeDocumentVersion.findMany({
     where: { documentId: document.id },
@@ -271,8 +271,8 @@ export async function getKnowledgeDocumentVersion(
   slug: string,
   versionNumber: number,
 ) {
-  await requireWorkspaceAccess(prisma, actorUserId, workspaceId, false);
-  const document = await findDocument(prisma, workspaceId, slug, true);
+  await requireKnowledgeWorkspaceAccess(prisma, actorUserId, workspaceId, false);
+  const document = await findKnowledgeDocument(prisma, workspaceId, slug, true);
   const version = await prisma.knowledgeDocumentVersion.findUnique({
     where: { documentId_versionNumber: { documentId: document.id, versionNumber } },
     include: { author: { select: { displayName: true, email: true, id: true } } },
@@ -294,7 +294,12 @@ export async function createKnowledgeDocument(
   const value = getInput(input);
 
   return prisma.$transaction(async (transaction) => {
-    const access = await requireWorkspaceAccess(transaction, actorUserId, workspaceId, true);
+    const access = await requireKnowledgeWorkspaceAccess(
+      transaction,
+      actorUserId,
+      workspaceId,
+      true,
+    );
     const document = await transaction.knowledgeDocument.create({
       data: {
         authorUserId: actorUserId,
@@ -333,8 +338,13 @@ export async function updateKnowledgeDocument(
   const value = getInput(input);
 
   return prisma.$transaction(async (transaction) => {
-    const access = await requireWorkspaceAccess(transaction, actorUserId, workspaceId, true);
-    const document = await findDocument(transaction, workspaceId, slug, false);
+    const access = await requireKnowledgeWorkspaceAccess(
+      transaction,
+      actorUserId,
+      workspaceId,
+      true,
+    );
+    const document = await findKnowledgeDocument(transaction, workspaceId, slug, false);
     const updated = await transaction.knowledgeDocument.updateMany({
       where: {
         id: document.id,
@@ -381,8 +391,13 @@ async function transitionKnowledgeDocument(
   status: KnowledgeDocumentStatus,
 ) {
   return prisma.$transaction(async (transaction) => {
-    const access = await requireWorkspaceAccess(transaction, actorUserId, workspaceId, true);
-    const document = await findDocument(transaction, workspaceId, slug, true);
+    const access = await requireKnowledgeWorkspaceAccess(
+      transaction,
+      actorUserId,
+      workspaceId,
+      true,
+    );
+    const document = await findKnowledgeDocument(transaction, workspaceId, slug, true);
     const expectedStatus =
       status === KnowledgeDocumentStatus.ARCHIVED
         ? KnowledgeDocumentStatus.ACTIVE
@@ -479,8 +494,13 @@ export async function restoreKnowledgeDocumentVersion(
   }
 
   return prisma.$transaction(async (transaction) => {
-    const access = await requireWorkspaceAccess(transaction, actorUserId, workspaceId, true);
-    const document = await findDocument(transaction, workspaceId, slug, false);
+    const access = await requireKnowledgeWorkspaceAccess(
+      transaction,
+      actorUserId,
+      workspaceId,
+      true,
+    );
+    const document = await findKnowledgeDocument(transaction, workspaceId, slug, false);
 
     if (sourceVersionNumber === document.version) {
       throw new KnowledgeStateError('The requested version is already current.');

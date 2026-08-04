@@ -1,6 +1,6 @@
 # SkyOS
 
-SkyOS is an AI-native enterprise operating platform. The repository currently contains its tooling foundation only; product features have not yet been implemented.
+SkyOS is an AI-native enterprise operating platform. The repository contains the evolving MVP foundation for its web, tenancy, Knowledge, storage, and document-processing domains.
 
 ## Tooling
 
@@ -119,7 +119,30 @@ Audit events are append-only. SkyOS application services do not expose update or
 - Every revision-bearing mutation appends an immutable document snapshot. `/knowledge/[slug]/history` lists snapshots newest first, and a user with `knowledge.write` may restore an older snapshot by creating a new latest version; history is never overwritten.
 - Markdown is rendered as sanitized CommonMark. Raw HTML is discarded, unsafe URL schemes are rejected, remote images are not loaded, and external HTTP(S) links open with `noopener noreferrer nofollow`.
 - The Knowledge page searches active document titles and Markdown source with a PostgreSQL full-text GIN index. Search always uses the effective selected workspace and requires `knowledge.read`.
-- File uploads, rendering extensions, embeddings, vector search, RAG, AI generation, comments, and sharing are intentionally not included.
+- Knowledge documents support workspace-scoped PDF, DOCX, PNG, and JPEG attachments. Readers may list and download active attachments; writers may upload, archive, and restore them with optimistic concurrency and transactional audit events.
+- Upload validation matches the original extension, declared MIME type, and binary signature; filenames never form storage paths. Active duplicate content is rejected within the same document by SHA-256 checksum.
+- Local development binaries use the key-based storage adapter under `KNOWLEDGE_STORAGE_ROOT` (default `.skyos/knowledge`, ignored by Git). `KNOWLEDGE_MAX_FILE_SIZE_BYTES` defaults to 10 MiB and is capped at 100 MiB. Relative storage roots resolve from the monorepo root; deployments should configure an absolute durable path until an S3-compatible adapter is introduced.
+- Downloads require current `knowledge.read`, are returned with `Content-Disposition: attachment`, `nosniff`, private/no-store caching, and a restrictive sandbox policy. Files are not parsed, rendered as HTML, or made public.
+- PDF and DOCX attachments can be processed into immutable plain-text extraction records. The original binary is retained unchanged, and PNG/JPEG attachments remain downloadable but are not text-processable.
+
+## Document processing foundation
+
+Knowledge writers can start or repeat PDF/DOCX text extraction from an attachment on the document detail page. A durable PostgreSQL job is created first, then dispatched through a queue interface. The development adapter executes that worker synchronously; a production broker can replace the adapter without changing job creation, extraction history, or authorization.
+
+- Attachment lifecycle (`active`/`archived`) and processing state (`uploaded`/`processing`/`processed`/`failed`) are independent. This preserves archive/restore behavior while exposing the latest processing result.
+- PDF parsing reads the embedded text layer with `pdf-parse`; image-only PDFs produce empty text because OCR is intentionally excluded. DOCX parsing uses Mammoth raw-text extraction and does not render document HTML.
+- Each job captures the application-selected parser name and version. Reprocessing after a parser upgrade appends a new numbered extraction record; previous text is never updated or deleted.
+- Job request, start, success, and failure transitions emit immutable audit events. Extraction creation, terminal status, and the matching success event commit atomically.
+- The development worker verifies the stored binary size and SHA-256 before parsing. Missing or corrupt binaries produce a safe failed status without changing metadata or deleting the original storage record.
+- Only effective workspace members with `knowledge.write` may process or reprocess. Readers with `knowledge.read` can see processing status; cross-workspace job and extraction access is rejected.
+
+Run `pnpm db:migrate` after pulling this foundation, then use the existing web command:
+
+```sh
+pnpm --filter @skyos/web dev
+```
+
+OCR, embeddings, vector search, AI, PDF/DOCX rendering, and asynchronous production-worker infrastructure remain intentionally excluded.
 
 ## Repository structure
 

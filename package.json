@@ -19,12 +19,14 @@
     "db:migrate": "prisma migrate dev",
     "db:seed": "prisma db seed",
     "db:test:migrate": "tsx database/scripts/migrate-test.ts",
-    "db:test": "pnpm db:test:migrate && tsx --test --test-concurrency=1 database/tests/tenancy.integration.test.ts database/tests/authentication.integration.test.ts database/tests/organization-context.integration.test.ts database/tests/audit-events.integration.test.ts database/tests/knowledge-documents.integration.test.ts apps/web/components/knowledge/markdown-document.test.tsx"
+    "db:test": "pnpm db:test:migrate && tsx --test --test-concurrency=1 database/tests/tenancy.integration.test.ts database/tests/authentication.integration.test.ts database/tests/organization-context.integration.test.ts database/tests/audit-events.integration.test.ts database/tests/knowledge-documents.integration.test.ts database/tests/knowledge-attachments.integration.test.ts database/tests/document-processing.integration.test.ts apps/web/components/knowledge/markdown-document.test.tsx"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.7.0",
     "@prisma/client": "^7.7.0",
     "argon2": "^0.45.1",
+    "mammoth": "^1.12.0",
+    "pdf-parse": "^2.4.5",
     "pg": "^8.16.0"
   },
   "devDependencies": {

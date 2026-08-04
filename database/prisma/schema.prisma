@@ -48,6 +48,25 @@ enum KnowledgeDocumentStatus {
   ARCHIVED
 }
 
+enum KnowledgeAttachmentStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum KnowledgeAttachmentProcessingStatus {
+  UPLOADED
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+enum DocumentProcessingJobStatus {
+  QUEUED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
 model User {
   id                        String                     @id @default(uuid()) @db.Uuid
   name                      String?
@@ -67,6 +86,8 @@ model User {
   auditEvents               AuditEvent[]               @relation("AuditActor")
   knowledgeDocuments        KnowledgeDocument[]        @relation("KnowledgeDocumentAuthor")
   knowledgeDocumentVersions KnowledgeDocumentVersion[] @relation("KnowledgeDocumentVersionAuthor")
+  knowledgeAttachments      KnowledgeAttachment[]      @relation("KnowledgeAttachmentUploader")
+  documentProcessingJobs    DocumentProcessingJob[]    @relation("DocumentProcessingJobRequester")
   organizationMemberships   OrganizationMembership[]
   sessions                  Session[]
   workspaceMemberships      WorkspaceMembership[]
@@ -178,21 +199,22 @@ model OrganizationMembership {
 }
 
 model Workspace {
-  id                 String                @id @default(uuid()) @db.Uuid
-  organizationId     String                @db.Uuid
-  name               String
-  slug               String
-  status             WorkspaceStatus       @default(ACTIVE)
-  archivedAt         DateTime?             @db.Timestamptz(6)
-  deletedAt          DateTime?             @db.Timestamptz(6)
-  createdByUserId    String?               @db.Uuid
-  createdAt          DateTime              @default(now()) @db.Timestamptz(6)
-  updatedAt          DateTime              @updatedAt @db.Timestamptz(6)
-  createdBy          User?                 @relation("WorkspaceCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  organization       Organization          @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  memberships        WorkspaceMembership[]
-  auditEvents        AuditEvent[]
-  knowledgeDocuments KnowledgeDocument[]
+  id                   String                @id @default(uuid()) @db.Uuid
+  organizationId       String                @db.Uuid
+  name                 String
+  slug                 String
+  status               WorkspaceStatus       @default(ACTIVE)
+  archivedAt           DateTime?             @db.Timestamptz(6)
+  deletedAt            DateTime?             @db.Timestamptz(6)
+  createdByUserId      String?               @db.Uuid
+  createdAt            DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime              @updatedAt @db.Timestamptz(6)
+  createdBy            User?                 @relation("WorkspaceCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  organization         Organization          @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  memberships          WorkspaceMembership[]
+  auditEvents          AuditEvent[]
+  knowledgeDocuments   KnowledgeDocument[]
+  knowledgeAttachments KnowledgeAttachment[]
 
   @@index([organizationId, status])
   @@index([deletedAt])
@@ -215,8 +237,10 @@ model KnowledgeDocument {
   author       User                       @relation("KnowledgeDocumentAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   workspace    Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   versions     KnowledgeDocumentVersion[]
+  attachments  KnowledgeAttachment[]
 
   @@unique([workspaceId, slug])
+  @@unique([id, workspaceId])
   @@index([workspaceId, status, updatedAt])
   @@index([authorUserId, createdAt])
   @@map("knowledge_documents")
@@ -237,6 +261,77 @@ model KnowledgeDocumentVersion {
   @@index([documentId, createdAt])
   @@index([authorUserId, createdAt])
   @@map("knowledge_document_versions")
+}
+
+model KnowledgeAttachment {
+  id               String                              @id @default(uuid()) @db.Uuid
+  workspaceId      String                              @db.Uuid
+  documentId       String                              @db.Uuid
+  uploaderUserId   String                              @db.Uuid
+  originalFilename String
+  storageKey       String                              @unique
+  mimeType         String
+  sizeBytes        BigInt
+  sha256Checksum   String                              @db.Char(64)
+  status           KnowledgeAttachmentStatus           @default(ACTIVE)
+  processingStatus KnowledgeAttachmentProcessingStatus @default(UPLOADED)
+  archivedAt       DateTime?                           @db.Timestamptz(6)
+  version          Int                                 @default(1)
+  createdAt        DateTime                            @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime                            @updatedAt @db.Timestamptz(6)
+  document         KnowledgeDocument                   @relation(fields: [documentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict)
+  uploader         User                                @relation("KnowledgeAttachmentUploader", fields: [uploaderUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  workspace        Workspace                           @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  extractions      KnowledgeAttachmentExtraction[]
+  processingJobs   DocumentProcessingJob[]
+
+  @@unique([id, workspaceId])
+  @@index([documentId, status, createdAt])
+  @@index([workspaceId, status])
+  @@index([workspaceId, processingStatus])
+  @@index([uploaderUserId, createdAt])
+  @@map("knowledge_attachments")
+}
+
+model DocumentProcessingJob {
+  id                String                      @id @default(uuid()) @db.Uuid
+  attachmentId      String                      @db.Uuid
+  workspaceId       String                      @db.Uuid
+  requestedByUserId String                      @db.Uuid
+  parserName        String
+  parserVersion     String
+  status            DocumentProcessingJobStatus @default(QUEUED)
+  errorMessage      String?                     @db.Text
+  createdAt         DateTime                    @default(now()) @db.Timestamptz(6)
+  startedAt         DateTime?                   @db.Timestamptz(6)
+  completedAt       DateTime?                   @db.Timestamptz(6)
+  attachment        KnowledgeAttachment         @relation(fields: [attachmentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict)
+  requestedBy       User                        @relation("DocumentProcessingJobRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  extraction        KnowledgeAttachmentExtraction?
+
+  @@index([attachmentId, status, createdAt])
+  @@index([workspaceId, status, createdAt])
+  @@index([requestedByUserId, createdAt])
+  @@map("document_processing_jobs")
+}
+
+model KnowledgeAttachmentExtraction {
+  id               String                @id @default(uuid()) @db.Uuid
+  attachmentId     String                @db.Uuid
+  workspaceId      String                @db.Uuid
+  jobId            String                @unique @db.Uuid
+  extractionNumber Int
+  parserName       String
+  parserVersion    String
+  extractedText    String                @db.Text
+  textSha256       String                @db.Char(64)
+  createdAt        DateTime              @default(now()) @db.Timestamptz(6)
+  attachment       KnowledgeAttachment   @relation(fields: [attachmentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict)
+  job              DocumentProcessingJob @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([attachmentId, extractionNumber])
+  @@index([workspaceId, createdAt])
+  @@map("knowledge_attachment_extractions")
 }
 
 model WorkspaceMembership {
