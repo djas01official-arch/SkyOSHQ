@@ -67,6 +67,18 @@ enum DocumentProcessingJobStatus {
   FAILED
 }
 
+enum KnowledgeChunkSourceType {
+  MARKDOWN_DOCUMENT
+  ATTACHMENT_EXTRACTION
+}
+
+enum KnowledgeChunkingJobStatus {
+  QUEUED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
 model User {
   id                        String                     @id @default(uuid()) @db.Uuid
   name                      String?
@@ -88,6 +100,7 @@ model User {
   knowledgeDocumentVersions KnowledgeDocumentVersion[] @relation("KnowledgeDocumentVersionAuthor")
   knowledgeAttachments      KnowledgeAttachment[]      @relation("KnowledgeAttachmentUploader")
   documentProcessingJobs    DocumentProcessingJob[]    @relation("DocumentProcessingJobRequester")
+  knowledgeChunkingJobs     KnowledgeChunkingJob[]     @relation("KnowledgeChunkingJobRequester")
   organizationMemberships   OrganizationMembership[]
   sessions                  Session[]
   workspaceMemberships      WorkspaceMembership[]
@@ -199,22 +212,24 @@ model OrganizationMembership {
 }
 
 model Workspace {
-  id                   String                @id @default(uuid()) @db.Uuid
-  organizationId       String                @db.Uuid
-  name                 String
-  slug                 String
-  status               WorkspaceStatus       @default(ACTIVE)
-  archivedAt           DateTime?             @db.Timestamptz(6)
-  deletedAt            DateTime?             @db.Timestamptz(6)
-  createdByUserId      String?               @db.Uuid
-  createdAt            DateTime              @default(now()) @db.Timestamptz(6)
-  updatedAt            DateTime              @updatedAt @db.Timestamptz(6)
-  createdBy            User?                 @relation("WorkspaceCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  organization         Organization          @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  memberships          WorkspaceMembership[]
-  auditEvents          AuditEvent[]
-  knowledgeDocuments   KnowledgeDocument[]
-  knowledgeAttachments KnowledgeAttachment[]
+  id                    String                 @id @default(uuid()) @db.Uuid
+  organizationId        String                 @db.Uuid
+  name                  String
+  slug                  String
+  status                WorkspaceStatus        @default(ACTIVE)
+  archivedAt            DateTime?              @db.Timestamptz(6)
+  deletedAt             DateTime?              @db.Timestamptz(6)
+  createdByUserId       String?                @db.Uuid
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+  createdBy             User?                  @relation("WorkspaceCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  memberships           WorkspaceMembership[]
+  auditEvents           AuditEvent[]
+  knowledgeDocuments    KnowledgeDocument[]
+  knowledgeAttachments  KnowledgeAttachment[]
+  knowledgeChunkingJobs KnowledgeChunkingJob[]
+  knowledgeChunkSets    KnowledgeChunkSet[]
 
   @@index([organizationId, status])
   @@index([deletedAt])
@@ -247,15 +262,17 @@ model KnowledgeDocument {
 }
 
 model KnowledgeDocumentVersion {
-  id              String            @id @default(uuid()) @db.Uuid
-  documentId      String            @db.Uuid
+  id              String                 @id @default(uuid()) @db.Uuid
+  documentId      String                 @db.Uuid
   versionNumber   Int
   title           String
-  markdownContent String            @db.Text
-  authorUserId    String            @db.Uuid
-  createdAt       DateTime          @default(now()) @db.Timestamptz(6)
-  document        KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  author          User              @relation("KnowledgeDocumentVersionAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  markdownContent String                 @db.Text
+  authorUserId    String                 @db.Uuid
+  createdAt       DateTime               @default(now()) @db.Timestamptz(6)
+  document        KnowledgeDocument      @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  author          User                   @relation("KnowledgeDocumentVersionAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunkingJobs    KnowledgeChunkingJob[] @relation("KnowledgeChunkingJobDocumentVersion")
+  chunkSets       KnowledgeChunkSet[]    @relation("KnowledgeChunkSetDocumentVersion")
 
   @@unique([documentId, versionNumber])
   @@index([documentId, createdAt])
@@ -294,19 +311,19 @@ model KnowledgeAttachment {
 }
 
 model DocumentProcessingJob {
-  id                String                      @id @default(uuid()) @db.Uuid
-  attachmentId      String                      @db.Uuid
-  workspaceId       String                      @db.Uuid
-  requestedByUserId String                      @db.Uuid
+  id                String                         @id @default(uuid()) @db.Uuid
+  attachmentId      String                         @db.Uuid
+  workspaceId       String                         @db.Uuid
+  requestedByUserId String                         @db.Uuid
   parserName        String
   parserVersion     String
-  status            DocumentProcessingJobStatus @default(QUEUED)
-  errorMessage      String?                     @db.Text
-  createdAt         DateTime                    @default(now()) @db.Timestamptz(6)
-  startedAt         DateTime?                   @db.Timestamptz(6)
-  completedAt       DateTime?                   @db.Timestamptz(6)
-  attachment        KnowledgeAttachment         @relation(fields: [attachmentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict)
-  requestedBy       User                        @relation("DocumentProcessingJobRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  status            DocumentProcessingJobStatus    @default(QUEUED)
+  errorMessage      String?                        @db.Text
+  createdAt         DateTime                       @default(now()) @db.Timestamptz(6)
+  startedAt         DateTime?                      @db.Timestamptz(6)
+  completedAt       DateTime?                      @db.Timestamptz(6)
+  attachment        KnowledgeAttachment            @relation(fields: [attachmentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict)
+  requestedBy       User                           @relation("DocumentProcessingJobRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   extraction        KnowledgeAttachmentExtraction?
 
   @@index([attachmentId, status, createdAt])
@@ -316,22 +333,99 @@ model DocumentProcessingJob {
 }
 
 model KnowledgeAttachmentExtraction {
-  id               String                @id @default(uuid()) @db.Uuid
-  attachmentId     String                @db.Uuid
-  workspaceId      String                @db.Uuid
-  jobId            String                @unique @db.Uuid
+  id               String                 @id @default(uuid()) @db.Uuid
+  attachmentId     String                 @db.Uuid
+  workspaceId      String                 @db.Uuid
+  jobId            String                 @unique @db.Uuid
   extractionNumber Int
   parserName       String
   parserVersion    String
-  extractedText    String                @db.Text
-  textSha256       String                @db.Char(64)
-  createdAt        DateTime              @default(now()) @db.Timestamptz(6)
-  attachment       KnowledgeAttachment   @relation(fields: [attachmentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict)
-  job              DocumentProcessingJob @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  extractedText    String                 @db.Text
+  textSha256       String                 @db.Char(64)
+  createdAt        DateTime               @default(now()) @db.Timestamptz(6)
+  attachment       KnowledgeAttachment    @relation(fields: [attachmentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict)
+  job              DocumentProcessingJob  @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunkingJobs     KnowledgeChunkingJob[] @relation("KnowledgeChunkingJobAttachmentExtraction")
+  chunkSets        KnowledgeChunkSet[]    @relation("KnowledgeChunkSetAttachmentExtraction")
 
   @@unique([attachmentId, extractionNumber])
   @@index([workspaceId, createdAt])
   @@map("knowledge_attachment_extractions")
+}
+
+model KnowledgeChunkingJob {
+  id                     String                         @id @default(uuid()) @db.Uuid
+  workspaceId            String                         @db.Uuid
+  requestedByUserId      String                         @db.Uuid
+  sourceType             KnowledgeChunkSourceType
+  sourceId               String                         @db.Uuid
+  sourceVersion          Int
+  documentVersionId      String?                        @db.Uuid
+  attachmentExtractionId String?                        @db.Uuid
+  strategyKey            String
+  strategyVersion        String
+  status                 KnowledgeChunkingJobStatus     @default(QUEUED)
+  errorMessage           String?                        @db.Text
+  createdAt              DateTime                       @default(now()) @db.Timestamptz(6)
+  startedAt              DateTime?                      @db.Timestamptz(6)
+  completedAt            DateTime?                      @db.Timestamptz(6)
+  workspace              Workspace                      @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  requestedBy            User                           @relation("KnowledgeChunkingJobRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  documentVersion        KnowledgeDocumentVersion?      @relation("KnowledgeChunkingJobDocumentVersion", fields: [documentVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  attachmentExtraction   KnowledgeAttachmentExtraction? @relation("KnowledgeChunkingJobAttachmentExtraction", fields: [attachmentExtractionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunkSet               KnowledgeChunkSet?
+
+  @@index([workspaceId, status, createdAt])
+  @@index([sourceType, sourceId, sourceVersion, createdAt])
+  @@index([requestedByUserId, createdAt])
+  @@index([documentVersionId])
+  @@index([attachmentExtractionId])
+  @@map("knowledge_chunking_jobs")
+}
+
+model KnowledgeChunkSet {
+  id                     String                         @id @default(uuid()) @db.Uuid
+  workspaceId            String                         @db.Uuid
+  sourceType             KnowledgeChunkSourceType
+  sourceId               String                         @db.Uuid
+  sourceVersion          Int
+  documentVersionId      String?                        @db.Uuid
+  attachmentExtractionId String?                        @db.Uuid
+  strategyKey            String
+  strategyVersion        String
+  chunkCount             Int
+  createdByJobId         String                         @unique @db.Uuid
+  createdAt              DateTime                       @default(now()) @db.Timestamptz(6)
+  workspace              Workspace                      @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdByJob           KnowledgeChunkingJob           @relation(fields: [createdByJobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  documentVersion        KnowledgeDocumentVersion?      @relation("KnowledgeChunkSetDocumentVersion", fields: [documentVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  attachmentExtraction   KnowledgeAttachmentExtraction? @relation("KnowledgeChunkSetAttachmentExtraction", fields: [attachmentExtractionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunks                 KnowledgeChunk[]
+
+  @@index([workspaceId, createdAt])
+  @@index([sourceType, sourceId, sourceVersion, createdAt])
+  @@index([strategyKey, strategyVersion])
+  @@index([documentVersionId])
+  @@index([attachmentExtractionId])
+  @@map("knowledge_chunk_sets")
+}
+
+model KnowledgeChunk {
+  id             String            @id @default(uuid()) @db.Uuid
+  chunkSetId     String            @db.Uuid
+  ordinal        Int
+  text           String            @db.Text
+  characterStart Int?
+  characterEnd   Int?
+  tokenEstimate  Int
+  sha256         String            @db.Char(64)
+  metadata       Json              @default("{}") @db.JsonB
+  createdAt      DateTime          @default(now()) @db.Timestamptz(6)
+  chunkSet       KnowledgeChunkSet @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([chunkSetId, ordinal])
+  @@index([chunkSetId])
+  @@map("knowledge_chunks")
 }
 
 model WorkspaceMembership {

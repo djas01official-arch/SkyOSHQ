@@ -6,6 +6,7 @@ import {
   getKnowledgeDocument,
 } from '../../../../../database/knowledge/knowledge-documents';
 import { listKnowledgeAttachments } from '../../../../../database/knowledge/knowledge-attachments';
+import { getKnowledgeChunkingOverview } from '../../../../../database/knowledge/knowledge-chunking';
 import {
   KnowledgeAttachmentProcessingStatus,
   KnowledgeAttachmentStatus,
@@ -22,9 +23,14 @@ import {
   restoreKnowledgeAttachmentAction,
   uploadKnowledgeAttachmentAction,
 } from '@/app/knowledge/attachment-actions';
+import {
+  chunkKnowledgeAttachmentAction,
+  chunkKnowledgeDocumentAction,
+} from '@/app/knowledge/chunking-actions';
 import { KnowledgeAttachmentLifecycle } from '@/components/knowledge/knowledge-attachment-lifecycle';
 import { KnowledgeAttachmentProcessing } from '@/components/knowledge/knowledge-attachment-processing';
 import { KnowledgeAttachmentUpload } from '@/components/knowledge/knowledge-attachment-upload';
+import { KnowledgeChunkingControl } from '@/components/knowledge/knowledge-chunking-control';
 import { KnowledgeDocumentLifecycle } from '@/components/knowledge/knowledge-document-lifecycle';
 import { MarkdownDocument } from '@/components/knowledge/markdown-document';
 import { Card } from '@/components/ui/card';
@@ -68,6 +74,26 @@ function isProcessableAttachment(mimeType: string): boolean {
   );
 }
 
+type ChunkingSummary = Readonly<{
+  chunkSet: { chunkCount: number } | null;
+  errorMessage: string | null;
+  sourceVersion: number;
+  status: string;
+}>;
+
+function describeChunking(
+  summary: ChunkingSummary | null | undefined,
+  sourceLabel: string,
+): string {
+  if (!summary) return `Not processed for the current ${sourceLabel}.`;
+  if (summary.status === 'QUEUED') return 'Queued.';
+  if (summary.status === 'PROCESSING') return 'Processing.';
+  if (summary.status === 'FAILED') return `Failed · ${summary.errorMessage ?? 'Chunking failed.'}`;
+  return summary.chunkSet
+    ? `${summary.chunkSet.chunkCount} chunks · ${sourceLabel} ${summary.sourceVersion}`
+    : 'Processing result unavailable.';
+}
+
 export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumentPageProps) {
   const [{ slug }, user, context] = await Promise.all([
     params,
@@ -83,10 +109,12 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
   const canWrite = hasWorkspaceCapability(workspace.role, 'knowledge.write');
   let document;
   let attachments;
+  let chunking;
   try {
-    [document, attachments] = await Promise.all([
+    [document, attachments, chunking] = await Promise.all([
       getKnowledgeDocument(prisma, user.id, workspace.id, slug, true),
       listKnowledgeAttachments(prisma, user.id, workspace.id, slug, canWrite),
+      getKnowledgeChunkingOverview(prisma, user.id, workspace.id, slug),
     ]);
   } catch (error) {
     if (error instanceof KnowledgeNotFoundError) {
@@ -154,6 +182,21 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
         </p>
       ) : null}
       <Card className="mt-6">
+        <div className="mb-5 flex flex-col justify-between gap-3 border-b border-border pb-4 sm:flex-row sm:items-center">
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">Markdown chunks</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {describeChunking(chunking.document, 'version')}
+            </p>
+          </div>
+          {canWrite && !isArchived ? (
+            <KnowledgeChunkingControl
+              action={chunkKnowledgeDocumentAction}
+              label={chunking.document?.chunkSet ? 'Reprocess chunks' : 'Process chunks'}
+              slug={document.slug}
+            />
+          ) : null}
+        </div>
         <MarkdownDocument content={document.content} />
       </Card>
 
@@ -181,6 +224,7 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
               const latestExtraction = attachment.extractions[0];
               const latestJob = attachment.processingJobs[0];
               const isProcessable = isProcessableAttachment(attachment.mimeType);
+              const attachmentChunking = chunking.attachments[attachment.id];
 
               return (
                 <div
@@ -195,6 +239,11 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
                       {formatFileSize(attachment.sizeBytes)} · {uploader} · Version{' '}
                       {attachment.version}
                     </p>
+                    {latestExtraction ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Chunks: {describeChunking(attachmentChunking, 'extraction')}
+                      </p>
+                    ) : null}
                     <p className="mt-1 text-xs text-muted-foreground">
                       <span className="font-medium text-foreground">
                         {formatProcessingStatus(attachment.processingStatus)}
@@ -229,6 +278,14 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
                             ? 'Reprocess'
                             : 'Process'
                         }
+                        slug={document.slug}
+                      />
+                    ) : null}
+                    {canWrite && !isArchived && latestExtraction ? (
+                      <KnowledgeChunkingControl
+                        action={chunkKnowledgeAttachmentAction}
+                        attachmentId={attachment.id}
+                        label={attachmentChunking?.chunkSet ? 'Reprocess chunks' : 'Process chunks'}
                         slug={document.slug}
                       />
                     ) : null}

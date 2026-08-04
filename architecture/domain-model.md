@@ -23,6 +23,9 @@ Access is explicit, deny-by-default, and evaluated at the smallest applicable sc
 | Knowledge attachment       | Workspace-scoped metadata and a protected binary object attached to one knowledge document.      |
 | Document processing job    | Durable request to extract plain text from one PDF or DOCX attachment.                           |
 | Attachment extraction      | Immutable, parser-versioned plain-text result produced by one successful processing job.         |
+| Knowledge chunking job     | Durable, audited request to chunk one pinned Markdown version or attachment extraction.          |
+| Knowledge chunk set        | Immutable, strategy-versioned collection linked to one exact source version.                     |
+| Knowledge chunk            | One deterministic ordinal text range within an immutable chunk set.                              |
 | Membership                 | A scoped, revocable relationship between a user and an organization or workspace.                |
 | Role                       | A named, built-in bundle of permissions assigned through a membership.                           |
 | Permission                 | A stable capability key evaluated against either organization or workspace scope.                |
@@ -217,6 +220,66 @@ Every persisted record has an immutable opaque `id`, `createdAt`, and `updatedAt
 
 **Lifecycle:** successful initial processing creates extraction 1. Reprocessing, including after a parser upgrade, creates the next extraction number and never overwrites history. Rows cannot be updated or deleted through application services, and database triggers reject both operations.
 
+### KnowledgeChunkingJob
+
+**Responsibility:** coordinate one deterministic chunking attempt against an immutable source version.
+
+| Attribute                | Notes                                                                                            |
+| ------------------------ | ------------------------------------------------------------------------------------------------ |
+| `id`                     | Immutable job UUID and audit target.                                                             |
+| `workspaceId`            | Immutable effective workspace scope.                                                             |
+| `requestedByUserId`      | Actor that held `knowledge.write` at request time.                                               |
+| `sourceType`             | `markdown_document` or `attachment_extraction`.                                                  |
+| `sourceId`               | Document id for Markdown or attachment id for extracted text.                                    |
+| `sourceVersion`          | Document version number or attachment extraction number.                                         |
+| `documentVersionId`      | Exact immutable Markdown version when `sourceType` is `markdown_document`; otherwise absent.     |
+| `attachmentExtractionId` | Exact immutable extraction when `sourceType` is `attachment_extraction`; otherwise absent.       |
+| `strategyKey`            | Application-owned strategy identifier captured at request time.                                  |
+| `strategyVersion`        | Exact strategy version captured at request time.                                                 |
+| `status`                 | `queued`, `processing`, `succeeded`, or `failed`.                                                |
+| `errorMessage`           | Safe terminal failure description; internal exception details are not persisted.                 |
+| lifecycle timestamps     | `createdAt`, optional `startedAt`, and optional `completedAt`, constrained by the current state. |
+
+**Relationships:** belongs to one workspace, requester, and exactly one typed source-version row. A successful job creates exactly one chunk set; a failed job creates none.
+
+**Lifecycle:** an effective `knowledge.write` request pins the current document version or latest successful attachment extraction and creates a queued job with its request event. A worker claim records `processing` and its start event. Before chunking, the worker re-checks effective workspace read access and confirms that the organization, workspace, document, and optional attachment remain active. Success atomically appends the entire set, marks the job successful, and records success. Failure records a terminal safe message and failure event without partial outputs. Job identity and strategy cannot change, transitions cannot move backward, and jobs are retained.
+
+### KnowledgeChunkSet
+
+**Responsibility:** preserve one immutable, traceable result from a specific source and chunking strategy version.
+
+| Attribute         | Notes                                                                                         |
+| ----------------- | --------------------------------------------------------------------------------------------- |
+| `id`              | Immutable chunk-set UUID.                                                                     |
+| source identity   | `sourceType`, `sourceId`, `sourceVersion`, and the matching typed source-version foreign key. |
+| `workspaceId`     | Immutable workspace scope, database-validated against the source.                             |
+| strategy identity | Immutable `strategyKey` and `strategyVersion`.                                                |
+| `chunkCount`      | Positive declared count that must equal the number of persisted child chunks at commit.       |
+| `createdByJobId`  | Unique successful job that created the set.                                                   |
+| `createdAt`       | Append timestamp; sets have no update lifecycle.                                              |
+
+**Relationships:** belongs to one exact `KnowledgeDocumentVersion` or `KnowledgeAttachmentExtraction`, one workspace, and one creating job; contains one or more chunks. Database validation requires the set's source, scope, strategy, and version to exactly match its creating processing job.
+
+**Lifecycle:** every successful processing or reprocessing attempt appends a new set, even when source text and strategy are identical. Previous sets remain readable with `knowledge.read` for audit, verification, and future migrations. Application services expose no overwrite or delete path, and database triggers reject both operations.
+
+### KnowledgeChunk
+
+**Responsibility:** store one deterministic text unit within a chunk set without mutating its source.
+
+| Attribute                         | Notes                                                                                       |
+| --------------------------------- | ------------------------------------------------------------------------------------------- |
+| `id`                              | Immutable chunk UUID.                                                                       |
+| `chunkSetId`                      | Immutable parent set.                                                                       |
+| `ordinal`                         | Zero-based deterministic sequence, unique within the set.                                   |
+| `text`                            | Exact, nonempty source slice; source Markdown/extraction text remains unchanged.            |
+| `characterStart` / `characterEnd` | Start-inclusive and end-exclusive UTF-16 source offsets where available.                    |
+| `tokenEstimate`                   | Positive deterministic estimate for planning, not a model tokenizer result.                 |
+| `sha256`                          | Lowercase SHA-256 of the UTF-8 chunk text.                                                  |
+| `metadata`                        | Small strategy-owned JSON such as selected boundary type; not exposed as raw UI debug data. |
+| `createdAt`                       | Append timestamp; chunks have no update lifecycle.                                          |
+
+**Strategy boundary:** strategies implement a replaceable application interface and are selected only from an application-owned registry. MVP `paragraph-window:1.0.0` emits non-overlapping ranges of at most 1,000 UTF-16 code units, preferring paragraph, line, then whitespace boundaries after 600 units. It trims boundary whitespace while retaining exact adjusted offsets, uses SHA-256 over UTF-8 text, and estimates tokens as `ceil(Unicode code points / 4)`. Identical source text and strategy version therefore produce identical ordered text, offsets, estimates, checksums, and metadata. Empty or whitespace-only text is a meaningful failure, never an empty successful set.
+
 ### WorkspaceMembership
 
 **Responsibility:** grant one organization member a role for one workspace's product scope.
@@ -302,6 +365,15 @@ erDiagram
     USER ||--o{ DOCUMENT_PROCESSING_JOB : requests
     KNOWLEDGE_ATTACHMENT ||--o{ KNOWLEDGE_ATTACHMENT_EXTRACTION : extracts
     DOCUMENT_PROCESSING_JOB ||--o| KNOWLEDGE_ATTACHMENT_EXTRACTION : produces
+    USER ||--o{ KNOWLEDGE_CHUNKING_JOB : requests
+    WORKSPACE ||--o{ KNOWLEDGE_CHUNKING_JOB : scopes
+    KNOWLEDGE_DOCUMENT_VERSION o|--o{ KNOWLEDGE_CHUNKING_JOB : sources
+    KNOWLEDGE_ATTACHMENT_EXTRACTION o|--o{ KNOWLEDGE_CHUNKING_JOB : sources
+    KNOWLEDGE_CHUNKING_JOB ||--o| KNOWLEDGE_CHUNK_SET : produces
+    WORKSPACE ||--o{ KNOWLEDGE_CHUNK_SET : scopes
+    KNOWLEDGE_DOCUMENT_VERSION o|--o{ KNOWLEDGE_CHUNK_SET : versions
+    KNOWLEDGE_ATTACHMENT_EXTRACTION o|--o{ KNOWLEDGE_CHUNK_SET : versions
+    KNOWLEDGE_CHUNK_SET ||--|{ KNOWLEDGE_CHUNK : contains
     USER ||--o{ WORKSPACE_MEMBERSHIP : holds
     WORKSPACE ||--o{ WORKSPACE_MEMBERSHIP : has
     USER ||--o{ AUDIT_EVENT : performs
@@ -393,6 +465,39 @@ erDiagram
         string extractedText
         string textSha256
         datetime createdAt
+    }
+    KNOWLEDGE_CHUNKING_JOB {
+        string id PK
+        string workspaceId FK
+        string requestedByUserId FK
+        string sourceType
+        string sourceId
+        int sourceVersion
+        string strategyKey
+        string strategyVersion
+        string status
+    }
+    KNOWLEDGE_CHUNK_SET {
+        string id PK
+        string workspaceId FK
+        string sourceType
+        string sourceId
+        int sourceVersion
+        string strategyKey
+        string strategyVersion
+        int chunkCount
+        string createdByJobId FK
+    }
+    KNOWLEDGE_CHUNK {
+        string id PK
+        string chunkSetId FK
+        int ordinal
+        string text
+        int characterStart
+        int characterEnd
+        int tokenEstimate
+        string sha256
+        json metadata
     }
     WORKSPACE_MEMBERSHIP {
         string id PK
@@ -577,10 +682,18 @@ These rules must be enforced transactionally by any future persistence and autho
 35. Each successful job appends exactly one immutable extraction with the next attachment-local extraction number. Reprocessing never updates or deletes earlier extracted text, even when the parser version changes.
 36. Extraction creation, the job's successful terminal state, the attachment's `processed` state, and the success audit event commit atomically. Failure state and its failure audit event also commit atomically.
 37. Parser selection is application-owned and captured on the job and extraction. Deterministic output normalization is part of the parser version; clients cannot supply or override parser identity.
+38. Chunking requests require effective `knowledge.write`; chunk-set and chunk metadata reads require effective `knowledge.read` and always constrain the query by workspace.
+39. A chunking job pins exactly one immutable source row: the current `KnowledgeDocumentVersion` or latest successful `KnowledgeAttachmentExtraction`. Its logical source id, source version, workspace, requester, typed source reference, and strategy identity cannot change.
+40. Only active, readable workspace content is chunkable. The organization, workspace, document, and optional attachment must be active when the worker runs; parent archival or ineffective membership produces a terminal failure and no output set.
+41. A successful chunking job creates exactly one nonempty immutable set. Re-chunking always creates a new job and set; old sets and chunks remain queryable and cannot be updated or deleted through application services or database writes.
+42. Every set's source identity and strategy identity must equal its creating job, and its declared positive `chunkCount` must equal the persisted child-row count at transaction commit.
+43. For identical source text and strategy key/version, ordered chunk text, ordinals, offsets, token estimates, checksums, and metadata are deterministic. Strategy behavior changes require a new version; clients cannot choose or override strategy identity.
+44. Empty or whitespace-only source text fails with a safe meaningful terminal state, a failure audit event, and no chunk set or partial chunk rows.
+45. Chunking request and start state each commit with the matching audit event. Successful set and chunk creation, successful terminal state, and success audit event commit atomically; failure state and its failure audit event also commit atomically.
 
 ## Production-readiness audit requirement
 
-The foundation persists an append-only audit event for workspace creation, organization and workspace archive or restoration, organization and workspace role changes, membership suspension, resumption, or revocation, ownership transfer, knowledge document creation and lifecycle changes, attachment upload, archive, or restoration, and document-processing request, start, success, or failure. Each event records the acting user, organization scope, optional workspace scope, action, target, timestamp, and structured non-secret metadata. The privileged service writes the event in the same transaction as the metadata state transition, so either both writes commit or both roll back. New privileged operations must join this audited service boundary before release.
+The foundation persists an append-only audit event for workspace creation, organization and workspace archive or restoration, organization and workspace role changes, membership suspension, resumption, or revocation, ownership transfer, knowledge document creation and lifecycle changes, attachment upload, archive, or restoration, document-processing request, start, success, or failure, and chunking request, start, success, or failure. Each event records the acting user, organization scope, optional workspace scope, action, target, timestamp, and structured non-secret metadata. The privileged service writes the event in the same transaction as the metadata state transition, so either both writes commit or both roll back. New privileged operations must join this audited service boundary before release.
 
 ## Assumptions
 
@@ -594,20 +707,21 @@ The foundation persists an append-only audit event for workspace creation, organ
 
 ## Risks and unresolved decisions
 
-| Area                     | Open decision / risk                                                                                                                                                                                                                                                                       |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Identity lifecycle       | Define how external identities, verified email, invitations, SCIM, and account recovery map to `User` and membership activation.                                                                                                                                                           |
-| Owner recovery           | Define a break-glass or support-controlled owner-recovery process; the invariant prevents accidental loss but does not solve lost-owner scenarios.                                                                                                                                         |
-| Deletion and retention   | Specify legal retention, anonymization, slug reuse, audit-event retention, and whether records are ever hard-deleted.                                                                                                                                                                      |
-| Service actors           | Decide whether automation uses `User`, a separate service-account entity, or delegated tokens. Do not overload human membership semantics without a policy decision.                                                                                                                       |
-| Cross-workspace features | Future global search, analytics, and AI may need an explicit aggregate permission model; they must not bypass workspace checks.                                                                                                                                                            |
-| Resource-level sharing   | Document-level, task-level, guest, external collaborator, and link-sharing access are intentionally excluded and should be modeled separately.                                                                                                                                             |
-| Role evolution           | Define migration/versioning rules before granting new permissions to existing roles, particularly for sensitive future domains.                                                                                                                                                            |
-| Knowledge lifecycle      | Define formal retention, export, legal-hold, and immutable-history growth policies before expanding document capabilities. Future Markdown extensions must preserve the current sanitization boundary.                                                                                     |
-| Binary storage           | Local disk is development-only. Production requires durable S3-compatible storage, encryption and access policy, coordinated database/object backups, orphan reconciliation, and lifecycle retention.                                                                                      |
-| File security            | Signature checks reduce accidental spoofing but are not malware detection. Virus scanning, content disarm, quarantine, and administrator incident workflows remain required before untrusted production uploads.                                                                           |
-| Upload consistency       | PostgreSQL and object storage cannot commit atomically. Compensating deletion handles ordinary failures, but crash recovery needs a scheduled reconciliation process for staged or missing objects.                                                                                        |
-| Document processing      | PDF text extraction is layout-lossy and image-only PDFs yield empty text without OCR. Production needs queue delivery/retry policy, worker resource limits and sandboxing, parser-version retention, malformed-file hardening, and operational recovery for jobs stranded in `processing`. |
+| Area                     | Open decision / risk                                                                                                                                                                                                                                                                                                                           |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Identity lifecycle       | Define how external identities, verified email, invitations, SCIM, and account recovery map to `User` and membership activation.                                                                                                                                                                                                               |
+| Owner recovery           | Define a break-glass or support-controlled owner-recovery process; the invariant prevents accidental loss but does not solve lost-owner scenarios.                                                                                                                                                                                             |
+| Deletion and retention   | Specify legal retention, anonymization, slug reuse, audit-event retention, and whether records are ever hard-deleted.                                                                                                                                                                                                                          |
+| Service actors           | Decide whether automation uses `User`, a separate service-account entity, or delegated tokens. Do not overload human membership semantics without a policy decision.                                                                                                                                                                           |
+| Cross-workspace features | Future global search, analytics, and AI may need an explicit aggregate permission model; they must not bypass workspace checks.                                                                                                                                                                                                                |
+| Resource-level sharing   | Document-level, task-level, guest, external collaborator, and link-sharing access are intentionally excluded and should be modeled separately.                                                                                                                                                                                                 |
+| Role evolution           | Define migration/versioning rules before granting new permissions to existing roles, particularly for sensitive future domains.                                                                                                                                                                                                                |
+| Knowledge lifecycle      | Define formal retention, export, legal-hold, and immutable-history growth policies before expanding document capabilities. Future Markdown extensions must preserve the current sanitization boundary.                                                                                                                                         |
+| Binary storage           | Local disk is development-only. Production requires durable S3-compatible storage, encryption and access policy, coordinated database/object backups, orphan reconciliation, and lifecycle retention.                                                                                                                                          |
+| File security            | Signature checks reduce accidental spoofing but are not malware detection. Virus scanning, content disarm, quarantine, and administrator incident workflows remain required before untrusted production uploads.                                                                                                                               |
+| Upload consistency       | PostgreSQL and object storage cannot commit atomically. Compensating deletion handles ordinary failures, but crash recovery needs a scheduled reconciliation process for staged or missing objects.                                                                                                                                            |
+| Document processing      | PDF text extraction is layout-lossy and image-only PDFs yield empty text without OCR. Production needs queue delivery/retry policy, worker resource limits and sandboxing, parser-version retention, malformed-file hardening, and operational recovery for jobs stranded in `processing`.                                                     |
+| Knowledge chunking       | The MVP character-window strategy and token estimate are deterministic but not model-tokenizer-aware or linguistically optimized. Production needs queue retry/idempotency policy, stranded-job recovery, strategy-version retention, scale limits for large histories, and an explicit retention/migration policy before downstream indexing. |
 
 ## Extension path
 

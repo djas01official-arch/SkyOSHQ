@@ -20,6 +20,10 @@ export const AuditAction = {
   KNOWLEDGE_ATTACHMENT_PROCESSING_STARTED: 'knowledge_attachment.processing_started',
   KNOWLEDGE_ATTACHMENT_PROCESSING_SUCCEEDED: 'knowledge_attachment.processing_succeeded',
   KNOWLEDGE_ATTACHMENT_PROCESSING_FAILED: 'knowledge_attachment.processing_failed',
+  KNOWLEDGE_CHUNKING_REQUESTED: 'knowledge_chunking.requested',
+  KNOWLEDGE_CHUNKING_STARTED: 'knowledge_chunking.started',
+  KNOWLEDGE_CHUNKING_SUCCEEDED: 'knowledge_chunking.succeeded',
+  KNOWLEDGE_CHUNKING_FAILED: 'knowledge_chunking.failed',
   WORKSPACE_CREATED: 'workspace.created',
   WORKSPACE_ARCHIVED: 'workspace.archived',
   WORKSPACE_RESTORED: 'workspace.restored',
@@ -37,6 +41,7 @@ export const AuditTargetType = {
   WORKSPACE_MEMBERSHIP: 'workspace_membership',
   KNOWLEDGE_DOCUMENT: 'knowledge_document',
   KNOWLEDGE_ATTACHMENT: 'knowledge_attachment',
+  KNOWLEDGE_CHUNKING_JOB: 'knowledge_chunking_job',
 } as const;
 
 type AuditEventWriter = Pick<PrismaClient, 'auditEvent'>;

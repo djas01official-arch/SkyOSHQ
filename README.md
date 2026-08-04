@@ -144,6 +144,19 @@ pnpm --filter @skyos/web dev
 
 OCR, embeddings, vector search, AI, PDF/DOCX rendering, and asynchronous production-worker infrastructure remain intentionally excluded.
 
+## Knowledge chunking foundation
+
+Knowledge writers can process the current native Markdown version or the latest successful PDF/DOCX extraction into deterministic text chunks. Requests use the same durable queue boundary as document processing; development executes synchronously, while the job and audit lifecycle remains ready for a production worker.
+
+- The application-owned `paragraph-window` strategy version `1.0.0` creates non-overlapping chunks of at most 1,000 JavaScript UTF-16 code units. It prefers paragraph, line, then whitespace boundaries after 600 code units and uses a hard boundary only when necessary.
+- Each chunk stores a zero-based ordinal, exact start-inclusive/end-exclusive source offsets, a dependency-free Unicode-code-point estimate of one token per four characters, a lowercase SHA-256 checksum of its UTF-8 text, and small strategy metadata.
+- A chunk set pins either an immutable `KnowledgeDocumentVersion` or an immutable `KnowledgeAttachmentExtraction`, plus the exact strategy key and version. Reprocessing always appends a new set; database triggers reject changes or deletion of old sets and chunks.
+- Only active documents and active attachments in an effective workspace can be processed. `knowledge.write` is required to request processing, while `knowledge.read` is required to read chunk-set metadata and history.
+- Request, start, success, and failure are audited. Successful set creation, all chunks, the terminal job state, and the success event commit in one transaction. Empty or whitespace-only extraction text creates a safe audited failed job and no partial set.
+- The Knowledge detail page shows the latest status and count for the current Markdown version and each attachment's latest extraction, with Process/Reprocess controls for writers. Raw chunks and strategy debug metadata are not exposed in the UI.
+
+Pulling this change requires `pnpm db:migrate`. Embeddings, vector databases, semantic search, RAG, LLM calls, OCR, and summarization remain excluded.
+
 ## Repository structure
 
 - `apps/` — user-facing applications
