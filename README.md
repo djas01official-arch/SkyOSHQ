@@ -109,6 +109,17 @@ Privileged tenancy operations write immutable `AuditEvent` records in the same d
 
 Audit events are append-only. SkyOS application services do not expose update or delete operations, and database triggers reject row updates and deletes. This is an operational audit foundation only; there is no audit UI yet. Run `pnpm db:test` to apply migrations to the dedicated test database and verify audit creation, rollback atomicity, and immutability.
 
+## Knowledge foundation
+
+`/knowledge` is the first workspace-scoped vertical slice. Effective workspace members can read active Markdown documents; viewers are read-only, while members, admins, and owners may create, edit, archive, and restore documents. Organization-level administration alone does not grant document access.
+
+- Documents belong to exactly one workspace and are never moved between workspaces.
+- Normal lists exclude archived documents. An authorized user may restore an archived document through its detail URL.
+- Create, update, archive, and restore operations are version-checked and write immutable audit events in the same transaction.
+- Markdown is rendered as sanitized CommonMark. Raw HTML is discarded, unsafe URL schemes are rejected, remote images are not loaded, and external HTTP(S) links open with `noopener noreferrer nofollow`.
+- The Knowledge page searches active document titles and Markdown source with a PostgreSQL full-text GIN index. Search always uses the effective selected workspace and requires `knowledge.read`.
+- File uploads, rendering extensions, embeddings, vector search, RAG, AI generation, comments, and sharing are intentionally not included.
+
 ## Repository structure
 
 - `apps/` — user-facing applications

@@ -23,9 +23,9 @@ export async function getCurrentOrganizationContext(): Promise<OrganizationConte
   });
 }
 
-type WorkspaceCapability = 'ai.use' | 'knowledge.read' | 'tasks.read';
+export type WorkspaceCapability = 'ai.use' | 'knowledge.read' | 'knowledge.write' | 'tasks.read';
 
-function hasWorkspaceCapability(
+export function hasWorkspaceCapability(
   role: WorkspaceRole | null,
   capability: WorkspaceCapability,
 ): boolean {
@@ -34,6 +34,10 @@ function hasWorkspaceCapability(
   }
 
   if (capability === 'ai.use') {
+    return role !== WorkspaceRole.VIEWER;
+  }
+
+  if (capability === 'knowledge.write') {
     return role !== WorkspaceRole.VIEWER;
   }
 

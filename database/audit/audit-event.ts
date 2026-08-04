@@ -8,6 +8,10 @@ export const AuditAction = {
   ORGANIZATION_MEMBERSHIP_RESUMED: 'organization_membership.resumed',
   ORGANIZATION_MEMBERSHIP_REVOKED: 'organization_membership.revoked',
   ORGANIZATION_OWNERSHIP_TRANSFERRED: 'organization.ownership_transferred',
+  KNOWLEDGE_DOCUMENT_CREATED: 'knowledge_document.created',
+  KNOWLEDGE_DOCUMENT_UPDATED: 'knowledge_document.updated',
+  KNOWLEDGE_DOCUMENT_ARCHIVED: 'knowledge_document.archived',
+  KNOWLEDGE_DOCUMENT_RESTORED: 'knowledge_document.restored',
   WORKSPACE_CREATED: 'workspace.created',
   WORKSPACE_ARCHIVED: 'workspace.archived',
   WORKSPACE_RESTORED: 'workspace.restored',
@@ -23,6 +27,7 @@ export const AuditTargetType = {
   ORGANIZATION_MEMBERSHIP: 'organization_membership',
   WORKSPACE: 'workspace',
   WORKSPACE_MEMBERSHIP: 'workspace_membership',
+  KNOWLEDGE_DOCUMENT: 'knowledge_document',
 } as const;
 
 type AuditEventWriter = Pick<PrismaClient, 'auditEvent'>;

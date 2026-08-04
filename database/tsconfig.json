@@ -9,6 +9,7 @@
     "audit/**/*.ts",
     "auth/**/*.ts",
     "context/**/*.ts",
+    "knowledge/**/*.ts",
     "operations/**/*.ts",
     "prisma/seed.ts",
     "scripts/**/*.ts",
