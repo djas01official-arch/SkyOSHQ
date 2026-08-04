@@ -1,0 +1,187 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum OrganizationStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum WorkspaceStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum MembershipStatus {
+  ACTIVE
+  SUSPENDED
+  REVOKED
+}
+
+enum OrganizationRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+model User {
+  id                      String                   @id @default(uuid()) @db.Uuid
+  name                    String?
+  email                   String?                  @unique
+  emailVerified           DateTime?                @db.Timestamptz(6)
+  image                   String?
+  passwordHash            String?                  @db.Text
+  identitySubject         String?                  @unique
+  displayName             String?
+  status                  UserStatus               @default(ACTIVE)
+  deletedAt               DateTime?                @db.Timestamptz(6)
+  createdAt               DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime                 @updatedAt @db.Timestamptz(6)
+  createdOrganizations    Organization[]           @relation("OrganizationCreator")
+  createdWorkspaces       Workspace[]              @relation("WorkspaceCreator")
+  accounts                Account[]
+  organizationMemberships OrganizationMembership[]
+  sessions                Session[]
+  workspaceMemberships    WorkspaceMembership[]
+
+  @@index([email])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(uuid()) @db.Uuid
+  userId            String  @db.Uuid
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(uuid()) @db.Uuid
+  sessionToken String   @unique
+  userId       String   @db.Uuid
+  expires      DateTime @db.Timestamptz(6)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime @db.Timestamptz(6)
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+model Organization {
+  id              String                   @id @default(uuid()) @db.Uuid
+  name            String
+  slug            String
+  status          OrganizationStatus       @default(ACTIVE)
+  archivedAt      DateTime?                @db.Timestamptz(6)
+  deletedAt       DateTime?                @db.Timestamptz(6)
+  createdByUserId String?                  @db.Uuid
+  createdAt       DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime                 @updatedAt @db.Timestamptz(6)
+  createdBy       User?                    @relation("OrganizationCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  memberships     OrganizationMembership[]
+  workspaces      Workspace[]
+
+  @@index([status])
+  @@index([deletedAt])
+  @@map("organizations")
+}
+
+model OrganizationMembership {
+  id             String           @id @default(uuid()) @db.Uuid
+  organizationId String           @db.Uuid
+  userId         String           @db.Uuid
+  role           OrganizationRole @default(MEMBER)
+  status         MembershipStatus @default(ACTIVE)
+  activatedAt    DateTime?        @db.Timestamptz(6)
+  revokedAt      DateTime?        @db.Timestamptz(6)
+  createdAt      DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime         @updatedAt @db.Timestamptz(6)
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  user           User             @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, userId])
+  @@index([organizationId, status, role])
+  @@index([userId, status])
+  @@map("organization_memberships")
+}
+
+model Workspace {
+  id              String                @id @default(uuid()) @db.Uuid
+  organizationId  String                @db.Uuid
+  name            String
+  slug            String
+  status          WorkspaceStatus       @default(ACTIVE)
+  archivedAt      DateTime?             @db.Timestamptz(6)
+  deletedAt       DateTime?             @db.Timestamptz(6)
+  createdByUserId String?               @db.Uuid
+  createdAt       DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime              @updatedAt @db.Timestamptz(6)
+  createdBy       User?                 @relation("WorkspaceCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  organization    Organization          @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  memberships     WorkspaceMembership[]
+
+  @@index([organizationId, status])
+  @@index([deletedAt])
+  @@map("workspaces")
+}
+
+model WorkspaceMembership {
+  id          String           @id @default(uuid()) @db.Uuid
+  workspaceId String           @db.Uuid
+  userId      String           @db.Uuid
+  role        WorkspaceRole    @default(MEMBER)
+  status      MembershipStatus @default(ACTIVE)
+  activatedAt DateTime?        @db.Timestamptz(6)
+  revokedAt   DateTime?        @db.Timestamptz(6)
+  createdAt   DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime         @updatedAt @db.Timestamptz(6)
+  user        User             @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([workspaceId, userId])
+  @@index([workspaceId, status, role])
+  @@index([userId, status])
+  @@map("workspace_memberships")
+}

@@ -13,6 +13,7 @@ import { ThemeToggle } from './theme-toggle';
 
 type AppShellProps = Readonly<{
   children: ReactNode;
+  onSignOut: () => Promise<void>;
 }>;
 
 type NavigationItem = {
@@ -57,13 +58,17 @@ function NavigationLink({ isActive, item, onNavigate }: NavigationLinkProps) {
   );
 }
 
-export function AppShell({ children }: AppShellProps) {
+export function AppShell({ children, onSignOut }: AppShellProps) {
   const pathname = usePathname();
   const [isNavigationOpen, setIsNavigationOpen] = useState(false);
   const [isUtilityOpen, setIsUtilityOpen] = useState(false);
 
   function closeNavigation() {
     setIsNavigationOpen(false);
+  }
+
+  if (pathname === '/login') {
+    return <>{children}</>;
   }
 
   return (
@@ -111,9 +116,17 @@ export function AppShell({ children }: AppShellProps) {
           >
             <Icon className="size-4" name="panelRight" />
           </Button>
-          <span className="ml-1 grid size-8 place-items-center rounded-full bg-accent-soft text-xs font-semibold text-accent">
-            AO
-          </span>
+          <form action={onSignOut}>
+            <Button
+              aria-label="Sign out"
+              className="ml-1"
+              size="icon"
+              type="submit"
+              variant="ghost"
+            >
+              <Icon className="size-4" name="close" />
+            </Button>
+          </form>
         </div>
       </header>
 

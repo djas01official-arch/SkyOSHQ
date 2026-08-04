@@ -13,15 +13,29 @@
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit",
-    "check": "pnpm format && pnpm lint && pnpm typecheck && turbo run lint typecheck"
+    "typecheck": "tsc --noEmit && tsc --noEmit --project database/tsconfig.json",
+    "check": "pnpm format && pnpm lint && pnpm typecheck && turbo run lint typecheck",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:seed": "prisma db seed",
+    "db:test:migrate": "tsx database/scripts/migrate-test.ts",
+    "db:test": "pnpm db:test:migrate && tsx --test --test-concurrency=1 database/tests/tenancy.integration.test.ts database/tests/authentication.integration.test.ts"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.7.0",
+    "@prisma/client": "^7.7.0",
+    "argon2": "^0.45.1",
+    "pg": "^8.16.0"
   },
   "devDependencies": {
-    "@skyos/config": "workspace:*",
     "@eslint/js": "^9.39.1",
+    "@skyos/config": "workspace:*",
     "@types/node": "^24.10.1",
+    "dotenv": "^17.0.0",
     "eslint": "^9.39.1",
     "prettier": "^3.6.2",
+    "prisma": "^7.7.0",
+    "tsx": "^4.20.0",
     "turbo": "^2.6.3",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.0"

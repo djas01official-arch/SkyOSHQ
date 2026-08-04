@@ -16,6 +16,10 @@
     "typecheck": {
       "dependsOn": ["^typecheck"],
       "outputs": []
+    },
+    "check": {
+      "dependsOn": ["lint", "typecheck"],
+      "outputs": []
     }
   }
 }

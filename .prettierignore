@@ -4,4 +4,6 @@ node_modules/
 dist/
 coverage/
 pnpm-lock.yaml
+apps/*/next-env.d.ts
+database/generated/
 AGENTS.md

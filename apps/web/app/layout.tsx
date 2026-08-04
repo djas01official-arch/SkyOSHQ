@@ -3,6 +3,8 @@ import type { ReactNode } from 'react';
 
 import { AppShell } from '@/components/shell/app-shell';
 
+import { logoutAction } from './logout-action';
+
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -30,7 +32,7 @@ export default function RootLayout({ children }: RootLayoutProps) {
     <html lang="en" suppressHydrationWarning>
       <body>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} id="skyos-theme" />
-        <AppShell>{children}</AppShell>
+        <AppShell onSignOut={logoutAction}>{children}</AppShell>
       </body>
     </html>
   );

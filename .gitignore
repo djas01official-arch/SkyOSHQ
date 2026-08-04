@@ -3,6 +3,7 @@ node_modules/
 .turbo/
 dist/
 coverage/
+database/generated/
 .env
 .env.*
 !.env.example

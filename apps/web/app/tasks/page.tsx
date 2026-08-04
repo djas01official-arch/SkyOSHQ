@@ -1,6 +1,9 @@
 import { PlaceholderPage } from '@/components/pages/placeholder-page';
+import { requireCurrentUser } from '@/lib/auth/current-user';
 
-export default function TasksPage() {
+export default async function TasksPage() {
+  await requireCurrentUser();
+
   return (
     <PlaceholderPage
       description="A clear future home for planning, ownership, and execution."

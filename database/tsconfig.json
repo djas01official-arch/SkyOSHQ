@@ -1,0 +1,9 @@
+{
+  "extends": "../packages/config/tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true
+  },
+  "include": ["auth/**/*.ts", "prisma/seed.ts", "scripts/**/*.ts", "tests/**/*.ts"]
+}
