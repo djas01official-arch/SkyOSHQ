@@ -24,7 +24,7 @@ Access is explicit, deny-by-default, and evaluated at the smallest applicable sc
 
 ## Entity model
 
-Every persisted record has an immutable opaque `id`, `createdAt`, and `updatedAt` unless noted otherwise. Timestamps are UTC. Invitations, billing, teams, service accounts, and resource-level sharing are intentionally outside the MVP model. Audit records are not modelled as a product entity here, but immutable audit events are a production-readiness requirement.
+Every persisted record has an immutable opaque `id`, `createdAt`, and `updatedAt` unless noted otherwise. Timestamps are UTC. Invitations, billing, teams, service accounts, and resource-level sharing are intentionally outside the MVP model. `AuditEvent` is a persisted, append-only operational record for privileged state transitions; it is not a user-facing product feature.
 
 ### User
 
@@ -110,6 +110,26 @@ Every persisted record has an immutable opaque `id`, `createdAt`, and `updatedAt
 
 **Lifecycle:** may be created only when the user has an active organization membership in the workspace's organization. It follows the same active, suspend, resume, and revoke lifecycle as organization membership. Suspending or revoking the parent organization membership immediately makes the workspace membership ineffective for authorization, but does not automatically delete, revoke, or otherwise mutate the workspace membership record. If the parent membership is later active again, the workspace membership can become effective only if its own status and the workspace status are also active.
 
+### AuditEvent
+
+**Responsibility:** retain an immutable record of a protected organization or workspace mutation for accountability and investigation.
+
+| Attribute        | Notes                                                                                               |
+| ---------------- | --------------------------------------------------------------------------------------------------- |
+| `id`             | Immutable event identifier.                                                                         |
+| `actorUserId`    | User that authorized and performed the protected operation.                                         |
+| `organizationId` | Organization tenancy scope, always present.                                                         |
+| `workspaceId`    | Workspace scope when applicable; absent for organization-only operations.                           |
+| `action`         | Stable, application-owned action key, such as `workspace.created` or `organization.archived`.       |
+| `targetType`     | Stable entity type key for the affected organization, workspace, or membership.                     |
+| `targetId`       | Immutable identifier of the affected entity.                                                        |
+| `metadata`       | Structured, non-secret contextual data, including relevant before/after state and transfer parties. |
+| `createdAt`      | UTC timestamp assigned when the event is inserted.                                                  |
+
+**Relationships:** belongs to exactly one actor user and organization, and optionally one workspace. It does not replace the target entity's current state.
+
+**Lifecycle:** an event is created in the same transaction as its protected mutation. It can never be updated or deleted through SkyOS application services; database controls also reject row updates and deletes. Event retention and privileged database-administrator access remain operational-policy decisions.
+
 ### RoleDefinition
 
 **Responsibility:** define a built-in, scoped bundle of permissions.
@@ -149,6 +169,9 @@ erDiagram
     ORGANIZATION ||--o{ WORKSPACE : owns
     USER ||--o{ WORKSPACE_MEMBERSHIP : holds
     WORKSPACE ||--o{ WORKSPACE_MEMBERSHIP : has
+    USER ||--o{ AUDIT_EVENT : performs
+    ORGANIZATION ||--o{ AUDIT_EVENT : scopes
+    WORKSPACE o|--o{ AUDIT_EVENT : scopes
     ROLE_DEFINITION ||--o{ ORGANIZATION_MEMBERSHIP : assigns_at_organization_scope
     ROLE_DEFINITION ||--o{ WORKSPACE_MEMBERSHIP : assigns_at_workspace_scope
     ROLE_DEFINITION }o--o{ PERMISSION_DEFINITION : grants
@@ -185,6 +208,17 @@ erDiagram
         string userId FK
         string roleKey
         string status
+    }
+    AUDIT_EVENT {
+        string id PK
+        string actorUserId FK
+        string organizationId FK
+        string workspaceId FK
+        string action
+        string targetType
+        string targetId
+        json metadata
+        datetime createdAt
     }
     ROLE_DEFINITION {
         string scope
@@ -324,10 +358,11 @@ These rules must be enforced transactionally by any future persistence and autho
 11. Archived organizations and workspaces deny normal access and mutation. Restoration is the only permitted state transition while archived.
 12. Slugs are unique among active organizations globally and among active workspaces within an organization. Historical slug reuse requires an explicit future retention decision.
 13. No permission is granted by a stale, suspended, revoked, or deactivated relationship.
+14. Each privileged organization or workspace mutation in the audit scope must insert its immutable audit event in the same transaction. Audit event rows are append-only: application services and database controls reject updates and deletes.
 
 ## Production-readiness audit requirement
 
-Before privileged domain behavior is released, every ownership transfer, role assignment or role change, membership suspension or revocation, organization or workspace archive, and organization or workspace restoration must emit an immutable audit event. A future implementation must record the acting principal, target scope and entity, action, timestamp, and relevant before/after values. Audit emission must be durable with the authorized state transition so a successful privileged change cannot exist without its corresponding audit record.
+The foundation persists an append-only audit event for workspace creation, organization and workspace archive or restoration, organization and workspace role changes, membership suspension, resumption, or revocation, and ownership transfer. Each event records the acting user, organization scope, optional workspace scope, action, target, timestamp, and structured non-secret metadata. The privileged service writes the event in the same transaction as the state transition, so either both writes commit or both roll back. New privileged operations must join this audited service boundary before release.
 
 ## Assumptions
 
@@ -359,4 +394,4 @@ The MVP can evolve without changing its tenancy boundaries:
 2. Introduce a persisted role-permission association and tenant-defined roles only after role administration is a product requirement.
 3. Add invitation and identity-provisioning entities without changing active membership semantics.
 4. Add service accounts or groups as separate actor/principal abstractions, then reuse the same scoped authorization evaluator.
-5. Add audit events beside this model before implementing privileged administration flows.
+5. Extend the audit action catalog and retention controls as additional privileged administration flows are introduced.

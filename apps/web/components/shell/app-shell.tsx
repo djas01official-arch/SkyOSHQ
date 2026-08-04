@@ -8,11 +8,14 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Icon, type IconName } from '@/components/ui/icon';
 import { cn } from '@/lib/cn';
+import type { OrganizationContext } from '../../../../database/context/organization-context';
 
+import { OrganizationSwitcher, WorkspaceSwitcher } from './context-switcher';
 import { ThemeToggle } from './theme-toggle';
 
 type AppShellProps = Readonly<{
   children: ReactNode;
+  context: OrganizationContext | null;
   onSignOut: () => Promise<void>;
 }>;
 
@@ -58,7 +61,7 @@ function NavigationLink({ isActive, item, onNavigate }: NavigationLinkProps) {
   );
 }
 
-export function AppShell({ children, onSignOut }: AppShellProps) {
+export function AppShell({ children, context, onSignOut }: AppShellProps) {
   const pathname = usePathname();
   const [isNavigationOpen, setIsNavigationOpen] = useState(false);
   const [isUtilityOpen, setIsUtilityOpen] = useState(false);
@@ -94,10 +97,7 @@ export function AppShell({ children, onSignOut }: AppShellProps) {
             </span>
             <span>SkyOS</span>
           </Link>
-          <span className="hidden items-center gap-1 rounded-control border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-muted-foreground sm:flex">
-            Acme Operations
-            <Icon className="size-3" name="chevronDown" />
-          </span>
+          <OrganizationSwitcher context={context} />
         </div>
 
         <div className="flex items-center gap-1">
@@ -172,10 +172,7 @@ export function AppShell({ children, onSignOut }: AppShellProps) {
           ))}
         </nav>
         <div className="mt-auto rounded-card border border-border bg-surface-raised p-3">
-          <p className="text-xs font-semibold text-foreground">Platform foundation</p>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            Core services connect here in later milestones.
-          </p>
+          <WorkspaceSwitcher context={context} />
         </div>
       </aside>
 

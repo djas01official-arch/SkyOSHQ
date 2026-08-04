@@ -59,6 +59,7 @@ model User {
   createdOrganizations    Organization[]           @relation("OrganizationCreator")
   createdWorkspaces       Workspace[]              @relation("WorkspaceCreator")
   accounts                Account[]
+  auditEvents             AuditEvent[]             @relation("AuditActor")
   organizationMemberships OrganizationMembership[]
   sessions                Session[]
   workspaceMemberships    WorkspaceMembership[]
@@ -109,6 +110,27 @@ model VerificationToken {
   @@map("verification_tokens")
 }
 
+model AuditEvent {
+  id             String       @id @default(uuid()) @db.Uuid
+  actorUserId    String       @db.Uuid
+  organizationId String       @db.Uuid
+  workspaceId    String?      @db.Uuid
+  action         String
+  targetType     String
+  targetId       String       @db.Uuid
+  metadata       Json         @default("{}") @db.JsonB
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
+  actor          User         @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  workspace      Workspace?   @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([organizationId, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([targetType, targetId, createdAt])
+  @@map("audit_events")
+}
+
 model Organization {
   id              String                   @id @default(uuid()) @db.Uuid
   name            String
@@ -121,6 +143,7 @@ model Organization {
   updatedAt       DateTime                 @updatedAt @db.Timestamptz(6)
   createdBy       User?                    @relation("OrganizationCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   memberships     OrganizationMembership[]
+  auditEvents     AuditEvent[]
   workspaces      Workspace[]
 
   @@index([status])
@@ -161,6 +184,7 @@ model Workspace {
   createdBy       User?                 @relation("WorkspaceCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   organization    Organization          @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   memberships     WorkspaceMembership[]
+  auditEvents     AuditEvent[]
 
   @@index([organizationId, status])
   @@index([deletedAt])

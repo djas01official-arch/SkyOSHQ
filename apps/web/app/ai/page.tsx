@@ -1,8 +1,8 @@
 import { PlaceholderPage } from '@/components/pages/placeholder-page';
-import { requireCurrentUser } from '@/lib/auth/current-user';
+import { requireWorkspaceCapability } from '@/lib/organization-context';
 
 export default async function AiPage() {
-  await requireCurrentUser();
+  await requireWorkspaceCapability('ai.use');
 
   return (
     <PlaceholderPage

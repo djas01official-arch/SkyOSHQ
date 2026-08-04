@@ -1,8 +1,8 @@
 import { PlaceholderPage } from '@/components/pages/placeholder-page';
-import { requireCurrentUser } from '@/lib/auth/current-user';
+import { requireWorkspaceCapability } from '@/lib/organization-context';
 
 export default async function TasksPage() {
-  await requireCurrentUser();
+  await requireWorkspaceCapability('tasks.read');
 
   return (
     <PlaceholderPage

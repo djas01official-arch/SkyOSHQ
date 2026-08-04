@@ -14,13 +14,22 @@ const activity = [
   'Shared design tokens are active',
 ];
 
-export function DashboardContent() {
+type DashboardContentProps = Readonly<{
+  organizationName: string;
+  workspaceName: string | null;
+}>;
+
+export function DashboardContent({ organizationName, workspaceName }: DashboardContentProps) {
   return (
     <div className="mx-auto max-w-7xl">
       <PageHeader
-        description="A focused view of the connected capabilities that will power your organization."
-        eyebrow="Acme Operations"
-        title="Good morning, team."
+        description={
+          workspaceName
+            ? `A focused view of the capabilities that will power ${workspaceName}.`
+            : 'Select or create a workspace to establish your working context.'
+        }
+        eyebrow={organizationName}
+        title={workspaceName ? `Welcome to ${workspaceName}.` : 'Choose a workspace.'}
       />
 
       <section aria-label="Workspace summary" className="grid gap-4 md:grid-cols-3">

@@ -5,5 +5,13 @@
     "moduleResolution": "Bundler",
     "noEmit": true
   },
-  "include": ["auth/**/*.ts", "prisma/seed.ts", "scripts/**/*.ts", "tests/**/*.ts"]
+  "include": [
+    "audit/**/*.ts",
+    "auth/**/*.ts",
+    "context/**/*.ts",
+    "operations/**/*.ts",
+    "prisma/seed.ts",
+    "scripts/**/*.ts",
+    "tests/**/*.ts"
+  ]
 }

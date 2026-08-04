@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 
 import { AppShell } from '@/components/shell/app-shell';
+import { getCurrentOrganizationContext } from '@/lib/organization-context';
 
 import { logoutAction } from './logout-action';
 
@@ -27,12 +28,16 @@ type RootLayoutProps = Readonly<{
   children: ReactNode;
 }>;
 
-export default function RootLayout({ children }: RootLayoutProps) {
+export default async function RootLayout({ children }: RootLayoutProps) {
+  const context = await getCurrentOrganizationContext();
+
   return (
     <html lang="en" suppressHydrationWarning>
       <body>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} id="skyos-theme" />
-        <AppShell onSignOut={logoutAction}>{children}</AppShell>
+        <AppShell context={context} onSignOut={logoutAction}>
+          {children}
+        </AppShell>
       </body>
     </html>
   );

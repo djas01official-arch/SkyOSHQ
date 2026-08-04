@@ -94,6 +94,21 @@ The web application uses Auth.js with the Prisma adapter and the App Router. For
 - `/dashboard`, `/ai`, `/knowledge`, `/tasks`, and `/settings` require a session and also re-check that the persisted user remains active. `GET /api/me` returns the active signed-in user or `401`.
 - A successful credential sign-in for a user with no organization membership creates one active organization and owner membership atomically. It does not create a workspace or grant implicit workspace access.
 
+## Organization and workspace context
+
+After sign-in, the application shell resolves the active organization and workspace from current database memberships, then displays switchers in the header and sidebar. The selected organization and workspace IDs are persisted in the signed Auth.js session, but every request validates those preferences again against active user, organization, and workspace membership state.
+
+- Organization owners and admins can browse all active workspace metadata in their organization. Members and viewers see only workspaces where they have an active workspace membership.
+- A workspace can be selected only when the user has an effective active workspace membership; organization administration alone does not grant workspace-content access.
+- Organization owners and admins can create a workspace from the sidebar. Creation atomically assigns the creator an active workspace `owner` membership and selects it for the current session.
+- The AI, Knowledge, and Tasks areas resolve authorization through the selected effective workspace. In particular, workspace viewers cannot enter the AI area because they do not receive `ai.use`.
+
+## Immutable audit events
+
+Privileged tenancy operations write immutable `AuditEvent` records in the same database transaction as the protected mutation. The current foundation covers workspace creation; organization and workspace archive or restoration; organization and workspace role changes; membership suspension, resumption, or revocation; and ownership transfers. Events include actor, organization scope, optional workspace scope, action, target, timestamp, and structured non-secret metadata.
+
+Audit events are append-only. SkyOS application services do not expose update or delete operations, and database triggers reject row updates and deletes. This is an operational audit foundation only; there is no audit UI yet. Run `pnpm db:test` to apply migrations to the dedicated test database and verify audit creation, rollback atomicity, and immutability.
+
 ## Repository structure
 
 - `apps/` — user-facing applications
