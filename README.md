@@ -142,7 +142,7 @@ Run `pnpm db:migrate` after pulling this foundation, then use the existing web c
 pnpm --filter @skyos/web dev
 ```
 
-OCR, embeddings, vector search, AI, PDF/DOCX rendering, and asynchronous production-worker infrastructure remain intentionally excluded.
+OCR, embeddings, vector search, AI, PDF/DOCX rendering, and multi-host worker orchestration remain intentionally excluded.
 
 ## Knowledge chunking foundation
 
@@ -155,7 +155,92 @@ Knowledge writers can process the current native Markdown version or the latest 
 - Request, start, success, and failure are audited. Successful set creation, all chunks, the terminal job state, and the success event commit in one transaction. Empty or whitespace-only extraction text creates a safe audited failed job and no partial set.
 - The Knowledge detail page shows the latest status and count for the current Markdown version and each attachment's latest extraction, with Process/Reprocess controls for writers. Raw chunks and strategy debug metadata are not exposed in the UI.
 
-Pulling this change requires `pnpm db:migrate`. Embeddings, vector databases, semantic search, RAG, LLM calls, OCR, and summarization remain excluded.
+Pulling this change requires `pnpm db:migrate`. Semantic search, RAG, LLM calls, OCR, and summarization remain excluded.
+
+## Durable background jobs
+
+Document extraction, Knowledge chunking, and Knowledge embedding create a shared durable execution record in the same transaction as the domain job and its request audit event. The domain tables remain the source of truth for protected business state; `BackgroundJob` adds delivery, claiming, retry, lease, and execution-history concerns without duplicating document content in queue payloads.
+
+Local development defaults to `BACKGROUND_JOB_MODE=synchronous`, which executes the committed durable job inline and is convenient for tests and single-process development. To exercise the PostgreSQL worker boundary, set `BACKGROUND_JOB_MODE=durable`, run the web application, and start a worker in another terminal:
+
+```sh
+pnpm worker
+```
+
+Workers atomically claim available rows with PostgreSQL `FOR UPDATE SKIP LOCKED`, attach a bounded renewable lease and worker id, and append an immutable attempt snapshot on success, retry, lease expiry, or terminal failure. Retry delay uses bounded exponential backoff. A worker receiving `SIGINT` or `SIGTERM` stops claiming new work, lets its active handler finish, and then disconnects.
+
+The optional worker settings are documented in `.env.example`: lease length, poll/recovery intervals, and backoff bounds. Worker errors are stored as short structured codes and safe messages; stack traces, secrets, binary data, full Markdown, extracted text, and chunk contents are not placed in runtime error records or job payloads.
+
+Reconciliation is report-only by default:
+
+```sh
+pnpm jobs:reconcile
+```
+
+The report identifies old available jobs that never started, expired leases, attachment metadata with missing binaries, local binaries without metadata, successful extraction jobs without an extraction, and successful chunking jobs without a chunk set. The only automated repair currently supported is explicit expired-lease recovery:
+
+```sh
+pnpm jobs:reconcile -- --repair-expired-leases
+```
+
+That option safely requeues eligible jobs or records a bounded terminal failure. It does not delete metadata, local objects, immutable extraction history, chunk sets, chunks, attempts, or audit events. Review report output before using repair mode.
+
+## pgvector and Knowledge embeddings
+
+Development and test PostgreSQL use the pinned `pgvector/pgvector:0.8.1-pg17` image with their existing named PostgreSQL 17 volumes. After pulling this change, recreate the database containers without removing volumes, apply migrations, and verify the extension:
+
+```sh
+docker compose -f infrastructure/docker-compose.yml up -d --force-recreate postgres postgres-test
+pnpm db:migrate
+pnpm db:vector:check
+```
+
+Do not add `down -v` to this upgrade sequence; `-v` intentionally deletes local database data. The embeddings migration runs `CREATE EXTENSION IF NOT EXISTS vector` and fails clearly if the server image does not provide pgvector. The worker also checks extension availability before claiming jobs. The integration suite verifies the extension independently in `skyos_test`.
+
+The default `EMBEDDING_PROVIDER=local` adapter is deterministic and dependency-free: it hashes normalized word and character features into 64 dimensions and returns unit-normalized vectors. Its provider key, model key, model version, dimensions, maximum input length, and batch size are captured on every job and immutable embedding set. No external credentials or network calls are required for development, tests, or builds. Unsupported provider configuration fails with a clear message; no external provider is included yet.
+
+Knowledge writers can process or reprocess any successful current chunk set from the document detail page. Processing validates that the source document, optional attachment, workspace, and organization remain active; verifies every immutable chunk checksum; batches within provider limits; and writes the complete set, vectors, terminal job state, and success audit in one transaction. Provider retries use the durable runtime and never commit partial batches.
+
+Each reprocessing request appends a new immutable embedding set tied to one exact immutable chunk set. Older sets remain queryable for traceability. PostgreSQL triggers validate source relationships and exact vector dimensions and reject updates or deletes of successful sets and rows. Normal services and UI return only status, provider/model metadata, timestamps, checksums, and counts—raw vectors are never exposed.
+
+## Semantic and hybrid Knowledge search
+
+The `/knowledge` search field supports `keyword`, `semantic`, and `hybrid` modes. Scope always comes from the authenticated user's effective selected workspace; no workspace identifier is accepted from the search form. Search candidates are limited to current active Markdown versions and the latest successfully chunked extraction for active attachments. Older chunk and embedding generations remain immutable for traceability but are not selected by normal search.
+
+- Keyword mode uses PostgreSQL full-text search over immutable chunk text plus the document title or attachment filename. A generated `tsvector` column and GIN index keep the chunk-text predicate PostgreSQL-native.
+- Semantic mode embeds the query with the server-configured embedding provider and compares it only with the latest successful embedding set for the current provider/model version and exact current chunk set.
+- Hybrid mode combines independently ranked keyword and semantic candidates with reciprocal-rank fusion using `1 / (60 + rank)` per list. Raw full-text and cosine scores are preserved as score components, while deterministic source/chunk ordering resolves ties.
+- Duplicate chunk checksums within one source generation are collapsed, and a configurable per-source cap prevents one document or attachment from consuming the entire result list.
+- Results include document, attachment, immutable version/extraction, chunk-set, ordinal, offset, and score provenance. They include a bounded plain-text excerpt and never include a raw vector.
+- Empty and punctuation-only input returns no results. Query length, result count, per-source count, provider input, provider execution, and PostgreSQL statement time are bounded. A provider failure produces a safe UI state without affecting keyword-only search.
+
+Optional server-only limits are documented in `.env.example`: `KNOWLEDGE_SEARCH_TIMEOUT_MS`, `KNOWLEDGE_SEARCH_MAX_RESULTS`, and `KNOWLEDGE_SEARCH_PER_SOURCE_LIMIT`. Ordinary users cannot select providers, models, timeouts, workspace scope, or higher limits.
+
+## RAG retrieval and citation foundation
+
+`retrieveKnowledgeContext(...)` is the provider-independent boundary that turns authorized hybrid search results into bounded, source-grounded context for later AI runs. It requires both `ai.use` and `knowledge.read`; workspace viewers continue to read Knowledge but cannot invoke AI retrieval. Workspace scope is supplied only by authenticated server context.
+
+- Candidate sources are reloaded after ranking inside a repeatable-read transaction. A changed current version, newer successful chunk generation, archived document/attachment, or ineffective membership removes the candidate before context is assembled.
+- Selected chunks may include a configurable number of neighboring chunks from the same exact immutable chunk set. Overlapping neighbors are deduplicated by chunk id.
+- Server-controlled total and per-source character budgets are applied before context leaves the service. Partially included text receives adjusted offsets and a checksum of the exact displayed excerpt.
+- Citation identifiers are deterministic SHA-256-derived ids over workspace, chunk-set, ordinal, and displayed-excerpt checksum. Each citation preserves source type/id, document slug/version, attachment/filename/extraction, chunk-set id, ordinal, offsets, and workspace.
+- Retrieved Markdown, HTML-like text, URLs, and prompt-like instructions remain unchanged untrusted data. The context package uses a versioned JSON payload inside explicit untrusted-data delimiters and states that content cannot change identity, permissions, workspace, tools, providers, URLs, storage keys, secrets, or system configuration.
+- Raw vectors, provider configuration, credentials, hidden prompts, and storage keys are excluded. Retrieval is read-only and does not add high-volume records to the tenancy audit log.
+
+Authorized non-viewer workspace users can inspect selected chunks, citations, score components, and applied limits at `/ai/retrieval`. Optional server-only settings are `KNOWLEDGE_RETRIEVAL_MAX_RESULTS`, `KNOWLEDGE_RETRIEVAL_TOTAL_CHARACTERS`, `KNOWLEDGE_RETRIEVAL_PER_SOURCE_CHARACTERS`, and `KNOWLEDGE_RETRIEVAL_NEIGHBOR_RADIUS`.
+
+## AI conversation foundation
+
+The `/ai` workspace now provides owner-scoped conversations backed by the grounded retrieval boundary. The default `AI_PROVIDER=local` adapter is deterministic and network-free; builds, seeds, and tests require no external credentials or paid requests.
+
+- User and assistant messages, AI runs, exact retrieval snapshots, and citation rows are append-only. Database constraints and triggers enforce workspace/source consistency, legal run transitions, excerpt checksums, and snapshot citation counts.
+- Each run records provider/model/version, status, duration, optional token estimates, safe failure category, and the allowlisted citation ids actually referenced by the response. Provider-supplied fabricated citation ids are ignored.
+- A failed generation retains its user message. Retry creates a new run for that same immutable message and cannot create two concurrent runs for it.
+- Conversations are visible only to their owner in the effective workspace, require `ai.use`, and support archive/restore. Viewers are denied. Message length, provider input/output/time, and ten requests per user/workspace minute are bounded.
+- When retrieval returns nothing, the provider stores an explicit no-grounded-context response with no citations. Retrieved content remains untrusted JSON data and cannot change the provider boundary.
+- The UI includes conversation list/open/new, composer, pending/failure/retry states, archive/restore, assistant messages, and links for validated citations. Streaming is intentionally deferred.
+
+No external language-model adapter is installed. `AI_PROVIDER` cannot be selected by browser input, and provider credentials, hidden prompts, raw vectors, and full upstream payloads are not stored.
 
 ## Repository structure
 
@@ -169,6 +254,18 @@ Pulling this change requires `pnpm db:migrate`. Embeddings, vector databases, se
 - `docs/` — general documentation
 - `scripts/` — automation scripts
 - `tests/` — shared tests
+
+## Repository hygiene
+
+Generated build output, local storage, worker/parser scratch data, coverage output, logs, and local environment files are ignored by Git. Keep secrets in `.env`; only the documented `.env.example` template may be committed.
+
+Run the repository guard directly with:
+
+```sh
+pnpm hygiene
+```
+
+The guard is also the first step in `pnpm check`. It fails when tracked files match known generated-output paths or common secret-file names, preventing accidental reintroduction of artifacts such as `.next` output.
 
 ## Adding a workspace
 

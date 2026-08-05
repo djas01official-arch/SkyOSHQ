@@ -26,6 +26,11 @@ Access is explicit, deny-by-default, and evaluated at the smallest applicable sc
 | Knowledge chunking job     | Durable, audited request to chunk one pinned Markdown version or attachment extraction.          |
 | Knowledge chunk set        | Immutable, strategy-versioned collection linked to one exact source version.                     |
 | Knowledge chunk            | One deterministic ordinal text range within an immutable chunk set.                              |
+| Knowledge embedding job    | Durable, audited request to embed one immutable Knowledge chunk set.                             |
+| Knowledge embedding set    | Immutable provider/model-versioned vector collection for one exact chunk set.                    |
+| Knowledge embedding        | One immutable vector and input checksum mapped to exactly one chunk ordinal.                     |
+| Retrieval context          | Bounded, deterministic untrusted Knowledge excerpts prepared for a future AI run.                |
+| Retrieval citation         | Stable provenance for the exact displayed excerpt included in one retrieval context.             |
 | Membership                 | A scoped, revocable relationship between a user and an organization or workspace.                |
 | Role                       | A named, built-in bundle of permissions assigned through a membership.                           |
 | Permission                 | A stable capability key evaluated against either organization or workspace scope.                |
@@ -562,9 +567,9 @@ Permissions are scoped deliberately. An organization permission may administer o
 | `knowledge.write`          | Create or modify future knowledge resources within the workspace.            |
 | `tasks.read`               | Read future task resources within the workspace.                             |
 | `tasks.write`              | Create or modify future task resources within the workspace.                 |
-| `ai.use`                   | Use future AI features within the workspace.                                 |
+| `ai.use`                   | Use AI retrieval and future conversation features within the workspace.      |
 
-The `knowledge`, `tasks`, and `ai` keys reserve stable authorization boundaries for the stated MVP domains. They do not imply that those features, APIs, or resources exist yet.
+The `knowledge`, `tasks`, and `ai` keys are stable authorization boundaries for their stated MVP domains. A permission key grants only implemented operations that explicitly enforce it; it does not imply access to future resources.
 
 ## Initial role policy
 
@@ -677,7 +682,7 @@ These rules must be enforced transactionally by any future persistence and autho
 30. Downloads use stored server metadata, force attachment disposition, disable MIME sniffing and shared caching, and verify stored size and SHA-256. Missing or corrupt binaries fail safely without deleting metadata or bypassing authorization.
 31. Attachment archive lifecycle and text-processing state are orthogonal. Processing does not increment the attachment lifecycle version or make an archived attachment downloadable.
 32. Only active PDF and DOCX attachments on active documents may be requested for processing, and the request requires effective `knowledge.write` in the attachment workspace. Extraction reads require effective `knowledge.read` in that same workspace.
-33. At most one queued or processing job may exist for an attachment. Job identity, workspace, attachment, requester, parser name, parser version, and creation timestamp are immutable; status transitions only move `queued` to `processing` and then to `succeeded` or `failed`.
+33. At most one queued or processing job may exist for an attachment. Job identity, workspace, attachment, requester, parser name, parser version, and creation timestamp are immutable; normal status transitions move `queued` to `processing` and then to `succeeded` or `failed`. The durable runtime may reset `processing` to `queued` only while recovering an expired lease, with processing timestamps and attachment processing state reset in the same transaction.
 34. A worker verifies the original binary's stored size and SHA-256 before parsing. Missing, corrupt, unsupported, or unparseable inputs fail safely without modifying the original object or creating an extraction.
 35. Each successful job appends exactly one immutable extraction with the next attachment-local extraction number. Reprocessing never updates or deletes earlier extracted text, even when the parser version changes.
 36. Extraction creation, the job's successful terminal state, the attachment's `processed` state, and the success audit event commit atomically. Failure state and its failure audit event also commit atomically.
@@ -690,10 +695,117 @@ These rules must be enforced transactionally by any future persistence and autho
 43. For identical source text and strategy key/version, ordered chunk text, ordinals, offsets, token estimates, checksums, and metadata are deterministic. Strategy behavior changes require a new version; clients cannot choose or override strategy identity.
 44. Empty or whitespace-only source text fails with a safe meaningful terminal state, a failure audit event, and no chunk set or partial chunk rows.
 45. Chunking request and start state each commit with the matching audit event. Successful set and chunk creation, successful terminal state, and success audit event commit atomically; failure state and its failure audit event also commit atomically.
+46. Every extraction, chunking, or embedding domain job has exactly one durable `BackgroundJob` envelope identified by `(kind, domainJobId)` and by a deterministic idempotency key. The envelope contains references and small non-secret routing metadata only, never source content, binaries, chunks, or vectors.
+47. A durable job belongs to exactly one workspace and requester. `kind`, `workspaceId`, `requestedByUserId`, `domainJobId`, idempotency key, payload, maximum attempts, and creation timestamp are immutable after insertion.
+48. Only one worker may own a durable job lease at a time. Claiming an available queued job, incrementing its bounded attempt count, recording the worker, and establishing its lease occur atomically with competing consumers skipped rather than blocked.
+49. A queued durable job has no lease owner. A processing job has a nonempty worker id and a future lease expiration. A succeeded or failed job has terminal timestamps and no lease owner. A queued job whose attempt count reached its maximum is invalid.
+50. Each completed attempt appends one immutable `BackgroundJobAttempt` snapshot with the worker, attempt number, outcome, start, finish, duration, and optional safe structured error. Attempt rows cannot be updated or deleted.
+51. Retry delay is bounded exponential backoff. Retryable failures and expired leases requeue only while attempts remain; otherwise they produce a terminal failure. Unknown errors are reduced to a generic safe code and message before persistence.
+52. The synchronous development adapter and asynchronous worker execute through the same durable envelope. Protected domain transitions and audit events remain owned by domain services; lease recovery resets or terminally fails stranded domain state transactionally.
+53. An embedding job pins exactly one immutable `KnowledgeChunkSet` plus its workspace, requester, provider key, model key, model version, and dimensions. These identity fields cannot change after creation.
+54. Requesting or re-requesting embeddings requires effective `knowledge.write`; reading embedding status and non-vector metadata requires effective `knowledge.read` and always constrains the query by workspace.
+55. Only successful, nonempty chunk sets whose organization, workspace, document, and optional attachment remain active are embeddable. An archived or inaccessible source produces no embedding output.
+56. Before provider execution, the worker verifies every chunk checksum. It batches within the application-selected provider limits and rejects missing, extra, non-finite, or incorrectly dimensioned outputs.
+57. A successful embedding job creates exactly one immutable set and exactly one immutable embedding row for every ordered source chunk. Each row preserves the chunk ordinal and SHA-256 input checksum used by the provider.
+58. Database constraints validate the job, set, workspace, source chunk set, model dimensions, child count, unique chunk mapping, and actual pgvector dimensions at transaction commit.
+59. Re-embedding appends a new set and rows without updating or deleting earlier generations. Normal application reads expose status, model identity, timestamps, checksums, and counts but never raw vector values.
+60. Embedding request and start state each commit with the matching audit event. Successful set and vector creation, terminal job state, and success audit event commit atomically; permanent failure state and its failure audit event also commit atomically. Retryable provider failures commit no partial set or vectors.
+61. Knowledge retrieval requires effective `knowledge.read`, resolves workspace scope from trusted server context, and rechecks active organization, workspace, document, and optional attachment state inside the candidate query.
+62. Normal retrieval selects the current immutable Markdown version or latest successfully chunked attachment extraction. Within that exact chunk set, semantic retrieval selects only the latest successful embedding generation for the configured provider/model version.
+63. Search input is normalized and bounded before provider or database work. Query length, result count, candidate count, per-source count, provider input, provider execution time, and PostgreSQL statement time have server-controlled maximums.
+64. Keyword and semantic candidate lists are ranked independently. Hybrid search combines their ranks with deterministic reciprocal-rank fusion rather than comparing incomparable raw scores, then uses stable source, ordinal, and chunk identifiers to break ties.
+65. Normal search collapses identical chunk checksums within one source generation and applies a per-source result cap. It does not collapse provenance across distinct documents or attachments that happen to contain the same text.
+66. Every search result identifies its document, typed source, immutable document or extraction version, exact chunk set, ordinal, available character offsets, and separate score components. Bounded excerpts are untrusted plain text; raw vectors are never returned.
+67. Preparing AI retrieval context requires both effective `ai.use` and `knowledge.read`. Workspace viewers have `knowledge.read` but no `ai.use` and therefore cannot invoke this boundary.
+68. Retrieval repeats effective-membership validation and current-source selection after search ranking. Candidates whose source was archived, superseded, or made inaccessible before context assembly are discarded.
+69. Neighbor expansion stays within the candidate's exact immutable chunk set. Overlapping selected and neighboring chunks are deduplicated by chunk id, and deterministic candidate and neighbor ordering is preserved.
+70. Total context characters, per-source characters, result count, and neighbor radius have server-owned bounds. A truncated excerpt records offsets for the exact displayed slice and a SHA-256 checksum of that slice.
+71. Citation ids are stable derivations of workspace, chunk set, ordinal, and displayed-excerpt checksum. Citation metadata preserves the typed source and immutable document/extraction provenance; it never contains a vector, credential, hidden prompt, or storage key.
+72. Retrieved content is untrusted data. It is serialized as a versioned JSON payload behind explicit delimiters and cannot select or override identity, instructions, permissions, workspace, tools, providers, models, URLs, storage keys, secrets, or environment configuration.
+73. AI conversations are owned by one user in one workspace; ownership and workspace are immutable. Reads, messages, retry, archive, and restore require effective `ai.use`, and foreign conversation ids remain inaccessible.
+74. User and assistant messages, retrieval snapshots, and citation rows are append-only. A retry creates a new run for the same immutable user message and never duplicates that message.
+75. A run captures application-selected provider/model/version, timing, bounded usage, status, and safe failure category. Only `processing` may transition once to `succeeded` or `failed`; concurrent active runs for one user message are rejected.
+76. Each successful run stores the exact retrieval context and all permitted citations transactionally with its assistant message and terminal state. Provider-referenced citation ids are intersected with that snapshot; fabricated ids are discarded.
+77. Conversation usage is bounded by server-owned message, context, output, timeout, and per-user/workspace request limits. Ordinary users cannot select provider configuration or another workspace.
+78. AI execution metadata is separate from tenancy `AuditEvent`; provider secrets, hidden prompts, raw vectors, authorization headers, and unnecessary full upstream payloads are never persisted.
+
+## Durable background-job lifecycle
+
+`BackgroundJob` is an execution envelope, not a replacement for `DocumentProcessingJob`, `KnowledgeChunkingJob`, or future embedding domain records. It references one domain job by `kind` and `domainJobId`, while `BackgroundJobAttempt` provides append-only operational history.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Queued: domain mutation + request audit + durable envelope
+  Queued --> Processing: atomic claim / worker + lease + attempt increment
+  Processing --> Succeeded: handler and domain transaction complete
+  Processing --> Queued: retryable failure or expired lease / attempts remain
+  Processing --> Failed: permanent failure or maximum attempts reached
+  Succeeded --> [*]
+  Failed --> [*]
+```
+
+Workers select only jobs whose `availableAt` has passed. `FOR UPDATE SKIP LOCKED` allows multiple PostgreSQL consumers to compete safely. A heartbeat extends a live lease, while recovery locks expired rows before appending the expired attempt and requeueing or failing them. Graceful shutdown stops new claims and waits for the current handler; a hard crash is handled by lease expiration.
+
+The reconciliation boundary is report-only unless an operator supplies the documented expired-lease repair option. Missing binaries, orphaned local objects, and inconsistent successful domain outputs are surfaced for review and are never automatically deleted or rewritten.
+
+## Knowledge embedding lifecycle
+
+Embeddings are derived exclusively from an immutable `KnowledgeChunkSet`; they never read mutable document or attachment text directly. The application-owned provider registry selects the provider and model, and the job captures that exact identity and vector dimension before it is queued. The MVP local provider is deterministic, performs no network calls, and exists to exercise the complete storage and job boundary without external credentials.
+
+```mermaid
+flowchart LR
+  ChunkSet["Immutable chunk set"] --> Request["Audited embedding request"]
+  Request --> Durable["Durable background job"]
+  Durable --> Verify["Verify active scope and chunk checksums"]
+  Verify --> Batch["Provider batches"]
+  Batch --> Commit["Atomic set, vectors, status, and audit commit"]
+  Commit --> History["Immutable embedding generation"]
+  Batch --> Retry["Retryable failure: no partial output"]
+  Retry --> Durable
+```
+
+Provider output is fully validated in memory before any embedding rows are inserted. PostgreSQL `vector` columns provide the similarity-search primitive, while normal services deliberately omit raw vectors. Reprocessing creates another immutable generation for traceability; search remains a separate authorized read boundary and never mutates embedding history.
+
+## Semantic and hybrid retrieval lifecycle
+
+Search is a read boundary and does not append tenancy audit events. Authorization occurs before query processing, and the database candidate CTE independently constrains every row to the effective workspace and active parent hierarchy. Current source selection happens before ranking so archived, historical, partially processed, or cross-workspace generations cannot enter the candidate pool.
+
+```mermaid
+flowchart LR
+  Query["Bounded untrusted query"] --> Scope["Effective server workspace + knowledge.read"]
+  Scope --> Current["Current active chunk generations"]
+  Query --> Keyword["PostgreSQL full-text rank"]
+  Query --> Embed["Configured provider + timeout"]
+  Embed --> Semantic["pgvector cosine rank"]
+  Current --> Keyword
+  Current --> Semantic
+  Keyword --> RRF["Reciprocal-rank fusion"]
+  Semantic --> RRF
+  RRF --> Limits["Deduplicate + per-source and top-k limits"]
+  Limits --> Results["Provenance + excerpts + score components"]
+```
+
+Keyword mode does not depend on the embedding provider. Semantic mode requires a compatible successful embedding generation; hybrid mode remains useful when some current sources have only keyword candidates. Reciprocal-rank fusion uses a constant of 60 and adds `1 / (60 + rank)` from each available list. This preserves each retrieval system's ordering without treating full-text relevance and cosine similarity as directly comparable units.
+
+## RAG context and citation lifecycle
+
+The RAG foundation produces an ephemeral retrieval snapshot in memory; conversation persistence is deliberately deferred. Search candidates are not sufficient by themselves: the retrieval transaction revalidates authorization and current active source generations, loads selected and neighboring chunks from exact immutable sets, then applies budgets and citations.
+
+```mermaid
+flowchart LR
+  Hybrid["Authorized hybrid candidates"] --> Recheck["Repeatable-read scope + source recheck"]
+  Recheck --> Neighbors["Traceable same-set neighbors"]
+  Neighbors --> Dedupe["Chunk-id overlap removal"]
+  Dedupe --> Budgets["Per-source + total budgets"]
+  Budgets --> Citations["Stable excerpt citations"]
+  Citations --> Package["Delimited untrusted JSON context"]
+```
+
+Citation ids are not model-generated. They derive from trusted provenance and the exact excerpt checksum before a provider sees context. Future AI runs may reference only ids from their own persisted retrieval snapshot; no model-supplied workspace, source, URL, or citation identity is authoritative.
 
 ## Production-readiness audit requirement
 
-The foundation persists an append-only audit event for workspace creation, organization and workspace archive or restoration, organization and workspace role changes, membership suspension, resumption, or revocation, ownership transfer, knowledge document creation and lifecycle changes, attachment upload, archive, or restoration, document-processing request, start, success, or failure, and chunking request, start, success, or failure. Each event records the acting user, organization scope, optional workspace scope, action, target, timestamp, and structured non-secret metadata. The privileged service writes the event in the same transaction as the metadata state transition, so either both writes commit or both roll back. New privileged operations must join this audited service boundary before release.
+The foundation persists an append-only audit event for workspace creation, organization and workspace archive or restoration, organization and workspace role changes, membership suspension, resumption, or revocation, ownership transfer, knowledge document creation and lifecycle changes, attachment upload, archive, or restoration, document-processing request, start, success, or failure, chunking request, start, success, or failure, and embedding request, start, success, or failure. Each event records the acting user, organization scope, optional workspace scope, action, target, timestamp, and structured non-secret metadata. The privileged service writes the event in the same transaction as the metadata state transition, so either both writes commit or both roll back. New privileged operations must join this audited service boundary before release.
 
 ## Assumptions
 
@@ -707,21 +819,25 @@ The foundation persists an append-only audit event for workspace creation, organ
 
 ## Risks and unresolved decisions
 
-| Area                     | Open decision / risk                                                                                                                                                                                                                                                                                                                           |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Identity lifecycle       | Define how external identities, verified email, invitations, SCIM, and account recovery map to `User` and membership activation.                                                                                                                                                                                                               |
-| Owner recovery           | Define a break-glass or support-controlled owner-recovery process; the invariant prevents accidental loss but does not solve lost-owner scenarios.                                                                                                                                                                                             |
-| Deletion and retention   | Specify legal retention, anonymization, slug reuse, audit-event retention, and whether records are ever hard-deleted.                                                                                                                                                                                                                          |
-| Service actors           | Decide whether automation uses `User`, a separate service-account entity, or delegated tokens. Do not overload human membership semantics without a policy decision.                                                                                                                                                                           |
-| Cross-workspace features | Future global search, analytics, and AI may need an explicit aggregate permission model; they must not bypass workspace checks.                                                                                                                                                                                                                |
-| Resource-level sharing   | Document-level, task-level, guest, external collaborator, and link-sharing access are intentionally excluded and should be modeled separately.                                                                                                                                                                                                 |
-| Role evolution           | Define migration/versioning rules before granting new permissions to existing roles, particularly for sensitive future domains.                                                                                                                                                                                                                |
-| Knowledge lifecycle      | Define formal retention, export, legal-hold, and immutable-history growth policies before expanding document capabilities. Future Markdown extensions must preserve the current sanitization boundary.                                                                                                                                         |
-| Binary storage           | Local disk is development-only. Production requires durable S3-compatible storage, encryption and access policy, coordinated database/object backups, orphan reconciliation, and lifecycle retention.                                                                                                                                          |
-| File security            | Signature checks reduce accidental spoofing but are not malware detection. Virus scanning, content disarm, quarantine, and administrator incident workflows remain required before untrusted production uploads.                                                                                                                               |
-| Upload consistency       | PostgreSQL and object storage cannot commit atomically. Compensating deletion handles ordinary failures, but crash recovery needs a scheduled reconciliation process for staged or missing objects.                                                                                                                                            |
-| Document processing      | PDF text extraction is layout-lossy and image-only PDFs yield empty text without OCR. Production needs queue delivery/retry policy, worker resource limits and sandboxing, parser-version retention, malformed-file hardening, and operational recovery for jobs stranded in `processing`.                                                     |
-| Knowledge chunking       | The MVP character-window strategy and token estimate are deterministic but not model-tokenizer-aware or linguistically optimized. Production needs queue retry/idempotency policy, stranded-job recovery, strategy-version retention, scale limits for large histories, and an explicit retention/migration policy before downstream indexing. |
+| Area                     | Open decision / risk                                                                                                                                                                                                                                                                            |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Identity lifecycle       | Define how external identities, verified email, invitations, SCIM, and account recovery map to `User` and membership activation.                                                                                                                                                                |
+| Owner recovery           | Define a break-glass or support-controlled owner-recovery process; the invariant prevents accidental loss but does not solve lost-owner scenarios.                                                                                                                                              |
+| Deletion and retention   | Specify legal retention, anonymization, slug reuse, audit-event retention, and whether records are ever hard-deleted.                                                                                                                                                                           |
+| Service actors           | Decide whether automation uses `User`, a separate service-account entity, or delegated tokens. Do not overload human membership semantics without a policy decision.                                                                                                                            |
+| Cross-workspace features | Future global search, analytics, and AI may need an explicit aggregate permission model; they must not bypass workspace checks.                                                                                                                                                                 |
+| Resource-level sharing   | Document-level, task-level, guest, external collaborator, and link-sharing access are intentionally excluded and should be modeled separately.                                                                                                                                                  |
+| Role evolution           | Define migration/versioning rules before granting new permissions to existing roles, particularly for sensitive future domains.                                                                                                                                                                 |
+| Knowledge lifecycle      | Define formal retention, export, legal-hold, and immutable-history growth policies before expanding document capabilities. Future Markdown extensions must preserve the current sanitization boundary.                                                                                          |
+| Binary storage           | Local disk is development-only. Production requires durable S3-compatible storage, encryption and access policy, coordinated database/object backups, orphan reconciliation, and lifecycle retention.                                                                                           |
+| File security            | Signature checks reduce accidental spoofing but are not malware detection. Virus scanning, content disarm, quarantine, and administrator incident workflows remain required before untrusted production uploads.                                                                                |
+| Upload consistency       | PostgreSQL and object storage cannot commit atomically. Compensating deletion handles ordinary failures, but crash recovery needs a scheduled reconciliation process for staged or missing objects.                                                                                             |
+| Document processing      | PDF text extraction is layout-lossy and image-only PDFs yield empty text without OCR. Production still needs worker resource limits and sandboxing, parser-version retention, and malformed-file hardening.                                                                                     |
+| Knowledge chunking       | The MVP character-window strategy and token estimate are deterministic but not model-tokenizer-aware or linguistically optimized. Production needs strategy-version retention, scale limits for large histories, and an explicit retention/migration policy before downstream indexing.         |
+| Knowledge embeddings     | The deterministic local model validates the pipeline but is not intended to provide production semantic quality. Production provider selection needs privacy, residency, cost, rate-limit, model-retirement, dimension-migration, and retention decisions before external calls or search.      |
+| Knowledge retrieval      | Exact pgvector scans are appropriate only for the current MVP scale, and the deterministic local provider has limited semantic quality. Production needs relevance thresholds, index strategy, query-volume budgets, multilingual analysis, and provider/model migration evaluation.            |
+| RAG context              | Character budgets are deterministic but not model-tokenizer-aware, and ephemeral retrieval snapshots are not yet persisted. Conversation work must persist the exact permitted snapshot, validate model citation references against it, and define token-aware budgeting before real providers. |
+| Background jobs          | PostgreSQL polling is intentionally simple and durable for the current scale. Production deployment must define worker concurrency, connection budgets, alert thresholds, rolling-shutdown grace periods, clock assumptions, and whether a broker is needed at substantially higher throughput. |
 
 ## Extension path
 
@@ -732,4 +848,4 @@ The MVP can evolve without changing its tenancy boundaries:
 3. Add invitation and identity-provisioning entities without changing active membership semantics.
 4. Add service accounts or groups as separate actor/principal abstractions, then reuse the same scoped authorization evaluator.
 5. Extend the audit action catalog and retention controls as additional privileged administration flows are introduced.
-6. Add OCR, comments, sharing, embeddings, or AI features only with explicit document-level security and retention decisions.
+6. Add OCR, comments, sharing, external AI providers, or autonomous tools only with explicit document-level security, retention, and execution-boundary decisions.

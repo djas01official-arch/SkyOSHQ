@@ -12,14 +12,19 @@
     "dev": "turbo run dev --parallel",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
+    "hygiene": "tsx scripts/check-repository-hygiene.ts",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit && tsc --noEmit --project database/tsconfig.json",
-    "check": "pnpm format && pnpm lint && pnpm typecheck && turbo run lint typecheck",
+    "check": "pnpm hygiene && pnpm format && pnpm lint && pnpm typecheck && turbo run lint typecheck",
+    "worker": "tsx database/scripts/background-worker.ts",
+    "jobs:reconcile": "tsx database/scripts/reconcile-background-jobs.ts",
+    "prisma": "prisma",
     "db:generate": "prisma generate",
+    "db:vector:check": "tsx database/scripts/check-pgvector.ts",
     "db:migrate": "prisma migrate dev",
     "db:seed": "prisma db seed",
     "db:test:migrate": "tsx database/scripts/migrate-test.ts",
-    "db:test": "pnpm db:test:migrate && tsx --test --test-concurrency=1 database/tests/tenancy.integration.test.ts database/tests/authentication.integration.test.ts database/tests/organization-context.integration.test.ts database/tests/audit-events.integration.test.ts database/tests/knowledge-documents.integration.test.ts database/tests/knowledge-attachments.integration.test.ts database/tests/document-processing.integration.test.ts database/tests/knowledge-chunking.integration.test.ts apps/web/components/knowledge/markdown-document.test.tsx"
+    "db:test": "pnpm db:test:migrate && tsx --test --test-concurrency=1 database/tests/tenancy.integration.test.ts database/tests/authentication.integration.test.ts database/tests/organization-context.integration.test.ts database/tests/audit-events.integration.test.ts database/tests/knowledge-documents.integration.test.ts database/tests/knowledge-attachments.integration.test.ts database/tests/document-processing.integration.test.ts database/tests/knowledge-chunking.integration.test.ts database/tests/background-jobs.integration.test.ts database/tests/knowledge-embeddings.integration.test.ts database/tests/knowledge-search.integration.test.ts database/tests/knowledge-retrieval.integration.test.ts database/tests/ai-conversations.integration.test.ts apps/web/components/knowledge/markdown-document.test.tsx"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.7.0",

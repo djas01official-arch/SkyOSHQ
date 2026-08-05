@@ -1,4 +1,5 @@
 import {
+  BackgroundJobKind,
   KnowledgeAttachmentStatus,
   KnowledgeChunkSourceType,
   KnowledgeChunkingJobStatus,
@@ -16,6 +17,7 @@ import {
   UnknownChunkingStrategyError,
   type KnowledgeChunkingStrategyRegistry,
 } from '../../services/knowledge-chunking/chunking-strategy';
+import { createDurableBackgroundJob } from '../background-jobs/runtime';
 
 export class KnowledgeChunkingError extends Error {}
 export class KnowledgeChunkingConflictError extends KnowledgeChunkingError {}
@@ -116,6 +118,18 @@ async function createChunkingJob(
     organizationId,
     targetId: job.id,
     targetType: AuditTargetType.KNOWLEDGE_CHUNKING_JOB,
+    workspaceId,
+  });
+  await createDurableBackgroundJob(transaction, {
+    domainJobId: job.id,
+    idempotencyKey: `knowledge-chunking:${job.id}`,
+    kind: BackgroundJobKind.KNOWLEDGE_CHUNKING,
+    payload: {
+      sourceId: source.sourceId,
+      sourceType: source.sourceType,
+      sourceVersion: source.sourceVersion,
+    },
+    requestedByUserId: actorUserId,
     workspaceId,
   });
   return job;

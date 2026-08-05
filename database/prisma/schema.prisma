@@ -1,6 +1,7 @@
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/client"
+  provider        = "prisma-client"
+  output          = "../generated/client"
+  previewFeatures = ["partialIndexes"]
 }
 
 datasource db {
@@ -79,6 +80,49 @@ enum KnowledgeChunkingJobStatus {
   FAILED
 }
 
+enum BackgroundJobKind {
+  DOCUMENT_EXTRACTION
+  KNOWLEDGE_CHUNKING
+  KNOWLEDGE_EMBEDDING
+}
+
+enum BackgroundJobStatus {
+  QUEUED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
+enum BackgroundJobAttemptOutcome {
+  SUCCEEDED
+  RETRY_SCHEDULED
+  FAILED
+  LEASE_EXPIRED
+}
+
+enum KnowledgeEmbeddingJobStatus {
+  QUEUED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
+enum AiConversationStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum AiMessageRole {
+  USER
+  ASSISTANT
+}
+
+enum AiRunStatus {
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
 model User {
   id                        String                     @id @default(uuid()) @db.Uuid
   name                      String?
@@ -101,6 +145,11 @@ model User {
   knowledgeAttachments      KnowledgeAttachment[]      @relation("KnowledgeAttachmentUploader")
   documentProcessingJobs    DocumentProcessingJob[]    @relation("DocumentProcessingJobRequester")
   knowledgeChunkingJobs     KnowledgeChunkingJob[]     @relation("KnowledgeChunkingJobRequester")
+  backgroundJobs            BackgroundJob[]            @relation("BackgroundJobRequester")
+  knowledgeEmbeddingJobs   KnowledgeEmbeddingJob[]    @relation("KnowledgeEmbeddingJobRequester")
+  aiConversations          AiConversation[]           @relation("AiConversationOwner")
+  aiMessages               AiMessage[]                @relation("AiMessageAuthor")
+  aiRuns                   AiRun[]                    @relation("AiRunRequester")
   organizationMemberships   OrganizationMembership[]
   sessions                  Session[]
   workspaceMemberships      WorkspaceMembership[]
@@ -189,6 +238,7 @@ model Organization {
 
   @@index([status])
   @@index([deletedAt])
+  @@unique([slug], map: "organizations_active_slug_key", where: raw("((status = 'ACTIVE'::\"OrganizationStatus\") AND (\"deletedAt\" IS NULL))"))
   @@map("organizations")
 }
 
@@ -230,9 +280,17 @@ model Workspace {
   knowledgeAttachments  KnowledgeAttachment[]
   knowledgeChunkingJobs KnowledgeChunkingJob[]
   knowledgeChunkSets    KnowledgeChunkSet[]
+  backgroundJobs        BackgroundJob[]
+  knowledgeEmbeddingJobs KnowledgeEmbeddingJob[]
+  knowledgeEmbeddingSets KnowledgeEmbeddingSet[]
+  aiConversations        AiConversation[]
+  aiMessages             AiMessage[]
+  aiRuns                 AiRun[]
+  aiRetrievalSnapshots   AiRetrievalSnapshot[]
 
   @@index([organizationId, status])
   @@index([deletedAt])
+  @@unique([organizationId, slug], map: "workspaces_active_organization_slug_key", where: raw("((status = 'ACTIVE'::\"WorkspaceStatus\") AND (\"deletedAt\" IS NULL))"))
   @@map("workspaces")
 }
 
@@ -246,7 +304,7 @@ model KnowledgeDocument {
   status       KnowledgeDocumentStatus    @default(ACTIVE)
   archivedAt   DateTime?                  @db.Timestamptz(6)
   version      Int                        @default(1)
-  searchVector Unsupported("tsvector")?   @map("searchVector")
+  searchVector Unsupported("tsvector")?   @default(dbgenerated("(setweight(to_tsvector('simple'::regconfig, COALESCE(title, ''::text)), 'A'::\"char\") || setweight(to_tsvector('simple'::regconfig, COALESCE(content, ''::text)), 'B'::\"char\"))")) @map("searchVector")
   createdAt    DateTime                   @default(now()) @db.Timestamptz(6)
   updatedAt    DateTime                   @updatedAt @db.Timestamptz(6)
   author       User                       @relation("KnowledgeDocumentAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
@@ -258,6 +316,7 @@ model KnowledgeDocument {
   @@unique([id, workspaceId])
   @@index([workspaceId, status, updatedAt])
   @@index([authorUserId, createdAt])
+  @@index([searchVector], map: "knowledge_documents_active_search_idx", type: Gin, where: raw("(status = 'ACTIVE'::\"KnowledgeDocumentStatus\")"))
   @@map("knowledge_documents")
 }
 
@@ -296,13 +355,14 @@ model KnowledgeAttachment {
   version          Int                                 @default(1)
   createdAt        DateTime                            @default(now()) @db.Timestamptz(6)
   updatedAt        DateTime                            @updatedAt @db.Timestamptz(6)
-  document         KnowledgeDocument                   @relation(fields: [documentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict)
+  document         KnowledgeDocument                   @relation(fields: [documentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "knowledge_attachments_document_workspace_fkey")
   uploader         User                                @relation("KnowledgeAttachmentUploader", fields: [uploaderUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   workspace        Workspace                           @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   extractions      KnowledgeAttachmentExtraction[]
   processingJobs   DocumentProcessingJob[]
 
   @@unique([id, workspaceId])
+  @@unique([documentId, sha256Checksum], map: "knowledge_attachments_active_document_checksum_key", where: raw("(status = 'ACTIVE'::\"KnowledgeAttachmentStatus\")"))
   @@index([documentId, status, createdAt])
   @@index([workspaceId, status])
   @@index([workspaceId, processingStatus])
@@ -322,10 +382,11 @@ model DocumentProcessingJob {
   createdAt         DateTime                       @default(now()) @db.Timestamptz(6)
   startedAt         DateTime?                      @db.Timestamptz(6)
   completedAt       DateTime?                      @db.Timestamptz(6)
-  attachment        KnowledgeAttachment            @relation(fields: [attachmentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict)
+  attachment        KnowledgeAttachment            @relation(fields: [attachmentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "document_processing_jobs_attachment_workspace_fkey")
   requestedBy       User                           @relation("DocumentProcessingJobRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   extraction        KnowledgeAttachmentExtraction?
 
+  @@unique([attachmentId], map: "document_processing_jobs_active_attachment_key", where: raw("(status = ANY (ARRAY['QUEUED'::\"DocumentProcessingJobStatus\", 'PROCESSING'::\"DocumentProcessingJobStatus\"]))"))
   @@index([attachmentId, status, createdAt])
   @@index([workspaceId, status, createdAt])
   @@index([requestedByUserId, createdAt])
@@ -343,12 +404,12 @@ model KnowledgeAttachmentExtraction {
   extractedText    String                 @db.Text
   textSha256       String                 @db.Char(64)
   createdAt        DateTime               @default(now()) @db.Timestamptz(6)
-  attachment       KnowledgeAttachment    @relation(fields: [attachmentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict)
+  attachment       KnowledgeAttachment    @relation(fields: [attachmentId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "knowledge_attachment_extractions_attachment_workspace_fkey")
   job              DocumentProcessingJob  @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   chunkingJobs     KnowledgeChunkingJob[] @relation("KnowledgeChunkingJobAttachmentExtraction")
   chunkSets        KnowledgeChunkSet[]    @relation("KnowledgeChunkSetAttachmentExtraction")
 
-  @@unique([attachmentId, extractionNumber])
+  @@unique([attachmentId, extractionNumber], map: "knowledge_attachment_extractions_attachmentId_extractionNumber_")
   @@index([workspaceId, createdAt])
   @@map("knowledge_attachment_extractions")
 }
@@ -376,7 +437,8 @@ model KnowledgeChunkingJob {
   chunkSet               KnowledgeChunkSet?
 
   @@index([workspaceId, status, createdAt])
-  @@index([sourceType, sourceId, sourceVersion, createdAt])
+  @@unique([workspaceId, sourceType, sourceId, sourceVersion], map: "knowledge_chunking_jobs_active_source_key", where: raw("(status = ANY (ARRAY['QUEUED'::\"KnowledgeChunkingJobStatus\", 'PROCESSING'::\"KnowledgeChunkingJobStatus\"]))"))
+  @@index([sourceType, sourceId, sourceVersion, createdAt], map: "knowledge_chunking_jobs_sourceType_sourceId_sourceVersion_creat")
   @@index([requestedByUserId, createdAt])
   @@index([documentVersionId])
   @@index([attachmentExtractionId])
@@ -401,9 +463,12 @@ model KnowledgeChunkSet {
   documentVersion        KnowledgeDocumentVersion?      @relation("KnowledgeChunkSetDocumentVersion", fields: [documentVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   attachmentExtraction   KnowledgeAttachmentExtraction? @relation("KnowledgeChunkSetAttachmentExtraction", fields: [attachmentExtractionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   chunks                 KnowledgeChunk[]
+  embeddingJobs          KnowledgeEmbeddingJob[]
+  embeddingSets          KnowledgeEmbeddingSet[]
+  aiRunCitations         AiRunCitation[]
 
   @@index([workspaceId, createdAt])
-  @@index([sourceType, sourceId, sourceVersion, createdAt])
+  @@index([sourceType, sourceId, sourceVersion, createdAt], map: "knowledge_chunk_sets_sourceType_sourceId_sourceVersion_createdA")
   @@index([strategyKey, strategyVersion])
   @@index([documentVersionId])
   @@index([attachmentExtractionId])
@@ -420,12 +485,133 @@ model KnowledgeChunk {
   tokenEstimate  Int
   sha256         String            @db.Char(64)
   metadata       Json              @default("{}") @db.JsonB
+  searchVector   Unsupported("tsvector")? @default(dbgenerated("to_tsvector('simple'::regconfig, COALESCE(text, ''::text))")) @map("searchVector")
   createdAt      DateTime          @default(now()) @db.Timestamptz(6)
   chunkSet       KnowledgeChunkSet @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  embeddings     KnowledgeEmbedding[]
 
   @@unique([chunkSetId, ordinal])
   @@index([chunkSetId])
+  @@index([searchVector], map: "knowledge_chunks_search_idx", type: Gin)
   @@map("knowledge_chunks")
+}
+
+model KnowledgeEmbeddingJob {
+  id                String                      @id @default(uuid()) @db.Uuid
+  workspaceId       String                      @db.Uuid
+  chunkSetId        String                      @db.Uuid
+  requestedByUserId String                      @db.Uuid
+  providerKey       String
+  modelKey          String
+  modelVersion      String
+  dimensions        Int
+  status            KnowledgeEmbeddingJobStatus @default(QUEUED)
+  errorMessage      String?                     @db.Text
+  createdAt         DateTime                    @default(now()) @db.Timestamptz(6)
+  startedAt         DateTime?                   @db.Timestamptz(6)
+  completedAt       DateTime?                   @db.Timestamptz(6)
+  workspace         Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunkSet          KnowledgeChunkSet           @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  requestedBy       User                        @relation("KnowledgeEmbeddingJobRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  embeddingSet      KnowledgeEmbeddingSet?
+
+  @@unique([workspaceId, chunkSetId, providerKey, modelKey, modelVersion], map: "knowledge_embedding_jobs_active_generation_key", where: raw("(status = ANY (ARRAY['QUEUED'::\"KnowledgeEmbeddingJobStatus\", 'PROCESSING'::\"KnowledgeEmbeddingJobStatus\"]))"))
+  @@index([workspaceId, status, createdAt])
+  @@index([chunkSetId, createdAt])
+  @@index([requestedByUserId, createdAt])
+  @@map("knowledge_embedding_jobs")
+}
+
+model KnowledgeEmbeddingSet {
+  id             String                 @id @default(uuid()) @db.Uuid
+  workspaceId    String                 @db.Uuid
+  chunkSetId     String                 @db.Uuid
+  createdByJobId String                 @unique @db.Uuid
+  providerKey    String
+  modelKey       String
+  modelVersion   String
+  dimensions     Int
+  inputChecksum  String                 @db.Char(64)
+  embeddingCount Int
+  createdAt      DateTime               @default(now()) @db.Timestamptz(6)
+  workspace      Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunkSet       KnowledgeChunkSet      @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdByJob   KnowledgeEmbeddingJob  @relation(fields: [createdByJobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  embeddings     KnowledgeEmbedding[]
+
+  @@index([workspaceId, createdAt])
+  @@index([chunkSetId, createdAt])
+  @@index([providerKey, modelKey, modelVersion, createdAt])
+  @@map("knowledge_embedding_sets")
+}
+
+model KnowledgeEmbedding {
+  id              String                @id @default(uuid()) @db.Uuid
+  embeddingSetId  String                @db.Uuid
+  chunkId         String                @db.Uuid
+  ordinal         Int
+  chunkSha256     String                @db.Char(64)
+  inputChecksum   String                @db.Char(64)
+  vector          Unsupported("vector")
+  createdAt       DateTime              @default(now()) @db.Timestamptz(6)
+  embeddingSet    KnowledgeEmbeddingSet @relation(fields: [embeddingSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunk           KnowledgeChunk        @relation(fields: [chunkId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([embeddingSetId, ordinal])
+  @@unique([embeddingSetId, chunkId])
+  @@index([chunkId])
+  @@map("knowledge_embeddings")
+}
+
+model BackgroundJob {
+  id                String                 @id @default(uuid()) @db.Uuid
+  kind              BackgroundJobKind
+  status            BackgroundJobStatus    @default(QUEUED)
+  workspaceId       String                 @db.Uuid
+  requestedByUserId String                 @db.Uuid
+  domainJobId       String                 @db.Uuid
+  idempotencyKey    String                 @unique
+  payload           Json                   @default("{}") @db.JsonB
+  attemptCount      Int                    @default(0)
+  maxAttempts       Int                    @default(3)
+  availableAt       DateTime               @default(now()) @db.Timestamptz(6)
+  workerId          String?
+  lockedAt          DateTime?              @db.Timestamptz(6)
+  leaseExpiresAt    DateTime?              @db.Timestamptz(6)
+  firstStartedAt    DateTime?              @db.Timestamptz(6)
+  completedAt       DateTime?              @db.Timestamptz(6)
+  durationMs        BigInt?
+  lastError         Json?                  @db.JsonB
+  createdAt         DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime               @updatedAt @db.Timestamptz(6)
+  workspace         Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  requestedBy       User                   @relation("BackgroundJobRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  attempts          BackgroundJobAttempt[]
+
+  @@unique([kind, domainJobId])
+  @@index([status, availableAt, createdAt], where: raw("(status = 'QUEUED'::\"BackgroundJobStatus\")"))
+  @@index([status, leaseExpiresAt], where: raw("(status = 'PROCESSING'::\"BackgroundJobStatus\")"))
+  @@index([workspaceId, status, createdAt])
+  @@index([requestedByUserId, createdAt])
+  @@map("background_jobs")
+}
+
+model BackgroundJobAttempt {
+  id            String                      @id @default(uuid()) @db.Uuid
+  jobId         String                      @db.Uuid
+  attemptNumber Int
+  workerId      String
+  outcome       BackgroundJobAttemptOutcome
+  startedAt     DateTime                    @db.Timestamptz(6)
+  finishedAt    DateTime                    @db.Timestamptz(6)
+  durationMs    BigInt
+  error         Json?                       @db.JsonB
+  createdAt     DateTime                    @default(now()) @db.Timestamptz(6)
+  job           BackgroundJob               @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([jobId, attemptNumber])
+  @@index([jobId, createdAt])
+  @@map("background_job_attempts")
 }
 
 model WorkspaceMembership {
@@ -445,4 +631,126 @@ model WorkspaceMembership {
   @@index([workspaceId, status, role])
   @@index([userId, status])
   @@map("workspace_memberships")
+}
+
+model AiConversation {
+  id          String               @id @default(uuid()) @db.Uuid
+  workspaceId String               @db.Uuid
+  ownerUserId String               @db.Uuid
+  title       String
+  status      AiConversationStatus @default(ACTIVE)
+  archivedAt  DateTime?            @db.Timestamptz(6)
+  createdAt   DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime             @updatedAt @db.Timestamptz(6)
+  workspace   Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  owner       User                 @relation("AiConversationOwner", fields: [ownerUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  messages    AiMessage[]
+  runs        AiRun[]
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId, status, updatedAt])
+  @@index([ownerUserId, updatedAt])
+  @@map("ai_conversations")
+}
+
+model AiMessage {
+  id               String         @id @default(uuid()) @db.Uuid
+  conversationId   String         @db.Uuid
+  workspaceId      String         @db.Uuid
+  authorUserId     String?        @db.Uuid
+  generatedByRunId String?        @unique @db.Uuid
+  role             AiMessageRole
+  content          String         @db.Text
+  createdAt        DateTime       @default(now()) @db.Timestamptz(6)
+  conversation     AiConversation @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_messages_conversation_workspace_fkey")
+  workspace        Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  author           User?          @relation("AiMessageAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  generatedByRun   AiRun?         @relation("AiRunAssistantMessage", fields: [generatedByRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  requestedRuns    AiRun[]        @relation("AiRunUserMessage")
+
+  @@index([conversationId, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([authorUserId, createdAt])
+  @@map("ai_messages")
+}
+
+model AiRun {
+  id                String              @id @default(uuid()) @db.Uuid
+  conversationId    String              @db.Uuid
+  workspaceId       String              @db.Uuid
+  requestedByUserId String              @db.Uuid
+  userMessageId     String              @db.Uuid
+  providerKey       String
+  modelKey          String
+  modelVersion      String
+  status            AiRunStatus         @default(PROCESSING)
+  inputTokens       Int?
+  outputTokens      Int?
+  referencedCitationIds String[]           @default([])
+  durationMs        Int?
+  failureCode       String?
+  failureMessage    String?             @db.Text
+  createdAt         DateTime            @default(now()) @db.Timestamptz(6)
+  completedAt       DateTime?           @db.Timestamptz(6)
+  conversation      AiConversation      @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_runs_conversation_workspace_fkey")
+  workspace         Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  requestedBy       User                @relation("AiRunRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  userMessage       AiMessage           @relation("AiRunUserMessage", fields: [userMessageId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  assistantMessage  AiMessage?          @relation("AiRunAssistantMessage")
+  retrievalSnapshot AiRetrievalSnapshot?
+
+  @@unique([id, workspaceId])
+  @@unique([userMessageId], map: "ai_runs_active_user_message_key", where: raw("(status = 'PROCESSING'::\"AiRunStatus\")"))
+  @@index([conversationId, createdAt])
+  @@index([workspaceId, status, createdAt])
+  @@index([requestedByUserId, createdAt])
+  @@index([userMessageId, createdAt])
+  @@map("ai_runs")
+}
+
+model AiRetrievalSnapshot {
+  id              String          @id @default(uuid()) @db.Uuid
+  runId           String          @unique @db.Uuid
+  workspaceId     String          @db.Uuid
+  queryChecksum   String          @db.Char(64)
+  contextChecksum String          @db.Char(64)
+  context         String          @db.Text
+  resultCount     Int
+  characterCount  Int
+  createdAt       DateTime        @default(now()) @db.Timestamptz(6)
+  run             AiRun           @relation(fields: [runId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_retrieval_snapshots_run_workspace_fkey")
+  workspace       Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  citations       AiRunCitation[]
+
+  @@unique([runId, workspaceId])
+  @@index([workspaceId, createdAt])
+  @@map("ai_retrieval_snapshots")
+}
+
+model AiRunCitation {
+  id                       String                   @id @default(uuid()) @db.Uuid
+  snapshotId               String                   @db.Uuid
+  citationId               String
+  sourceType               KnowledgeChunkSourceType
+  sourceId                 String                   @db.Uuid
+  documentSlug             String
+  documentVersion          Int?
+  attachmentId             String?                  @db.Uuid
+  filename                 String?
+  extractionVersion        Int?
+  chunkSetId               String                   @db.Uuid
+  chunkOrdinal             Int
+  characterStart           Int?
+  characterEnd             Int?
+  displayedExcerpt         String                   @db.Text
+  displayedExcerptChecksum String                   @db.Char(64)
+  createdAt                DateTime                 @default(now()) @db.Timestamptz(6)
+  snapshot                 AiRetrievalSnapshot      @relation(fields: [snapshotId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunkSet                  KnowledgeChunkSet        @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([snapshotId, citationId])
+  @@unique([snapshotId, chunkSetId, chunkOrdinal])
+  @@index([sourceType, sourceId])
+  @@index([attachmentId])
+  @@map("ai_run_citations")
 }

@@ -7,10 +7,12 @@ import {
 } from '../../../../../database/knowledge/knowledge-documents';
 import { listKnowledgeAttachments } from '../../../../../database/knowledge/knowledge-attachments';
 import { getKnowledgeChunkingOverview } from '../../../../../database/knowledge/knowledge-chunking';
+import { getKnowledgeEmbeddingOverview } from '../../../../../database/knowledge/knowledge-embeddings';
 import {
   KnowledgeAttachmentProcessingStatus,
   KnowledgeAttachmentStatus,
   KnowledgeDocumentStatus,
+  KnowledgeEmbeddingJobStatus,
 } from '../../../../../database/generated/client/client';
 
 import {
@@ -27,10 +29,12 @@ import {
   chunkKnowledgeAttachmentAction,
   chunkKnowledgeDocumentAction,
 } from '@/app/knowledge/chunking-actions';
+import { embedKnowledgeChunkSetAction } from '@/app/knowledge/embedding-actions';
 import { KnowledgeAttachmentLifecycle } from '@/components/knowledge/knowledge-attachment-lifecycle';
 import { KnowledgeAttachmentProcessing } from '@/components/knowledge/knowledge-attachment-processing';
 import { KnowledgeAttachmentUpload } from '@/components/knowledge/knowledge-attachment-upload';
 import { KnowledgeChunkingControl } from '@/components/knowledge/knowledge-chunking-control';
+import { KnowledgeEmbeddingControl } from '@/components/knowledge/knowledge-embedding-control';
 import { KnowledgeDocumentLifecycle } from '@/components/knowledge/knowledge-document-lifecycle';
 import { MarkdownDocument } from '@/components/knowledge/markdown-document';
 import { Card } from '@/components/ui/card';
@@ -78,7 +82,7 @@ type ChunkingSummary = Readonly<{
   chunkSet: { chunkCount: number } | null;
   errorMessage: string | null;
   sourceVersion: number;
-  status: string;
+  status: KnowledgeEmbeddingJobStatus;
 }>;
 
 function describeChunking(
@@ -92,6 +96,45 @@ function describeChunking(
   return summary.chunkSet
     ? `${summary.chunkSet.chunkCount} chunks · ${sourceLabel} ${summary.sourceVersion}`
     : 'Processing result unavailable.';
+}
+
+type EmbeddingSummary = Readonly<{
+  completedAt: Date | null;
+  createdAt: Date;
+  embeddingSet: {
+    createdAt: Date;
+    embeddingCount: number;
+  } | null;
+  errorMessage: string | null;
+  modelKey: string;
+  modelVersion: string;
+  providerKey: string;
+  status: string;
+}>;
+
+function describeEmbedding(summary: EmbeddingSummary | null | undefined): string {
+  if (!summary) return 'Not embedded.';
+  if (summary.status === 'QUEUED') return 'Embedding queued.';
+  if (summary.status === 'PROCESSING') return 'Embedding in progress.';
+  if (summary.status === 'FAILED') {
+    return `Embedding failed · ${summary.errorMessage ?? 'Provider execution failed.'}`;
+  }
+  return summary.embeddingSet
+    ? `${summary.embeddingSet.embeddingCount} vectors · ${summary.providerKey}/${summary.modelKey} ${summary.modelVersion} · ${summary.embeddingSet.createdAt.toLocaleString()}`
+    : 'Embedding result unavailable.';
+}
+
+function canRequestEmbedding(summary: EmbeddingSummary | null | undefined): boolean {
+  return (
+    !summary ||
+    summary.status === KnowledgeEmbeddingJobStatus.SUCCEEDED ||
+    summary.status === KnowledgeEmbeddingJobStatus.FAILED
+  );
+}
+
+function embeddingActionLabel(summary: EmbeddingSummary | null | undefined): string {
+  if (summary?.status === KnowledgeEmbeddingJobStatus.FAILED) return 'Retry embeddings';
+  return summary?.embeddingSet ? 'Reprocess embeddings' : 'Process embeddings';
 }
 
 export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumentPageProps) {
@@ -123,6 +166,17 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
     throw error;
   }
 
+  const chunkSetIds = [
+    chunking.document?.chunkSet?.id,
+    ...Object.values(chunking.attachments).map((summary) => summary?.chunkSet?.id),
+  ].filter((id): id is string => Boolean(id));
+  const embeddings = await getKnowledgeEmbeddingOverview(
+    prisma,
+    user.id,
+    workspace.id,
+    chunkSetIds,
+  );
+
   const isArchived = document.status === KnowledgeDocumentStatus.ARCHIVED;
   const author = document.author.displayName ?? document.author.email ?? 'Unknown author';
   const activeAttachments = attachments.filter(
@@ -131,6 +185,8 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
   const archivedAttachments = attachments.filter(
     (attachment) => attachment.status === KnowledgeAttachmentStatus.ARCHIVED,
   );
+  const documentChunkSet = chunking.document?.chunkSet;
+  const documentEmbedding = documentChunkSet ? embeddings[documentChunkSet.id] : null;
 
   return (
     <div className="mx-auto max-w-4xl">
@@ -188,14 +244,32 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
             <p className="mt-1 text-xs text-muted-foreground">
               {describeChunking(chunking.document, 'version')}
             </p>
+            {documentChunkSet ? (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Embeddings: {describeEmbedding(documentEmbedding)}
+              </p>
+            ) : null}
           </div>
-          {canWrite && !isArchived ? (
-            <KnowledgeChunkingControl
-              action={chunkKnowledgeDocumentAction}
-              label={chunking.document?.chunkSet ? 'Reprocess chunks' : 'Process chunks'}
-              slug={document.slug}
-            />
-          ) : null}
+          <div className="flex flex-wrap items-center gap-2">
+            {canWrite && !isArchived ? (
+              <KnowledgeChunkingControl
+                action={chunkKnowledgeDocumentAction}
+                label={documentChunkSet ? 'Reprocess chunks' : 'Process chunks'}
+                slug={document.slug}
+              />
+            ) : null}
+            {canWrite &&
+            !isArchived &&
+            documentChunkSet &&
+            canRequestEmbedding(documentEmbedding) ? (
+              <KnowledgeEmbeddingControl
+                action={embedKnowledgeChunkSetAction}
+                chunkSetId={documentChunkSet.id}
+                label={embeddingActionLabel(documentEmbedding)}
+                slug={document.slug}
+              />
+            ) : null}
+          </div>
         </div>
         <MarkdownDocument content={document.content} />
       </Card>
@@ -225,10 +299,15 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
               const latestJob = attachment.processingJobs[0];
               const isProcessable = isProcessableAttachment(attachment.mimeType);
               const attachmentChunking = chunking.attachments[attachment.id];
+              const attachmentChunkSet = attachmentChunking?.chunkSet;
+              const attachmentEmbedding = attachmentChunkSet
+                ? embeddings[attachmentChunkSet.id]
+                : null;
 
               return (
                 <div
                   className="flex flex-col justify-between gap-3 rounded-control border border-border p-3 sm:flex-row sm:items-center"
+                  id={`attachment-${attachment.id}`}
                   key={attachment.id}
                 >
                   <div className="min-w-0">
@@ -242,6 +321,11 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
                     {latestExtraction ? (
                       <p className="mt-1 text-xs text-muted-foreground">
                         Chunks: {describeChunking(attachmentChunking, 'extraction')}
+                      </p>
+                    ) : null}
+                    {attachmentChunkSet ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Embeddings: {describeEmbedding(attachmentEmbedding)}
                       </p>
                     ) : null}
                     <p className="mt-1 text-xs text-muted-foreground">
@@ -286,6 +370,17 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
                         action={chunkKnowledgeAttachmentAction}
                         attachmentId={attachment.id}
                         label={attachmentChunking?.chunkSet ? 'Reprocess chunks' : 'Process chunks'}
+                        slug={document.slug}
+                      />
+                    ) : null}
+                    {canWrite &&
+                    !isArchived &&
+                    attachmentChunkSet &&
+                    canRequestEmbedding(attachmentEmbedding) ? (
+                      <KnowledgeEmbeddingControl
+                        action={embedKnowledgeChunkSetAction}
+                        chunkSetId={attachmentChunkSet.id}
+                        label={embeddingActionLabel(attachmentEmbedding)}
                         slug={document.slug}
                       />
                     ) : null}

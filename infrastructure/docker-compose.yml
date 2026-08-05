@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:17-alpine
+    image: pgvector/pgvector:0.8.1-pg17
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -16,7 +16,7 @@ services:
       - skyos-postgres-data:/var/lib/postgresql/data
 
   postgres-test:
-    image: postgres:17-alpine
+    image: pgvector/pgvector:0.8.1-pg17
     environment:
       POSTGRES_DB: ${POSTGRES_TEST_DB:?Set POSTGRES_TEST_DB in .env}
       POSTGRES_PASSWORD: ${POSTGRES_TEST_PASSWORD:?Set POSTGRES_TEST_PASSWORD in .env}

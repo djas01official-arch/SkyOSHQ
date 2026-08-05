@@ -6,6 +6,7 @@ import {
   type Prisma,
   type PrismaClient,
   UserStatus,
+  WorkspaceRole,
   WorkspaceStatus,
 } from '../generated/client/client';
 import { appendAuditEvent, AuditAction, AuditTargetType } from '../audit/audit-event';
@@ -39,6 +40,7 @@ export type KnowledgeSearchResult = Readonly<{
 
 type WorkspaceAccess = Readonly<{
   organizationId: string;
+  role: WorkspaceRole;
   workspaceId: string;
 }>;
 
@@ -133,7 +135,11 @@ export async function requireKnowledgeWorkspaceAccess(
     );
   }
 
-  return { organizationId: membership.workspace.organizationId, workspaceId };
+  return {
+    organizationId: membership.workspace.organizationId,
+    role: membership.role,
+    workspaceId,
+  };
 }
 
 export async function findKnowledgeDocument(

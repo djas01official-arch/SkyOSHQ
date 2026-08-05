@@ -6,6 +6,8 @@
     "noEmit": true
   },
   "include": [
+    "ai/**/*.ts",
+    "background-jobs/**/*.ts",
     "audit/**/*.ts",
     "auth/**/*.ts",
     "context/**/*.ts",

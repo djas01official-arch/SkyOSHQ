@@ -1,26 +1,32 @@
+import { type DocumentProcessingRequestDependencies } from '../../../database/knowledge/document-processing';
+import { BackgroundJobKind } from '../../../database/generated/client/client';
+import { executeDurableDomainJobByReference } from '../../../database/background-jobs/domain-handlers';
 import {
-  executeDocumentProcessingJob,
-  type DocumentProcessingRequestDependencies,
-  type DocumentProcessingWorkerDependencies,
-} from '../../../database/knowledge/document-processing';
-import { createDefaultDocumentParserRegistry } from '../../../services/document-processing/document-parser';
-import { SynchronousDocumentProcessingQueue } from '../../../services/document-processing/processing-queue';
+  getBackgroundJobMode,
+  PostgresBackgroundJobQueue,
+  SynchronousDocumentProcessingQueue,
+} from '../../../services/document-processing/processing-queue';
 
-import { knowledgeAttachmentDependencies } from '@/lib/knowledge-storage';
+import {
+  documentParsers,
+  domainBackgroundJobDependencies,
+} from '@/lib/background-job-dependencies';
 import { prisma } from '@/lib/prisma';
 
-const parsers = createDefaultDocumentParserRegistry();
-
-export const documentProcessingWorkerDependencies: DocumentProcessingWorkerDependencies = {
-  parsers,
-  storage: knowledgeAttachmentDependencies.storage,
-};
-
-const queue = new SynchronousDocumentProcessingQueue(async (jobId) => {
-  await executeDocumentProcessingJob(prisma, documentProcessingWorkerDependencies, jobId);
-});
+const queue =
+  getBackgroundJobMode() === 'durable'
+    ? new PostgresBackgroundJobQueue()
+    : new SynchronousDocumentProcessingQueue(async (jobId) => {
+        await executeDurableDomainJobByReference(
+          prisma,
+          domainBackgroundJobDependencies,
+          BackgroundJobKind.DOCUMENT_EXTRACTION,
+          jobId,
+          `web-sync-${process.pid}`,
+        );
+      });
 
 export const documentProcessingRequestDependencies: DocumentProcessingRequestDependencies = {
-  parsers,
+  parsers: documentParsers,
   queue,
 };

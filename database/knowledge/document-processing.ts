@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  BackgroundJobKind,
   DocumentProcessingJobStatus,
   KnowledgeAttachmentProcessingStatus,
   KnowledgeAttachmentStatus,
@@ -19,6 +20,7 @@ import {
   type DocumentParserRegistry,
 } from '../../services/document-processing/document-parser';
 import type { DocumentProcessingQueue } from '../../services/document-processing/processing-queue';
+import { createDurableBackgroundJob } from '../background-jobs/runtime';
 
 export class DocumentProcessingError extends Error {}
 
@@ -183,6 +185,15 @@ export async function requestKnowledgeAttachmentProcessing(
       organizationId: access.organizationId,
       targetId: attachmentId,
       targetType: AuditTargetType.KNOWLEDGE_ATTACHMENT,
+      workspaceId,
+    });
+
+    await createDurableBackgroundJob(transaction, {
+      domainJobId: created.id,
+      idempotencyKey: `document-extraction:${created.id}`,
+      kind: BackgroundJobKind.DOCUMENT_EXTRACTION,
+      payload: { attachmentId },
+      requestedByUserId: actorUserId,
       workspaceId,
     });
 
