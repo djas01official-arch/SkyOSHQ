@@ -39,15 +39,52 @@ pnpm lint         # Lint repository configuration and source files
 pnpm typecheck    # Type-check the root configuration
 pnpm build        # Run build tasks in all workspaces that define one
 pnpm dev          # Run development tasks in all workspaces that define one
+pnpm test:domain  # Test the application-owned role and permission policy
 ```
 
-## Local database
+## Continuous integration
 
-SkyOS uses PostgreSQL with Prisma ORM. Copy the local configuration, start PostgreSQL, apply migrations, generate the client, and optionally seed the development data:
+GitHub Actions runs the single `Monorepo and database` validation job for pull requests, pushes to `main`, and manual dispatches. The job uses Node.js 24, the exact pnpm version from the root `packageManager` field, a frozen lockfile install with pnpm-store caching, and the same `pgvector/pgvector:0.8.1-pg17` image used locally.
+
+The service initializes an empty `skyos_ci` database and creates a separate `skyos_test` database. Both use fixed CI-only credentials declared in the workflow; no repository secret or external database is required. CI then runs:
+
+```sh
+pnpm db:migrate:deploy # Replay all committed migrations into empty skyos_ci
+pnpm db:check          # Validate Prisma, live schema drift, and database indexes
+pnpm db:test           # Migrate and test only the isolated skyos_test database
+pnpm test:domain
+pnpm check             # Hygiene, formatting, linting, and strict workspace type checks
+pnpm build
+```
+
+To reproduce the database and quality checks with the documented local-only containers:
 
 ```sh
 cp .env.example .env
-docker compose -f infrastructure/docker-compose.yml up -d
+pnpm db:up
+pnpm db:test:up
+pnpm db:migrate:deploy
+pnpm db:check
+pnpm db:test
+pnpm test:domain
+pnpm check
+pnpm build
+git diff --check
+```
+
+An existing development database validates pending migrations but is not an empty-database replay. For an exact replay, point `DATABASE_URL` at a newly created disposable local database before running `pnpm db:migrate:deploy`; never use a production or otherwise non-disposable database for that check.
+
+The concurrency-focused integration tests currently expose a `pg@8.22.0` deprecation warning when `@prisma/adapter-pg@7.9.1` executes parts of a Prisma transaction query plan on the same PostgreSQL client. A traced run points into the adapter's transaction interpreter rather than a SkyOS raw-query call, and the affected tests still pass. Do not suppress the warning; recheck it when upgrading Prisma or `pg`, and prefer an upstream adapter fix over weakening transaction boundaries in application services.
+
+## Local database
+
+SkyOS uses PostgreSQL with Prisma ORM. Prisma provides the generated strict TypeScript client and reviewable migrations, while PostgreSQL constraints and triggers enforce invariants that an ORM schema cannot express. The rationale and consequences are recorded in [ADR 0001](./architecture/decisions/0001-postgresql-prisma.md).
+
+Copy the local configuration, start PostgreSQL, apply migrations, generate the client, and optionally seed the development data:
+
+```sh
+cp .env.example .env
+pnpm db:up
 pnpm db:migrate
 pnpm db:generate
 pnpm db:seed
@@ -61,7 +98,7 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 
 Use the printed value for `AUTH_SECRET` in `.env`. Never commit `.env` or use the development password outside a local environment.
 
-On PowerShell, use `Copy-Item .env.example .env` for the first command. The local container exposes PostgreSQL on port `5432`; its data is stored in the named `skyos-postgres-data` volume. Use `docker compose -f infrastructure/docker-compose.yml down` to stop it, or append `-v` only when intentionally deleting local database data.
+On PowerShell, use `Copy-Item .env.example .env` for the first command. The root database scripts pass `.env` to the Compose file explicitly, so setup behaves consistently regardless of the Compose file location. The local container exposes PostgreSQL only on `127.0.0.1:5432`; its data is stored in the named `skyos-postgres-data` volume. Use `pnpm db:down` to stop the repository containers. To intentionally delete local database data, run the underlying Compose command with `down -v` only after confirming the named volumes are disposable.
 
 Prisma commands use [prisma.config.ts](./prisma.config.ts), with schema and migrations under `database/prisma/`:
 
@@ -69,15 +106,20 @@ Prisma commands use [prisma.config.ts](./prisma.config.ts), with schema and migr
 pnpm prisma validate
 pnpm prisma migrate dev
 pnpm prisma db seed
+pnpm db:check
+pnpm db:drift:check
+pnpm db:indexes:check
 ```
+
+Use `pnpm db:validate` for a schema-only check and `pnpm db:migrate:deploy` to apply committed migrations non-interactively. `pnpm db:migrate` remains the local development command for creating and applying a reviewed migration. `pnpm db:check` runs schema validation plus both live database checks. `pnpm db:drift:check` compares the configured development database with `schema.prisma` without writing changes. `pnpm db:indexes:check` performs read-only PostgreSQL catalog checks for foreign keys without a valid leading-column index and exact duplicate index definitions.
 
 ## Database integration tests
 
-Database integration tests run only against the dedicated `skyos_test` PostgreSQL database on port `5433`. They never use `DATABASE_URL` or the development database.
+Database integration tests run only against the dedicated `skyos_test` PostgreSQL database on `127.0.0.1:5433`. They never use `DATABASE_URL` or the development database.
 
 ```sh
 cp .env.example .env
-docker compose -f infrastructure/docker-compose.yml up -d postgres-test
+pnpm db:test:up
 pnpm db:test
 ```
 
@@ -108,6 +150,24 @@ After sign-in, the application shell resolves the active organization and worksp
 - A workspace can be selected only when the user has an effective active workspace membership; organization administration alone does not grant workspace-content access.
 - Organization owners and admins can create a workspace from the sidebar. Creation atomically assigns the creator an active workspace `owner` membership and selects it for the current session.
 - The AI, Knowledge, and Tasks areas resolve authorization through the selected effective workspace. In particular, workspace viewers cannot enter the AI area because they do not receive `ai.use`.
+
+## Application-owned authorization policy
+
+The fixed MVP organization and workspace roles, permission definitions, and typed role-to-permission mappings live in the `@skyos/domain` workspace. They are immutable application policy and are not database rows. Runtime helpers deny permission references from the wrong scope, preserving the boundary between organization administration and workspace content access.
+
+```sh
+pnpm test:domain
+```
+
+Database enums store membership role keys, while permission evaluation uses the shared policy catalog through a typed adapter in `database/policy/`. Custom roles and tenant-managed permission mappings remain intentionally out of scope.
+
+### Foundation boundaries
+
+- Roles and permission grants are fixed application policy for the MVP; there are no tenant-authored roles or permission rows.
+- Service accounts and resource-level sharing are not modeled.
+- Cross-scope administration still uses the explicit organization/workspace rules in the domain model; organization authority never implies workspace-content access.
+- Several tenancy invariants rely on PostgreSQL constraints and triggers, so another database engine is not a drop-in replacement.
+- Local Compose credentials are development-only. Production deployment must provision separate least-privilege roles and secrets outside the repository.
 
 ## Immutable audit events
 
@@ -196,7 +256,7 @@ That option safely requeues eligible jobs or records a bounded terminal failure.
 Development and test PostgreSQL use the pinned `pgvector/pgvector:0.8.1-pg17` image with their existing named PostgreSQL 17 volumes. After pulling this change, recreate the database containers without removing volumes, apply migrations, and verify the extension:
 
 ```sh
-docker compose -f infrastructure/docker-compose.yml up -d --force-recreate postgres postgres-test
+docker compose --env-file .env -f infrastructure/docker-compose.yml up -d --force-recreate postgres postgres-test
 pnpm db:migrate
 pnpm db:vector:check
 ```
@@ -254,6 +314,7 @@ No external language-model adapter is installed. `AI_PROVIDER` cannot be selecte
 - `services/` — backend services
 - `packages/` — shared libraries and configuration
 - `packages/config/` — reusable TypeScript and ESLint configuration
+- `packages/domain/` — application-owned role and permission policy
 - `infrastructure/` — infrastructure definitions
 - `database/` — schemas and migrations
 - `architecture/` — architecture documentation

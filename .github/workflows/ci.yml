@@ -1,0 +1,88 @@
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Monorepo and database
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    env:
+      CI: 'true'
+      AUTH_SECRET: skyos-ci-only-auth-secret-not-for-production
+      DATABASE_URL: postgresql://skyos_ci:skyos_ci_only@127.0.0.1:5432/skyos_ci?schema=public
+      DATABASE_TEST_URL: postgresql://skyos_ci:skyos_ci_only@127.0.0.1:5432/skyos_test?schema=public
+      AI_PROVIDER: local
+      EMBEDDING_PROVIDER: local
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.1-pg17
+        env:
+          POSTGRES_DB: skyos_ci
+          POSTGRES_USER: skyos_ci
+          POSTGRES_PASSWORD: skyos_ci_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=skyos_ci --dbname=skyos_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Enable pinned pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Create isolated integration-test database
+        run: >-
+          docker exec "${{ job.services.postgres.id }}"
+          createdb --username=skyos_ci --owner=skyos_ci skyos_test
+
+      - name: Replay migrations from empty database
+        run: pnpm db:migrate:deploy
+
+      - name: Validate schema, drift, and database indexes
+        run: pnpm db:check
+
+      - name: Run database integration tests
+        run: pnpm db:test
+
+      - name: Run domain policy tests
+        run: pnpm test:domain
+
+      - name: Run monorepo quality checks
+        run: pnpm check
+
+      - name: Build all workspaces
+        run: pnpm build

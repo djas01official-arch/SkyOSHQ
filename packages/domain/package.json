@@ -1,0 +1,20 @@
+{
+  "name": "@skyos/domain",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/authorization-policy.ts"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "test": "tsx --test src/authorization-policy.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@skyos/config": "workspace:*",
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3"
+  }
+}

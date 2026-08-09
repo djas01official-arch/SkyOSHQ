@@ -3,6 +3,7 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
+      "passThroughEnv": ["AUTH_SECRET", "DATABASE_URL"],
       "outputs": ["dist/**", ".next/**"]
     },
     "dev": {

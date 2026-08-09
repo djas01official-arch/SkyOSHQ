@@ -154,7 +154,6 @@ model User {
   sessions                  Session[]
   workspaceMemberships      WorkspaceMembership[]
 
-  @@index([email])
   @@index([status])
   @@index([deletedAt])
   @@map("users")
@@ -238,6 +237,7 @@ model Organization {
 
   @@index([status])
   @@index([deletedAt])
+  @@index([createdByUserId])
   @@unique([slug], map: "organizations_active_slug_key", where: raw("((status = 'ACTIVE'::\"OrganizationStatus\") AND (\"deletedAt\" IS NULL))"))
   @@map("organizations")
 }
@@ -290,6 +290,7 @@ model Workspace {
 
   @@index([organizationId, status])
   @@index([deletedAt])
+  @@index([createdByUserId])
   @@unique([organizationId, slug], map: "workspaces_active_organization_slug_key", where: raw("((status = 'ACTIVE'::\"WorkspaceStatus\") AND (\"deletedAt\" IS NULL))"))
   @@map("workspaces")
 }
@@ -634,7 +635,7 @@ model WorkspaceMembership {
 }
 
 model AiConversation {
-  id          String               @id @default(uuid()) @db.Uuid
+  id          String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId String               @db.Uuid
   ownerUserId String               @db.Uuid
   title       String
@@ -654,7 +655,7 @@ model AiConversation {
 }
 
 model AiMessage {
-  id               String         @id @default(uuid()) @db.Uuid
+  id               String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   conversationId   String         @db.Uuid
   workspaceId      String         @db.Uuid
   authorUserId     String?        @db.Uuid
@@ -675,7 +676,7 @@ model AiMessage {
 }
 
 model AiRun {
-  id                String              @id @default(uuid()) @db.Uuid
+  id                String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   conversationId    String              @db.Uuid
   workspaceId       String              @db.Uuid
   requestedByUserId String              @db.Uuid
@@ -709,7 +710,7 @@ model AiRun {
 }
 
 model AiRetrievalSnapshot {
-  id              String          @id @default(uuid()) @db.Uuid
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   runId           String          @unique @db.Uuid
   workspaceId     String          @db.Uuid
   queryChecksum   String          @db.Char(64)
@@ -728,7 +729,7 @@ model AiRetrievalSnapshot {
 }
 
 model AiRunCitation {
-  id                       String                   @id @default(uuid()) @db.Uuid
+  id                       String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   snapshotId               String                   @db.Uuid
   citationId               String
   sourceType               KnowledgeChunkSourceType
@@ -752,5 +753,6 @@ model AiRunCitation {
   @@unique([snapshotId, chunkSetId, chunkOrdinal])
   @@index([sourceType, sourceId])
   @@index([attachmentId])
+  @@index([chunkSetId])
   @@map("ai_run_citations")
 }

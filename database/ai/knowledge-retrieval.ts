@@ -5,7 +5,6 @@ import {
   KnowledgeChunkSourceType,
   KnowledgeChunkingJobStatus,
   KnowledgeDocumentStatus,
-  WorkspaceRole,
   type Prisma,
   type PrismaClient,
 } from '../generated/client/client';
@@ -19,6 +18,7 @@ import {
   type KnowledgeSearchResult,
   type KnowledgeSearchScore,
 } from '../knowledge/knowledge-search';
+import { workspaceRoleGrantsPermission } from '../policy/authorization-policy';
 
 const DEFAULT_MAX_RESULTS = 8;
 const MAX_RESULTS = 20;
@@ -325,7 +325,7 @@ export async function retrieveKnowledgeContext(
   query: string,
 ): Promise<KnowledgeRetrievalResult> {
   const access = await requireKnowledgeWorkspaceAccess(prisma, actorUserId, workspaceId, false);
-  if (access.role === WorkspaceRole.VIEWER) {
+  if (!workspaceRoleGrantsPermission(access.role, 'ai.use')) {
     throw new KnowledgeRetrievalAuthorizationError(
       'ai.use requires an effective non-viewer workspace membership.',
     );

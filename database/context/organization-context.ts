@@ -6,6 +6,7 @@ import {
   WorkspaceRole,
   WorkspaceStatus,
 } from '../generated/client/client';
+import { organizationRoleGrantsPermission } from '../policy/authorization-policy';
 
 export type OrganizationSummary = {
   id: string;
@@ -36,11 +37,11 @@ export type ContextSelection = Readonly<{
 }>;
 
 function canEnumerateOrganizationWorkspaces(role: OrganizationRole): boolean {
-  return role === OrganizationRole.OWNER || role === OrganizationRole.ADMIN;
+  return organizationRoleGrantsPermission(role, 'organization.workspaces.read');
 }
 
 function canCreateOrganizationWorkspaces(role: OrganizationRole): boolean {
-  return role === OrganizationRole.OWNER || role === OrganizationRole.ADMIN;
+  return organizationRoleGrantsPermission(role, 'organization.workspaces.create');
 }
 
 /**

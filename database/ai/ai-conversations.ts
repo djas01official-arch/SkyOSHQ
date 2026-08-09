@@ -5,7 +5,6 @@ import {
   AiMessageRole,
   AiRunStatus,
   KnowledgeChunkSourceType,
-  WorkspaceRole,
   type PrismaClient,
 } from '../generated/client/client';
 import {
@@ -13,6 +12,7 @@ import {
   type KnowledgeRetrievalDependencies,
 } from './knowledge-retrieval';
 import { requireKnowledgeWorkspaceAccess } from '../knowledge/knowledge-documents';
+import { workspaceRoleGrantsPermission } from '../policy/authorization-policy';
 import {
   LanguageModelProviderError,
   type LanguageModelProvider,
@@ -46,7 +46,7 @@ async function requireAiAccess(
   workspaceId: string,
 ): Promise<void> {
   const access = await requireKnowledgeWorkspaceAccess(prisma, actorUserId, workspaceId, false);
-  if (access.role === WorkspaceRole.VIEWER) {
+  if (!workspaceRoleGrantsPermission(access.role, 'ai.use')) {
     throw new AiConversationAuthorizationError(
       'ai.use requires an effective non-viewer workspace membership.',
       'ai_forbidden',

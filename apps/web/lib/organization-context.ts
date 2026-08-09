@@ -3,6 +3,7 @@ import {
   type OrganizationContext,
 } from '../../../database/context/organization-context';
 import { WorkspaceRole } from '../../../database/generated/client/client';
+import { hasWorkspacePermission, type WorkspacePermissionKey } from '@skyos/domain';
 import { redirect } from 'next/navigation';
 
 import { auth } from '@/auth';
@@ -23,7 +24,20 @@ export async function getCurrentOrganizationContext(): Promise<OrganizationConte
   });
 }
 
-export type WorkspaceCapability = 'ai.use' | 'knowledge.read' | 'knowledge.write' | 'tasks.read';
+export type WorkspaceCapability = WorkspacePermissionKey;
+
+function getWorkspaceRoleKey(role: WorkspaceRole): 'owner' | 'admin' | 'member' | 'viewer' {
+  switch (role) {
+    case WorkspaceRole.OWNER:
+      return 'owner';
+    case WorkspaceRole.ADMIN:
+      return 'admin';
+    case WorkspaceRole.MEMBER:
+      return 'member';
+    case WorkspaceRole.VIEWER:
+      return 'viewer';
+  }
+}
 
 export function hasWorkspaceCapability(
   role: WorkspaceRole | null,
@@ -33,15 +47,7 @@ export function hasWorkspaceCapability(
     return false;
   }
 
-  if (capability === 'ai.use') {
-    return role !== WorkspaceRole.VIEWER;
-  }
-
-  if (capability === 'knowledge.write') {
-    return role !== WorkspaceRole.VIEWER;
-  }
-
-  return true;
+  return hasWorkspacePermission(getWorkspaceRoleKey(role), capability);
 }
 
 /** Enforces the selected workspace's effective membership and role grant. */

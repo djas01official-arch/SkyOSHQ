@@ -21,6 +21,7 @@ function getAttachmentBodySizeLimit(): number {
 }
 
 const nextConfig: NextConfig = {
+  transpilePackages: ['@skyos/domain'],
   experimental: {
     serverActions: {
       bodySizeLimit: getAttachmentBodySizeLimit(),

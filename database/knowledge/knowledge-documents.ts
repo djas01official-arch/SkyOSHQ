@@ -10,6 +10,7 @@ import {
   WorkspaceStatus,
 } from '../generated/client/client';
 import { appendAuditEvent, AuditAction, AuditTargetType } from '../audit/audit-event';
+import { workspaceRoleGrantsPermission } from '../policy/authorization-policy';
 
 export class KnowledgeDocumentError extends Error {}
 
@@ -126,7 +127,7 @@ export async function requireKnowledgeWorkspaceAccess(
   if (
     !membership ||
     membership.workspace.organization.memberships.length !== 1 ||
-    (write && membership.role === 'VIEWER')
+    (write && !workspaceRoleGrantsPermission(membership.role, 'knowledge.write'))
   ) {
     throw new KnowledgeAuthorizationError(
       write
