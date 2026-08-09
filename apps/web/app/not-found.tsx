@@ -1,5 +1,7 @@
 import Link from 'next/link';
 
+import { buttonClassName } from '@/components/ui/button';
+
 export default function NotFound() {
   return (
     <div className="mx-auto grid min-h-96 max-w-xl place-items-center text-center">
@@ -12,7 +14,7 @@ export default function NotFound() {
           Return to the SkyOS workspace foundation to continue.
         </p>
         <Link
-          className="mt-6 inline-flex rounded-control bg-accent px-4 py-2.5 text-sm font-medium text-accent-foreground"
+          className={buttonClassName({ className: 'mt-6', variant: 'primary' })}
           href="/dashboard"
         >
           Go to dashboard

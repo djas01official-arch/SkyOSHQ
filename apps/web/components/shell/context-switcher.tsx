@@ -12,6 +12,8 @@ import {
 } from '@/app/context-actions';
 import { Button } from '@/components/ui/button';
 import { Icon } from '@/components/ui/icon';
+import { Input } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
 
 type ContextSwitcherProps = Readonly<{
   context: OrganizationContext | null;
@@ -33,8 +35,8 @@ export function OrganizationSwitcher({ context }: ContextSwitcherProps) {
       <label className="sr-only" htmlFor="organization-switcher">
         Active organization
       </label>
-      <select
-        className="h-8 max-w-44 appearance-none rounded-control border border-border bg-surface py-1 pl-2.5 pr-7 text-xs font-medium text-foreground outline-none transition-colors hover:bg-surface-raised focus:border-accent focus:ring-2 focus:ring-accent/20"
+      <Select
+        className="h-8 max-w-44 py-1 pl-2.5 pr-7 text-xs font-semibold"
         defaultValue={context.activeOrganization.id}
         id="organization-switcher"
         name="organizationId"
@@ -45,7 +47,7 @@ export function OrganizationSwitcher({ context }: ContextSwitcherProps) {
             {organization.name}
           </option>
         ))}
-      </select>
+      </Select>
     </form>
   );
 }
@@ -71,8 +73,7 @@ export function WorkspaceSwitcher({ context }: ContextSwitcherProps) {
           <label className="sr-only" htmlFor="workspace-switcher">
             Active workspace
           </label>
-          <select
-            className="h-10 w-full rounded-control border border-border bg-surface px-3 text-sm text-foreground outline-none transition-colors hover:bg-surface-raised focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:cursor-not-allowed disabled:opacity-70"
+          <Select
             defaultValue={context.activeWorkspace?.id ?? ''}
             disabled={context.workspaces.length === 0}
             id="workspace-switcher"
@@ -92,7 +93,7 @@ export function WorkspaceSwitcher({ context }: ContextSwitcherProps) {
                 {workspace.hasActiveMembership ? '' : ' (no workspace access)'}
               </option>
             ))}
-          </select>
+          </Select>
         </form>
         <p className="mt-2 text-xs leading-5 text-muted-foreground">
           {context.activeWorkspace
@@ -118,9 +119,9 @@ export function WorkspaceSwitcher({ context }: ContextSwitcherProps) {
               <label className="sr-only" htmlFor="workspace-name">
                 Workspace name
               </label>
-              <input
+              <Input
                 autoComplete="off"
-                className="h-9 w-full rounded-control border border-border bg-surface px-3 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-accent focus:ring-2 focus:ring-accent/20"
+                className="h-9"
                 id="workspace-name"
                 maxLength={120}
                 name="name"

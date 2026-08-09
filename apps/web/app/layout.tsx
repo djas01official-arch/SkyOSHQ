@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 
+import '@fontsource-variable/sora';
+
 import { AppShell } from '@/components/shell/app-shell';
 import { getCurrentOrganizationContext } from '@/lib/organization-context';
 
@@ -13,14 +15,13 @@ export const metadata: Metadata = {
     default: 'SkyOS',
     template: '%s · SkyOS',
   },
-  description: 'SkyOS enterprise operating platform',
+  description: 'SkyOS enterprise operating platform. Your system. Your sky.',
 };
 
 const themeScript = `
   try {
     const savedTheme = localStorage.getItem('skyos-theme');
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    document.documentElement.classList.toggle('dark', savedTheme ? savedTheme === 'dark' : prefersDark);
+    document.documentElement.classList.toggle('dark', savedTheme !== 'light');
   } catch {}
 `;
 

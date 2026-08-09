@@ -11,7 +11,9 @@ import {
   setConversationArchivedAction,
   submitMessageAction,
 } from '@/app/ai/actions';
+import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { Textarea } from '@/components/ui/textarea';
 import { requireCurrentUser } from '@/lib/auth/current-user';
 import { requireWorkspaceCapability } from '@/lib/organization-context';
 import { prisma } from '@/lib/prisma';
@@ -50,9 +52,9 @@ export default async function ConversationPage({ params }: ConversationPageProps
         <form action={setConversationArchivedAction}>
           <input name="conversationId" type="hidden" value={conversation.id} />
           <input name="archived" type="hidden" value="true" />
-          <button className="text-sm font-medium text-muted-foreground" type="submit">
+          <Button size="small" type="submit" variant="danger">
             Archive
-          </button>
+          </Button>
         </form>
       </div>
       <div className="mt-7 space-y-4">
@@ -97,14 +99,14 @@ export default async function ConversationPage({ params }: ConversationPageProps
       {failedRuns.length ? (
         <div className="mt-4 space-y-2">
           {failedRuns.map((run) => (
-            <Card className="flex items-center justify-between gap-3 border-red-300" key={run.id}>
-              <span className="text-sm text-red-700 dark:text-red-200">{run.failureMessage}</span>
+            <Card className="flex items-center justify-between gap-3 border-danger/30" key={run.id}>
+              <span className="text-sm text-danger">{run.failureMessage}</span>
               <form action={retryRunAction}>
                 <input name="conversationId" type="hidden" value={conversation.id} />
                 <input name="runId" type="hidden" value={run.id} />
-                <button className="text-sm font-medium text-accent" type="submit">
+                <Button size="small" type="submit" variant="secondary">
                   Retry
-                </button>
+                </Button>
               </form>
             </Card>
           ))}
@@ -115,20 +117,16 @@ export default async function ConversationPage({ params }: ConversationPageProps
         <label className="sr-only" htmlFor="ai-message">
           Message
         </label>
-        <textarea
-          className="min-h-28 w-full rounded-control border border-border bg-surface p-3 text-sm text-foreground"
+        <Textarea
           id="ai-message"
           maxLength={4000}
           name="message"
           placeholder="Ask about workspace Knowledge"
           required
         />
-        <button
-          className="mt-2 h-10 rounded-control bg-accent px-4 text-sm font-medium text-accent-foreground"
-          type="submit"
-        >
+        <Button className="mt-2" type="submit" variant="primary">
           Send
-        </button>
+        </Button>
       </form>
     </div>
   );

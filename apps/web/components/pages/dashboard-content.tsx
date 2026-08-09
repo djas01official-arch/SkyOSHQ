@@ -1,6 +1,8 @@
+import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader } from '@/components/ui/card';
 import { Icon } from '@/components/ui/icon';
 import { PageHeader } from '@/components/ui/page-header';
+import { StatusIndicator } from '@/components/ui/status-indicator';
 
 const metrics = [
   { change: '+8.4%', label: 'Active workstreams', value: '12' },
@@ -40,9 +42,7 @@ export function DashboardContent({ organizationName, workspaceName }: DashboardC
               <strong className="text-3xl font-semibold tracking-tight text-foreground">
                 {metric.value}
               </strong>
-              <span className="rounded-full bg-success-soft px-2.5 py-1 text-xs font-medium text-success">
-                {metric.change}
-              </span>
+              <Badge tone="success">{metric.change}</Badge>
             </div>
           </Card>
         ))}
@@ -57,7 +57,7 @@ export function DashboardContent({ organizationName, workspaceName }: DashboardC
           <div className="mt-6 space-y-5">
             {activity.map((item, index) => (
               <div className="flex gap-3" key={item}>
-                <span className="mt-1 grid size-6 shrink-0 place-items-center rounded-full bg-accent-soft text-accent">
+                <span className="mt-1 grid size-6 shrink-0 place-items-center rounded-full border border-brand-bright/20 bg-accent-soft text-brand-highlight">
                   <Icon
                     className="size-3.5"
                     name={index === 0 ? 'activity' : index === 1 ? 'grid' : 'sparkles'}
@@ -77,18 +77,19 @@ export function DashboardContent({ organizationName, workspaceName }: DashboardC
         <Card>
           <CardHeader title="Start here" />
           <div className="mt-5 space-y-3">
-            <div className="rounded-control border border-border bg-surface-raised p-3">
+            <div className="rounded-control border border-border bg-surface-raised p-3 transition-colors hover:border-brand-bright/30">
               <p className="text-sm font-medium text-foreground">Explore AI</p>
               <p className="mt-1 text-sm text-muted-foreground">
                 A future home for enterprise intelligence.
               </p>
             </div>
-            <div className="rounded-control border border-border bg-surface-raised p-3">
+            <div className="rounded-control border border-border bg-surface-raised p-3 transition-colors hover:border-brand-bright/30">
               <p className="text-sm font-medium text-foreground">Organize knowledge</p>
               <p className="mt-1 text-sm text-muted-foreground">
                 A future home for trusted context.
               </p>
             </div>
+            <StatusIndicator tone="accent">Foundation services available</StatusIndicator>
           </div>
         </Card>
       </section>

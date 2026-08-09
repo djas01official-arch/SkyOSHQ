@@ -10,6 +10,7 @@ const paths = {
   close: 'm6 6 12 12M18 6 6 18',
   folder: 'M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z',
   grid: 'M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6Z',
+  logOut: 'M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4M14 8l4 4-4 4M9 12h9',
   menu: 'M4 7h16M4 12h16M4 17h16',
   moon: 'M20.5 14.1A8.5 8.5 0 0 1 9.9 3.5 8.5 8.5 0 1 0 20.5 14.1Z',
   more: 'M5 12h.01M12 12h.01M19 12h.01',

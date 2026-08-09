@@ -10,8 +10,12 @@ import {
   KnowledgeSearchError,
 } from '../../../../../database/knowledge/knowledge-search';
 
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { EmptyState } from '@/components/ui/empty-state';
 import { Icon } from '@/components/ui/icon';
+import { Input } from '@/components/ui/input';
 import { PageHeader } from '@/components/ui/page-header';
 import { requireCurrentUser } from '@/lib/auth/current-user';
 import { knowledgeRetrievalDependencies } from '@/lib/knowledge-retrieval';
@@ -82,8 +86,8 @@ export default async function RetrievalPage({ searchParams }: RetrievalPageProps
             className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
             name="search"
           />
-          <input
-            className="h-11 w-full rounded-control border border-border bg-surface py-2 pl-10 pr-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-accent focus:ring-2 focus:ring-accent-soft"
+          <Input
+            className="h-11 py-2 pl-10 pr-3"
             defaultValue={query}
             id="retrieval-query"
             maxLength={KNOWLEDGE_SEARCH_QUERY_MAX_CHARACTERS}
@@ -92,12 +96,9 @@ export default async function RetrievalPage({ searchParams }: RetrievalPageProps
             type="search"
           />
         </div>
-        <button
-          className="h-11 rounded-control border border-border bg-surface px-4 text-sm font-medium text-foreground hover:bg-surface-raised"
-          type="submit"
-        >
+        <Button className="h-11" type="submit" variant="secondary">
           Inspect
-        </button>
+        </Button>
       </form>
 
       {errorMessage ? (
@@ -144,9 +145,9 @@ export default async function RetrievalPage({ searchParams }: RetrievalPageProps
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <code className="text-xs text-accent">{item.citation.id}</code>
-                        <span className="rounded-full bg-accent-soft px-2 py-0.5 text-xs text-accent">
+                        <Badge tone={item.isNeighbor ? 'neutral' : 'accent'}>
                           {item.isNeighbor ? 'neighbor' : 'match'}
-                        </span>
+                        </Badge>
                         <span className="text-xs text-muted-foreground">
                           {item.citation.sourceType} · chunk {item.citation.chunkOrdinal + 1}
                         </span>
@@ -188,15 +189,12 @@ export default async function RetrievalPage({ searchParams }: RetrievalPageProps
           )}
         </>
       ) : (
-        <Card className="grid min-h-64 place-items-center text-center">
-          <div className="max-w-md">
-            <Icon className="mx-auto size-7 text-accent" name="sparkles" />
-            <h2 className="mt-4 text-lg font-semibold text-foreground">Inspect safe context</h2>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              Enter a question to inspect the exact active workspace chunks that a future AI run may
-              receive.
-            </p>
-          </div>
+        <Card className="grid min-h-64 place-items-center">
+          <EmptyState
+            description="Enter a question to inspect the exact active workspace chunks that a future AI run may receive."
+            icon="sparkles"
+            title="Inspect safe context"
+          />
         </Card>
       )}
     </div>

@@ -4,6 +4,8 @@ import { useActionState } from 'react';
 
 import type { KnowledgeDocumentActionState } from '@/app/knowledge/actions';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 
 type KnowledgeDocumentFormProps = Readonly<{
   action: (
@@ -35,8 +37,8 @@ export function KnowledgeDocumentForm({
       {version ? <input name="version" type="hidden" value={version} /> : null}
       <label className="block">
         <span className="text-sm font-medium text-foreground">Title</span>
-        <input
-          className="mt-2 h-11 w-full rounded-control border border-border bg-surface px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-accent focus:ring-2 focus:ring-accent-soft"
+        <Input
+          className="mt-2 h-11"
           defaultValue={title}
           maxLength={200}
           name="title"
@@ -46,8 +48,8 @@ export function KnowledgeDocumentForm({
       </label>
       <label className="block">
         <span className="text-sm font-medium text-foreground">Markdown</span>
-        <textarea
-          className="mt-2 min-h-80 w-full resize-y rounded-control border border-border bg-surface px-3 py-3 font-mono text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground focus:border-accent focus:ring-2 focus:ring-accent-soft"
+        <Textarea
+          className="mt-2 min-h-80 px-3 py-3 font-mono"
           defaultValue={content}
           maxLength={100000}
           name="content"
@@ -58,7 +60,7 @@ export function KnowledgeDocumentForm({
       {state.error ? (
         <p
           aria-live="polite"
-          className="rounded-control bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950/40 dark:text-red-200"
+          className="rounded-control bg-danger-soft px-3 py-2 text-sm text-danger"
         >
           {state.error}
         </p>

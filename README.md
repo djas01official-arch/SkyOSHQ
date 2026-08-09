@@ -10,6 +10,12 @@ SkyOS is an AI-native enterprise operating platform. The repository contains the
 - ESLint flat configuration
 - Prettier formatting
 
+## Brand and design system
+
+The web application follows the approved SkyOS dark-first brand system and self-hosts the Sora variable typeface. The component palette, accessibility constraints, tagline use, and missing-asset policy are documented in [brand guidelines](./docs/brand/brand-guidelines.md); implementation values and reusable utilities are listed in [design tokens](./docs/brand/design-tokens.md).
+
+The approved brand board is an external review asset and is not currently checked into the repository. Do not recreate or approximate the logo mark; add production logo, app-icon, and favicon files only when approved source assets are supplied.
+
 ## Prerequisites
 
 - Node.js 24 or later

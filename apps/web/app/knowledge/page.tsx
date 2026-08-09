@@ -10,9 +10,14 @@ import {
   type KnowledgeSearchResult,
 } from '../../../../database/knowledge/knowledge-search';
 
+import { Badge } from '@/components/ui/badge';
+import { Button, buttonClassName } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { EmptyState } from '@/components/ui/empty-state';
 import { Icon } from '@/components/ui/icon';
+import { Input } from '@/components/ui/input';
 import { PageHeader } from '@/components/ui/page-header';
+import { Select } from '@/components/ui/select';
 import { requireCurrentUser } from '@/lib/auth/current-user';
 import { knowledgeSearchDependencies } from '@/lib/knowledge-search';
 import { hasWorkspaceCapability, requireWorkspaceCapability } from '@/lib/organization-context';
@@ -84,22 +89,19 @@ export default async function KnowledgePage({ searchParams }: KnowledgePageProps
 
   return (
     <div className="mx-auto max-w-5xl">
-      <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-start">
-        <PageHeader
-          description={`Markdown and processed attachment knowledge within ${workspace.name}.`}
-          eyebrow="Workspace knowledge"
-          title="Knowledge"
-        />
-        {canWrite ? (
-          <Link
-            className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-control bg-accent px-4 text-sm font-medium text-accent-foreground shadow-sm transition-colors hover:bg-accent-hover"
-            href="/knowledge/new"
-          >
-            <Icon className="size-4" name="plus" />
-            New document
-          </Link>
-        ) : null}
-      </div>
+      <PageHeader
+        action={
+          canWrite ? (
+            <Link className={buttonClassName({ variant: 'primary' })} href="/knowledge/new">
+              <Icon className="size-4" name="plus" />
+              New document
+            </Link>
+          ) : null
+        }
+        description={`Markdown and processed attachment knowledge within ${workspace.name}.`}
+        eyebrow="Workspace knowledge"
+        title="Knowledge"
+      />
 
       <form
         action="/knowledge"
@@ -115,8 +117,8 @@ export default async function KnowledgePage({ searchParams }: KnowledgePageProps
             className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
             name="search"
           />
-          <input
-            className="h-11 w-full rounded-control border border-border bg-surface py-2 pl-10 pr-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-accent focus:ring-2 focus:ring-accent-soft"
+          <Input
+            className="h-11 py-2 pl-10 pr-3"
             defaultValue={query}
             id="knowledge-search"
             maxLength={KNOWLEDGE_SEARCH_QUERY_MAX_CHARACTERS}
@@ -128,22 +130,14 @@ export default async function KnowledgePage({ searchParams }: KnowledgePageProps
         <label className="sr-only" htmlFor="knowledge-search-mode">
           Search mode
         </label>
-        <select
-          className="h-11 rounded-control border border-border bg-surface px-3 text-sm text-foreground outline-none focus:border-accent focus:ring-2 focus:ring-accent-soft"
-          defaultValue={mode}
-          id="knowledge-search-mode"
-          name="mode"
-        >
+        <Select className="h-11" defaultValue={mode} id="knowledge-search-mode" name="mode">
           <option value="hybrid">Hybrid</option>
           <option value="keyword">Keyword</option>
           <option value="semantic">Semantic</option>
-        </select>
-        <button
-          className="h-11 rounded-control border border-border bg-surface px-4 text-sm font-medium text-foreground transition-colors hover:bg-surface-raised"
-          type="submit"
-        >
+        </Select>
+        <Button className="h-11" type="submit" variant="secondary">
           Search
-        </button>
+        </Button>
       </form>
 
       {query ? (
@@ -168,9 +162,7 @@ export default async function KnowledgePage({ searchParams }: KnowledgePageProps
                       <h2 className="text-base font-semibold text-foreground">
                         {result.documentTitle}
                       </h2>
-                      <span className="rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent">
-                        {result.sourceType}
-                      </span>
+                      <Badge tone="accent">{result.sourceType}</Badge>
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {resultSource(result)} · chunk {result.chunkOrdinal + 1}
@@ -190,20 +182,16 @@ export default async function KnowledgePage({ searchParams }: KnowledgePageProps
           ))}
         </div>
       ) : query ? (
-        <Card className="grid min-h-72 place-items-center text-center">
-          <div className="max-w-md">
-            <span className="mx-auto grid size-12 place-items-center rounded-card bg-accent-soft text-accent">
-              <Icon className="size-6" name="search" />
-            </span>
-            <h2 className="mt-5 text-xl font-semibold tracking-tight text-foreground">
-              No matching processed knowledge
-            </h2>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              {mode === 'semantic'
+        <Card className="grid min-h-72 place-items-center">
+          <EmptyState
+            description={
+              mode === 'semantic'
                 ? 'No current embedded chunks matched. Process chunks and embeddings, or try keyword search.'
-                : 'Try another phrase. Only current chunks from active documents and attachments are searched.'}
-            </p>
-          </div>
+                : 'Try another phrase. Only current chunks from active documents and attachments are searched.'
+            }
+            icon="search"
+            title="No matching processed knowledge"
+          />
         </Card>
       ) : documents.length ? (
         <div className="grid gap-3">
@@ -224,29 +212,23 @@ export default async function KnowledgePage({ searchParams }: KnowledgePageProps
                       })}
                     </p>
                   </div>
-                  <span className="rounded-full bg-accent-soft px-2.5 py-1 text-xs font-medium text-accent">
-                    v{document.version}
-                  </span>
+                  <Badge tone="accent">v{document.version}</Badge>
                 </div>
               </Card>
             </Link>
           ))}
         </div>
       ) : (
-        <Card className="grid min-h-72 place-items-center text-center">
-          <div className="max-w-md">
-            <span className="mx-auto grid size-12 place-items-center rounded-card bg-accent-soft text-accent">
-              <Icon className="size-6" name="book" />
-            </span>
-            <h2 className="mt-5 text-xl font-semibold tracking-tight text-foreground">
-              No documents yet
-            </h2>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              {canWrite
+        <Card className="grid min-h-72 place-items-center">
+          <EmptyState
+            description={
+              canWrite
                 ? 'Create the first Markdown document for this workspace.'
-                : 'Documents created by workspace contributors will appear here.'}
-            </p>
-          </div>
+                : 'Documents created by workspace contributors will appear here.'
+            }
+            icon="book"
+            title="No documents yet"
+          />
         </Card>
       )}
     </div>

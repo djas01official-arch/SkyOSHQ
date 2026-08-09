@@ -4,6 +4,7 @@ import { useActionState } from 'react';
 
 import type { KnowledgeAttachmentActionState } from '@/app/knowledge/attachment-actions';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 
 type KnowledgeAttachmentUploadProps = Readonly<{
   action: (
@@ -28,9 +29,9 @@ export function KnowledgeAttachmentUpload({
       <input name="slug" type="hidden" value={slug} />
       <label className="block">
         <span className="text-sm font-medium text-foreground">Upload attachment</span>
-        <input
+        <Input
           accept=".pdf,.docx,.png,.jpg,.jpeg,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg"
-          className="mt-2 block w-full rounded-control border border-border bg-surface px-3 py-2 text-sm text-foreground file:mr-3 file:rounded-control file:border-0 file:bg-surface-raised file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-foreground"
+          className="mt-2 h-auto py-2 file:mr-3 file:rounded-control file:border-0 file:bg-surface-raised file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-foreground"
           name="file"
           required
           type="file"
@@ -40,7 +41,7 @@ export function KnowledgeAttachmentUpload({
         PDF, DOCX, PNG, or JPEG. Maximum {Math.ceil(maxFileSizeBytes / 1024 / 1024)} MB.
       </p>
       {state.error ? (
-        <p aria-live="polite" className="text-sm text-red-700 dark:text-red-200">
+        <p aria-live="polite" className="text-sm text-danger">
           {state.error}
         </p>
       ) : null}

@@ -3,7 +3,10 @@ import Link from 'next/link';
 import { listAiConversations } from '../../../../database/ai/ai-conversations';
 
 import { createConversationAction, setConversationArchivedAction } from '@/app/ai/actions';
+import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { EmptyState } from '@/components/ui/empty-state';
+import { Icon } from '@/components/ui/icon';
 import { PageHeader } from '@/components/ui/page-header';
 import { requireCurrentUser } from '@/lib/auth/current-user';
 import { requireWorkspaceCapability } from '@/lib/organization-context';
@@ -22,21 +25,19 @@ export default async function AiPage() {
 
   return (
     <div className="mx-auto max-w-5xl">
-      <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-start">
-        <PageHeader
-          description={`Grounded AI conversations for ${workspace.name}.`}
-          eyebrow="Workspace AI"
-          title="AI"
-        />
-        <form action={createConversationAction}>
-          <button
-            className="h-10 rounded-control bg-accent px-4 text-sm font-medium text-accent-foreground"
-            type="submit"
-          >
-            New conversation
-          </button>
-        </form>
-      </div>
+      <PageHeader
+        action={
+          <form action={createConversationAction}>
+            <Button type="submit" variant="primary">
+              <Icon className="size-4" name="plus" />
+              New conversation
+            </Button>
+          </form>
+        }
+        description={`Grounded AI conversations for ${workspace.name}.`}
+        eyebrow="Workspace AI"
+        title="AI"
+      />
       <div className="mb-5 flex justify-end">
         <Link className="text-sm font-medium text-accent hover:underline" href="/ai/retrieval">
           Open retrieval inspector
@@ -54,7 +55,13 @@ export default async function AiPage() {
           </Link>
         ))}
         {!active.length ? (
-          <Card className="text-sm text-muted-foreground">No active conversations.</Card>
+          <Card>
+            <EmptyState
+              description="Start a grounded workspace conversation when you are ready."
+              icon="sparkles"
+              title="No active conversations"
+            />
+          </Card>
         ) : null}
       </div>
       {archived.length ? (
@@ -67,9 +74,9 @@ export default async function AiPage() {
                 <form action={setConversationArchivedAction}>
                   <input name="conversationId" type="hidden" value={conversation.id} />
                   <input name="archived" type="hidden" value="false" />
-                  <button className="text-sm font-medium text-accent" type="submit">
+                  <Button size="small" type="submit" variant="ghost">
                     Restore
-                  </button>
+                  </Button>
                 </form>
               </Card>
             ))}

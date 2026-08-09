@@ -3,6 +3,7 @@
 import { useActionState } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 
 import { login, type LoginState } from '@/app/login/actions';
 
@@ -17,9 +18,9 @@ export function LoginForm() {
         <label className="text-sm font-medium text-foreground" htmlFor="email">
           Email address
         </label>
-        <input
+        <Input
           autoComplete="email"
-          className="mt-2 h-10 w-full rounded-control border border-border bg-surface px-3 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-accent focus:ring-2 focus:ring-accent/20"
+          className="mt-2"
           id="email"
           name="email"
           required
@@ -30,9 +31,9 @@ export function LoginForm() {
         <label className="text-sm font-medium text-foreground" htmlFor="password">
           Password
         </label>
-        <input
+        <Input
           autoComplete="current-password"
-          className="mt-2 h-10 w-full rounded-control border border-border bg-surface px-3 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-accent focus:ring-2 focus:ring-accent/20"
+          className="mt-2"
           id="password"
           name="password"
           required
