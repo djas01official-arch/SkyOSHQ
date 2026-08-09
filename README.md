@@ -26,8 +26,12 @@ The approved brand board is an external review asset and is not currently checke
 ```sh
 corepack enable
 pnpm install
+cp .env.example .env
+pnpm db:generate
 pnpm check
 ```
+
+On PowerShell, use `Copy-Item .env.example .env`. Prisma Client is generated under ignored `database/generated/` output and must be regenerated after a fresh install or schema change; do not commit it.
 
 ## Common commands
 
@@ -39,6 +43,7 @@ pnpm lint         # Lint repository configuration and source files
 pnpm typecheck    # Type-check the root configuration
 pnpm build        # Run build tasks in all workspaces that define one
 pnpm dev          # Run development tasks in all workspaces that define one
+pnpm db:generate  # Generate the ignored Prisma Client from the committed schema
 pnpm test:domain  # Test the application-owned role and permission policy
 ```
 
@@ -49,6 +54,7 @@ GitHub Actions runs the single `Monorepo and database` validation job for pull r
 The service initializes an empty `skyos_ci` database and creates a separate `skyos_test` database. Both use fixed CI-only credentials declared in the workflow; no repository secret or external database is required. CI then runs:
 
 ```sh
+pnpm db:generate       # Generate the ignored Prisma Client used by later checks
 pnpm db:migrate:deploy # Replay all committed migrations into empty skyos_ci
 pnpm db:check          # Validate Prisma, live schema drift, and database indexes
 pnpm db:test           # Migrate and test only the isolated skyos_test database
@@ -61,6 +67,7 @@ To reproduce the database and quality checks with the documented local-only cont
 
 ```sh
 cp .env.example .env
+pnpm db:generate
 pnpm db:up
 pnpm db:test:up
 pnpm db:migrate:deploy
@@ -84,9 +91,9 @@ Copy the local configuration, start PostgreSQL, apply migrations, generate the c
 
 ```sh
 cp .env.example .env
+pnpm db:generate
 pnpm db:up
 pnpm db:migrate
-pnpm db:generate
 pnpm db:seed
 ```
 
@@ -104,6 +111,7 @@ Prisma commands use [prisma.config.ts](./prisma.config.ts), with schema and migr
 
 ```sh
 pnpm prisma validate
+pnpm db:generate
 pnpm prisma migrate dev
 pnpm prisma db seed
 pnpm db:check
@@ -119,6 +127,7 @@ Database integration tests run only against the dedicated `skyos_test` PostgreSQ
 
 ```sh
 cp .env.example .env
+pnpm db:generate
 pnpm db:test:up
 pnpm db:test
 ```
