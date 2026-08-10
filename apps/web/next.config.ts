@@ -20,7 +20,22 @@ function getAttachmentBodySizeLimit(): number {
   return size + 1024 * 1024;
 }
 
+function getTestBuildDirectory(): string | undefined {
+  const value = process.env.SKYOS_NEXT_DIST_DIR?.trim();
+
+  if (!value) {
+    return undefined;
+  }
+
+  if (!/^temp\/auth-e2e-[a-z0-9_-]+$/.test(value)) {
+    throw new Error('SKYOS_NEXT_DIST_DIR must be a generated auth E2E directory under temp/.');
+  }
+
+  return value;
+}
+
 const nextConfig: NextConfig = {
+  distDir: getTestBuildDirectory(),
   transpilePackages: ['@skyos/domain'],
   experimental: {
     serverActions: {

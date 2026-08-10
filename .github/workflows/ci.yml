@@ -25,6 +25,7 @@ jobs:
       AUTH_SECRET: skyos-ci-only-auth-secret-not-for-production
       DATABASE_URL: postgresql://skyos_ci:skyos_ci_only@127.0.0.1:5432/skyos_ci?schema=public
       DATABASE_TEST_URL: postgresql://skyos_ci:skyos_ci_only@127.0.0.1:5432/skyos_test?schema=public
+      AUTH_E2E_DATABASE_ADMIN_URL: postgresql://skyos_ci:skyos_ci_only@127.0.0.1:5432/postgres
       AI_PROVIDER: local
       EMBEDDING_PROVIDER: local
 
@@ -80,6 +81,9 @@ jobs:
 
       - name: Run database integration tests
         run: pnpm db:test
+
+      - name: Run black-box authentication tests
+        run: pnpm test:auth:e2e
 
       - name: Run domain policy tests
         run: pnpm test:domain

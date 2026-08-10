@@ -33,6 +33,7 @@
     "db:seed": "prisma db seed",
     "db:test:migrate": "tsx database/scripts/migrate-test.ts",
     "db:test": "pnpm db:test:migrate && tsx --env-file-if-exists=.env --test --test-concurrency=1 database/tests/tenancy.integration.test.ts database/tests/authentication.integration.test.ts database/tests/organization-context.integration.test.ts database/tests/audit-events.integration.test.ts database/tests/knowledge-documents.integration.test.ts database/tests/knowledge-attachments.integration.test.ts database/tests/document-processing.integration.test.ts database/tests/knowledge-chunking.integration.test.ts database/tests/background-jobs.integration.test.ts database/tests/knowledge-embeddings.integration.test.ts database/tests/knowledge-search.integration.test.ts database/tests/knowledge-retrieval.integration.test.ts database/tests/ai-conversations.integration.test.ts apps/web/lib/auth/security.test.ts apps/web/components/knowledge/markdown-document.test.tsx",
+    "test:auth:e2e": "tsx scripts/run-auth-e2e.ts",
     "test:domain": "pnpm --filter @skyos/domain test && tsx --test database/policy/authorization-policy.test.ts"
   },
   "dependencies": {
