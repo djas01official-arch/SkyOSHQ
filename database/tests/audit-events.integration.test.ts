@@ -232,7 +232,7 @@ test('privileged organization and workspace operations emit audit events', async
   }
 });
 
-test('a failed audit insert rolls back the protected workspace mutation', async () => {
+test('a failed audit insert rolls back protected organization and workspace mutations', async () => {
   const ownerId = await createUser();
   const organizationId = await createOrganization(ownerId);
   const workspace = await createWorkspaceForOrganization(
@@ -257,10 +257,15 @@ test('a failed audit insert rolls back the protected workspace mutation', async 
 
   try {
     await assert.rejects(archiveWorkspace(prisma, ownerId, workspace.id));
+    await assert.rejects(archiveOrganization(prisma, ownerId, organizationId));
     const persistedWorkspace = await prisma.workspace.findUniqueOrThrow({
       where: { id: workspace.id },
     });
+    const persistedOrganization = await prisma.organization.findUniqueOrThrow({
+      where: { id: organizationId },
+    });
     assert.equal(persistedWorkspace.status, WorkspaceStatus.ACTIVE);
+    assert.equal(persistedOrganization.status, OrganizationStatus.ACTIVE);
   } finally {
     await prisma.$executeRawUnsafe(
       'DROP TRIGGER IF EXISTS reject_audit_event_insert_for_test ON "audit_events";',

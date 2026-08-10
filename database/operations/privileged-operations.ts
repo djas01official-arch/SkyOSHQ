@@ -9,6 +9,10 @@ import {
   WorkspaceStatus,
 } from '../generated/client/client';
 import { appendAuditEvent, AuditAction, AuditTargetType } from '../audit/audit-event';
+import {
+  organizationRoleGrantsPermission,
+  workspaceRoleGrantsPermission,
+} from '../policy/authorization-policy';
 
 export class PrivilegedOperationError extends Error {}
 
@@ -24,6 +28,17 @@ function isOrganizationRole(role: OrganizationRole, expected: OrganizationRole):
 
 function isWorkspaceRole(role: WorkspaceRole, expected: WorkspaceRole): boolean {
   return role === expected;
+}
+
+function canManageWorkspaceLifecycle(
+  organizationRole: OrganizationRole,
+  workspaceRole: WorkspaceRole | undefined,
+): boolean {
+  return (
+    organizationRoleGrantsPermission(organizationRole, 'organization.workspaces.manage') ||
+    (workspaceRole !== undefined &&
+      workspaceRoleGrantsPermission(workspaceRole, 'workspace.archive'))
+  );
 }
 
 async function getActiveOrganizationActor(
@@ -294,7 +309,7 @@ export async function archiveOrganization(
     const organization = await getOrganization(transaction, organizationId, true);
     const actor = await getActiveOrganizationActor(transaction, actorUserId, organization.id);
 
-    if (!isOrganizationRole(actor.role, OrganizationRole.OWNER)) {
+    if (!organizationRoleGrantsPermission(actor.role, 'organization.archive')) {
       throw new PrivilegedAuthorizationError(
         'Only organization owners can archive an organization.',
       );
@@ -324,7 +339,7 @@ export async function restoreOrganization(
     const organization = await getOrganization(transaction, organizationId, false);
     const actor = await getActiveOrganizationActor(transaction, actorUserId, organization.id);
 
-    if (!isOrganizationRole(actor.role, OrganizationRole.OWNER)) {
+    if (!organizationRoleGrantsPermission(actor.role, 'organization.archive')) {
       throw new PrivilegedAuthorizationError(
         'Only organization owners can restore an organization.',
       );
@@ -355,10 +370,7 @@ export async function archiveWorkspace(
 ): Promise<void> {
   await prisma.$transaction(async (transaction) => {
     const actor = await getWorkspaceActor(transaction, actorUserId, workspaceId, true);
-    const canArchive =
-      isOrganizationRole(actor.organizationRole, OrganizationRole.OWNER) ||
-      isOrganizationRole(actor.organizationRole, OrganizationRole.ADMIN) ||
-      isWorkspaceRole(actor.workspaceRole ?? WorkspaceRole.VIEWER, WorkspaceRole.OWNER);
+    const canArchive = canManageWorkspaceLifecycle(actor.organizationRole, actor.workspaceRole);
 
     if (!canArchive) {
       throw new PrivilegedAuthorizationError(
@@ -392,10 +404,7 @@ export async function restoreWorkspace(
     if (actor.organization.status !== OrganizationStatus.ACTIVE) {
       throw new PrivilegedStateError('An archived organization cannot restore a workspace.');
     }
-    const canRestore =
-      isOrganizationRole(actor.organizationRole, OrganizationRole.OWNER) ||
-      isOrganizationRole(actor.organizationRole, OrganizationRole.ADMIN) ||
-      isWorkspaceRole(actor.workspaceRole ?? WorkspaceRole.VIEWER, WorkspaceRole.OWNER);
+    const canRestore = canManageWorkspaceLifecycle(actor.organizationRole, actor.workspaceRole);
 
     if (!canRestore) {
       throw new PrivilegedAuthorizationError(

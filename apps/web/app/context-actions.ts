@@ -15,6 +15,15 @@ import {
   createWorkspaceForOrganization,
 } from '../../../database/context/workspace-creation';
 import { getOrganizationContext } from '../../../database/context/organization-context';
+import { getTenantManagementContext } from '../../../database/context/tenant-management';
+import {
+  archiveOrganization,
+  archiveWorkspace,
+  PrivilegedAuthorizationError,
+  PrivilegedStateError,
+  restoreOrganization,
+  restoreWorkspace,
+} from '../../../database/operations/privileged-operations';
 
 import { unstable_update } from '@/auth';
 import { getCurrentUser } from '@/lib/auth/current-user';
@@ -26,6 +35,10 @@ export type CreateWorkspaceState = {
 };
 
 export type CreateOrganizationState = {
+  error: string | null;
+};
+
+export type TenantLifecycleState = {
   error: string | null;
 };
 
@@ -43,6 +56,33 @@ async function requireUserId(): Promise<string> {
   }
 
   return user.id;
+}
+
+function lifecycleError(error: unknown): TenantLifecycleState | null {
+  if (error instanceof PrivilegedAuthorizationError) {
+    return { error: 'You do not have permission to change this tenant lifecycle.' };
+  }
+
+  if (error instanceof PrivilegedStateError) {
+    return { error: error.message };
+  }
+
+  return null;
+}
+
+async function persistResolvedContext(
+  userId: string,
+  selection: {
+    activeOrganizationId?: string | null;
+    activeWorkspaceId?: string | null;
+  },
+): Promise<void> {
+  const context = await getOrganizationContext(prisma, userId, selection);
+
+  await unstable_update({
+    activeOrganizationId: context.activeOrganization?.id ?? null,
+    activeWorkspaceId: context.activeWorkspace?.id ?? null,
+  });
 }
 
 export async function selectOrganizationAction(formData: FormData): Promise<void> {
@@ -174,4 +214,123 @@ export async function createWorkspaceAction(
     activeWorkspaceId: workspace.id,
   });
   redirect('/dashboard');
+}
+
+export async function archiveOrganizationAction(
+  _previousState: TenantLifecycleState,
+  formData: FormData,
+): Promise<TenantLifecycleState> {
+  const organizationId = getFormString(formData, 'organizationId');
+  const userId = await requireUserId();
+  const context = await getCurrentOrganizationContext();
+
+  if (!organizationId || context?.activeOrganization?.id !== organizationId) {
+    return { error: 'The active organization could not be resolved.' };
+  }
+
+  try {
+    await archiveOrganization(prisma, userId, organizationId);
+  } catch (error) {
+    const state = lifecycleError(error);
+    if (state) return state;
+    throw error;
+  }
+
+  await persistResolvedContext(userId, {
+    activeOrganizationId: organizationId,
+    activeWorkspaceId: context.activeWorkspace?.id,
+  });
+  redirect('/settings');
+}
+
+export async function restoreOrganizationAction(
+  _previousState: TenantLifecycleState,
+  formData: FormData,
+): Promise<TenantLifecycleState> {
+  const organizationId = getFormString(formData, 'organizationId');
+  const userId = await requireUserId();
+  const context = await getCurrentOrganizationContext();
+  const management = await getTenantManagementContext(prisma, userId, {
+    activeOrganizationId: context?.activeOrganization?.id,
+    activeWorkspaceId: context?.activeWorkspace?.id,
+  });
+
+  if (
+    !organizationId ||
+    !management.archivedOrganizations.some((organization) => organization.id === organizationId)
+  ) {
+    return { error: 'The archived organization could not be resolved.' };
+  }
+
+  try {
+    await restoreOrganization(prisma, userId, organizationId);
+  } catch (error) {
+    const state = lifecycleError(error);
+    if (state) return state;
+    throw error;
+  }
+
+  await persistResolvedContext(userId, { activeOrganizationId: organizationId });
+  redirect('/settings');
+}
+
+export async function archiveWorkspaceAction(
+  _previousState: TenantLifecycleState,
+  formData: FormData,
+): Promise<TenantLifecycleState> {
+  const workspaceId = getFormString(formData, 'workspaceId');
+  const userId = await requireUserId();
+  const context = await getCurrentOrganizationContext();
+
+  if (!workspaceId || context?.activeWorkspace?.id !== workspaceId) {
+    return { error: 'The active workspace could not be resolved.' };
+  }
+
+  try {
+    await archiveWorkspace(prisma, userId, workspaceId);
+  } catch (error) {
+    const state = lifecycleError(error);
+    if (state) return state;
+    throw error;
+  }
+
+  await persistResolvedContext(userId, {
+    activeOrganizationId: context.activeOrganization?.id,
+    activeWorkspaceId: workspaceId,
+  });
+  redirect('/settings');
+}
+
+export async function restoreWorkspaceAction(
+  _previousState: TenantLifecycleState,
+  formData: FormData,
+): Promise<TenantLifecycleState> {
+  const workspaceId = getFormString(formData, 'workspaceId');
+  const userId = await requireUserId();
+  const context = await getCurrentOrganizationContext();
+  const management = await getTenantManagementContext(prisma, userId, {
+    activeOrganizationId: context?.activeOrganization?.id,
+    activeWorkspaceId: context?.activeWorkspace?.id,
+  });
+
+  if (
+    !workspaceId ||
+    !management.archivedWorkspaces.some((workspace) => workspace.id === workspaceId)
+  ) {
+    return { error: 'The archived workspace could not be resolved.' };
+  }
+
+  try {
+    await restoreWorkspace(prisma, userId, workspaceId);
+  } catch (error) {
+    const state = lifecycleError(error);
+    if (state) return state;
+    throw error;
+  }
+
+  await persistResolvedContext(userId, {
+    activeOrganizationId: context?.activeOrganization?.id,
+    activeWorkspaceId: workspaceId,
+  });
+  redirect('/settings');
 }
