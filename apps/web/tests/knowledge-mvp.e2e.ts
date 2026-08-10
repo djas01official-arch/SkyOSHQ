@@ -108,6 +108,10 @@ function normalizeLineEndings(value: string): string {
   return value.replace(/\r\n?/gu, '\n');
 }
 
+function normalizeReactTextBoundaries(value: string): string {
+  return value.replaceAll('<!-- -->', '');
+}
+
 export async function runKnowledgeMvpE2eScenario(
   context: TestContext,
   harness: KnowledgeE2eHarness,
@@ -259,9 +263,18 @@ export async function runKnowledgeMvpE2eScenario(
       assert.ok(searchPage.includes(updatedTitle));
       assert.ok(searchPage.includes(searchMarker));
 
-      const historyPage = await loadHtml(ownerJar, `${detailPath}/history`);
-      assert.match(historyPage, /Version 2/u);
-      assert.match(historyPage, /Version 1/u);
+      const historyPage = normalizeReactTextBoundaries(
+        await loadHtml(ownerJar, `${detailPath}/history`),
+      );
+      const currentVersionIndex = historyPage.indexOf('Version 2 · Current');
+      const previousVersionIndex = historyPage.indexOf('Version 1');
+      assert.ok(currentVersionIndex >= 0, 'History must identify version 2 as current.');
+      assert.ok(previousVersionIndex >= 0, 'History must include version 1.');
+      assert.ok(
+        currentVersionIndex < previousVersionIndex,
+        'History must render the current version before the previous version.',
+      );
+      assert.equal(historyPage.includes('Version 1 · Current'), false);
 
       const viewer = await harness.createIdentity('knowledge-viewer');
       await addViewer(harness.prisma, viewer, organizationId, workspaceId);
