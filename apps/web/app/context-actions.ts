@@ -3,7 +3,14 @@
 import { redirect } from 'next/navigation';
 
 import {
+  OrganizationAuthorizationError,
+  OrganizationConflictError,
+  OrganizationValidationError,
+  createOrganizationForUser,
+} from '../../../database/context/organization-creation';
+import {
   WorkspaceAuthorizationError,
+  WorkspaceConflictError,
   WorkspaceValidationError,
   createWorkspaceForOrganization,
 } from '../../../database/context/workspace-creation';
@@ -15,6 +22,10 @@ import { getCurrentOrganizationContext } from '@/lib/organization-context';
 import { prisma } from '@/lib/prisma';
 
 export type CreateWorkspaceState = {
+  error: string | null;
+};
+
+export type CreateOrganizationState = {
   error: string | null;
 };
 
@@ -81,16 +92,55 @@ export async function selectWorkspaceAction(formData: FormData): Promise<void> {
   redirect('/dashboard');
 }
 
+export async function createOrganizationAction(
+  _previousState: CreateOrganizationState,
+  formData: FormData,
+): Promise<CreateOrganizationState> {
+  const name = getFormString(formData, 'name');
+  const slug = getFormString(formData, 'slug');
+  const userId = await requireUserId();
+
+  if (!name || !slug) {
+    return { error: 'Enter an organization name and slug.' };
+  }
+
+  let organization: { id: string };
+
+  try {
+    organization = await createOrganizationForUser(prisma, userId, name, slug);
+  } catch (error) {
+    if (
+      error instanceof OrganizationValidationError ||
+      error instanceof OrganizationConflictError
+    ) {
+      return { error: error.message };
+    }
+
+    if (error instanceof OrganizationAuthorizationError) {
+      return { error: 'Unable to create an organization.' };
+    }
+
+    throw error;
+  }
+
+  await unstable_update({
+    activeOrganizationId: organization.id,
+    activeWorkspaceId: null,
+  });
+  redirect('/settings');
+}
+
 export async function createWorkspaceAction(
   _previousState: CreateWorkspaceState,
   formData: FormData,
 ): Promise<CreateWorkspaceState> {
   const name = getFormString(formData, 'name');
+  const slug = getFormString(formData, 'slug');
   const userId = await requireUserId();
   const context = await getCurrentOrganizationContext();
 
-  if (!name) {
-    return { error: 'Enter a workspace name.' };
+  if (!name || !slug) {
+    return { error: 'Enter a workspace name and slug.' };
   }
 
   if (!context?.activeOrganization || !context.canCreateWorkspace) {
@@ -105,10 +155,15 @@ export async function createWorkspaceAction(
       userId,
       context.activeOrganization.id,
       name,
+      slug,
     );
   } catch (error) {
-    if (error instanceof WorkspaceValidationError || error instanceof WorkspaceAuthorizationError) {
+    if (error instanceof WorkspaceValidationError || error instanceof WorkspaceConflictError) {
       return { error: error.message };
+    }
+
+    if (error instanceof WorkspaceAuthorizationError) {
+      return { error: 'You do not have permission to create a workspace here.' };
     }
 
     throw error;

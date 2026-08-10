@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from '../generated/client/client';
 
 export const AuditAction = {
+  ORGANIZATION_CREATED: 'organization.created',
   ORGANIZATION_ARCHIVED: 'organization.archived',
   ORGANIZATION_RESTORED: 'organization.restored',
   ORGANIZATION_MEMBERSHIP_ROLE_CHANGED: 'organization_membership.role_changed',

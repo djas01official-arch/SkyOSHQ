@@ -7,6 +7,7 @@ import { after, beforeEach, test } from 'node:test';
 import argon2 from 'argon2';
 import { PrismaPg } from '@prisma/adapter-pg';
 
+import { AuditAction } from '../audit/audit-event';
 import { authenticateCredentials, normalizeCredentials } from '../auth/credentials';
 import { findActiveSessionUser } from '../auth/session-user';
 import {
@@ -89,6 +90,12 @@ test('credentials authenticate active users and bootstrap one organization-owner
 
   await authenticateCredentials(prisma, { email, password });
   assert.equal(await prisma.organizationMembership.count({ where: { userId: user.id } }), 1);
+  assert.equal(
+    await prisma.auditEvent.count({
+      where: { action: AuditAction.ORGANIZATION_CREATED, actorUserId: user.id },
+    }),
+    1,
+  );
   assert.equal(await authenticateCredentials(prisma, { email, password: 'incorrect' }), null);
 
   await prisma.user.update({

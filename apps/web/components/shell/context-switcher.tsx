@@ -44,7 +44,7 @@ export function OrganizationSwitcher({ context }: ContextSwitcherProps) {
       >
         {context.organizations.map((organization) => (
           <option key={organization.id} value={organization.id}>
-            {organization.name}
+            {organization.name} ({organization.role.toLowerCase()})
           </option>
         ))}
       </Select>
@@ -90,7 +90,9 @@ export function WorkspaceSwitcher({ context }: ContextSwitcherProps) {
                 value={workspace.id}
               >
                 {workspace.name}
-                {workspace.hasActiveMembership ? '' : ' (no workspace access)'}
+                {workspace.hasActiveMembership
+                  ? ` (${workspace.role?.toLowerCase()})`
+                  : ' (directory only)'}
               </option>
             ))}
           </Select>
@@ -127,6 +129,20 @@ export function WorkspaceSwitcher({ context }: ContextSwitcherProps) {
                 name="name"
                 placeholder="Workspace name"
                 required
+              />
+              <label className="sr-only" htmlFor="workspace-slug">
+                Workspace slug
+              </label>
+              <Input
+                autoCapitalize="none"
+                autoComplete="off"
+                className="h-9"
+                id="workspace-slug"
+                maxLength={80}
+                name="slug"
+                placeholder="workspace-slug"
+                required
+                spellCheck={false}
               />
               {state.error ? (
                 <p aria-live="polite" className="text-xs leading-5 text-danger">

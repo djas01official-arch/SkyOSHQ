@@ -251,12 +251,22 @@ export function AppShell({ children, context, onSignOut }: AppShellProps) {
             <p className="mt-2 text-sm text-muted-foreground">
               {context?.activeOrganization?.name ?? 'No active organization'}
             </p>
+            {context?.activeOrganization ? (
+              <p className="mt-1 font-mono text-xs text-muted-foreground">
+                {context.activeOrganization.slug} Â· {context.activeOrganization.role.toLowerCase()}
+              </p>
+            ) : null}
           </Card>
           <Card className="p-4" variant="muted">
             <p className="text-sm font-semibold text-foreground">Workspace</p>
             <p className="mt-2 text-sm text-muted-foreground">
               {context?.activeWorkspace?.name ?? 'No workspace selected'}
             </p>
+            {context?.activeWorkspace ? (
+              <p className="mt-1 font-mono text-xs text-muted-foreground">
+                {context.activeWorkspace.slug} Â· {context.activeWorkspace.role?.toLowerCase()}
+              </p>
+            ) : null}
           </Card>
           <div className="rounded-control border border-brand-bright/20 bg-accent-soft px-4 py-3">
             <StatusIndicator tone="accent">Access is evaluated from active context</StatusIndicator>

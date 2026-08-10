@@ -6,6 +6,7 @@ import {
   OrganizationStatus,
   type PrismaClient,
 } from '../generated/client/client';
+import { appendAuditEvent, AuditAction, AuditTargetType } from '../audit/audit-event';
 
 /**
  * Creates the initial tenancy boundary for a credentialed user exactly once.
@@ -51,6 +52,19 @@ export async function bootstrapOrganizationForFirstSignIn(
         status: MembershipStatus.ACTIVE,
         userId,
       },
+    });
+
+    await appendAuditEvent(transaction, {
+      action: AuditAction.ORGANIZATION_CREATED,
+      actorUserId: userId,
+      metadata: {
+        name: organization.name,
+        slug: organization.slug,
+        source: 'first_sign_in',
+      },
+      organizationId: organization.id,
+      targetId: organization.id,
+      targetType: AuditTargetType.ORGANIZATION,
     });
   });
 }

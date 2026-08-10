@@ -3,6 +3,7 @@ import {
   OrganizationRole,
   OrganizationStatus,
   type PrismaClient,
+  UserStatus,
   WorkspaceRole,
   WorkspaceStatus,
 } from '../generated/client/client';
@@ -61,6 +62,10 @@ export async function getOrganizationContext(
         status: OrganizationStatus.ACTIVE,
       },
       status: MembershipStatus.ACTIVE,
+      user: {
+        deletedAt: null,
+        status: UserStatus.ACTIVE,
+      },
       userId,
     },
     include: {

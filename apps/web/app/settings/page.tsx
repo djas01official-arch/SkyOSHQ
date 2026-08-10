@@ -1,14 +1,10 @@
-import { PlaceholderPage } from '@/components/pages/placeholder-page';
+import { OrganizationWorkspaceSettings } from '@/components/settings/organization-workspace-settings';
 import { requireCurrentUser } from '@/lib/auth/current-user';
+import { getCurrentOrganizationContext } from '@/lib/organization-context';
 
 export default async function SettingsPage() {
   await requireCurrentUser();
+  const context = await getCurrentOrganizationContext();
 
-  return (
-    <PlaceholderPage
-      description="A future control surface for workspace and platform configuration."
-      icon="settings"
-      title="Settings"
-    />
-  );
+  return <OrganizationWorkspaceSettings context={context} />;
 }

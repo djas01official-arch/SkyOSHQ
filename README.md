@@ -190,10 +190,23 @@ The command regenerates the ignored Prisma Client before starting. External data
 
 After sign-in, the application shell resolves the active organization and workspace from current database memberships, then displays switchers in the header and sidebar. The selected organization and workspace IDs are persisted in the signed Auth.js session, but every request validates those preferences again against active user, organization, and workspace membership state.
 
+- `/settings` displays the current organization and effective workspace metadata, including normalized slugs and the authenticated user's persisted membership roles. It also provides the minimal authenticated organization-creation flow.
+- Organization creation validates and normalizes the requested name and slug, creates the active organization and first owner membership atomically, records creator attribution, and appends `organization.created` in the same transaction. A globally conflicting active slug is rejected safely.
 - Organization owners and admins can browse all active workspace metadata in their organization. Members and viewers see only workspaces where they have an active workspace membership.
 - A workspace can be selected only when the user has an effective active workspace membership; organization administration alone does not grant workspace-content access.
-- Organization owners and admins can create a workspace from the sidebar. Creation atomically assigns the creator an active workspace `owner` membership and selects it for the current session.
+- Organization owners and admins can create a workspace from the sidebar. Names and organization-local slugs are validated and normalized; creation atomically assigns the creator an active workspace `owner` membership, emits `workspace.created`, and selects it for the current session.
+- Changing organizations re-resolves the workspace directory and chooses only an effective workspace membership in the new organization. Stale, archived, suspended, revoked, deleted, and cross-tenant selection preferences never become authority.
 - The AI, Knowledge, and Tasks areas resolve authorization through the selected effective workspace. In particular, workspace viewers cannot enter the AI area because they do not receive `ai.use`.
+
+The organization/workspace integration coverage is part of the isolated database suite:
+
+```sh
+pnpm db:generate
+pnpm db:test:up
+pnpm db:test
+```
+
+The MVP intentionally has no invitations, member directory management UI, custom roles, billing, deletion flow, or workspace-content access implied by organization administration.
 
 ## Application-owned authorization policy
 
