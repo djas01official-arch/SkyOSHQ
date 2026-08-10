@@ -1,29 +1,20 @@
 'use client';
 
-import { useActionState, useState } from 'react';
+import { useActionState } from 'react';
 
 import type { OrganizationContext } from '../../../../database/context/organization-context';
 import type { TenantManagementContext } from '../../../../database/context/tenant-management';
 
-import {
-  archiveOrganizationAction,
-  archiveWorkspaceAction,
-  createOrganizationAction,
-  restoreOrganizationAction,
-  restoreWorkspaceAction,
-  type CreateOrganizationState,
-  type TenantLifecycleState,
-} from '@/app/context-actions';
+import { createOrganizationAction, type CreateOrganizationState } from '@/app/context-actions';
+import { TenantLifecycleControl } from '@/components/settings/tenant-lifecycle-control';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader } from '@/components/ui/card';
-import { Dialog } from '@/components/ui/dialog';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Input } from '@/components/ui/input';
 import { PageHeader } from '@/components/ui/page-header';
 
 const initialCreateOrganizationState: CreateOrganizationState = { error: null };
-const initialLifecycleState: TenantLifecycleState = { error: null };
 
 function roleLabel(role: string | null): string {
   if (!role) return 'Directory only';
@@ -35,49 +26,6 @@ type OrganizationWorkspaceSettingsProps = Readonly<{
   management: TenantManagementContext;
 }>;
 
-type LifecycleOperation = Readonly<{
-  id: string;
-  kind: 'archive-organization' | 'restore-organization' | 'archive-workspace' | 'restore-workspace';
-  name: string;
-}>;
-
-function lifecycleCopy(operation: LifecycleOperation) {
-  switch (operation.kind) {
-    case 'archive-organization':
-      return {
-        confirmLabel: 'Archive organization',
-        description: `Archive ${operation.name} and block all normal organization and workspace activity. This is not deletion.`,
-        fieldName: 'organizationId',
-        title: 'Archive organization?',
-        variant: 'danger' as const,
-      };
-    case 'restore-organization':
-      return {
-        confirmLabel: 'Restore organization',
-        description: `Restore ${operation.name} to active status. Existing membership rules still apply.`,
-        fieldName: 'organizationId',
-        title: 'Restore organization?',
-        variant: 'primary' as const,
-      };
-    case 'archive-workspace':
-      return {
-        confirmLabel: 'Archive workspace',
-        description: `Archive ${operation.name} and block normal product activity in it. This is not deletion.`,
-        fieldName: 'workspaceId',
-        title: 'Archive workspace?',
-        variant: 'danger' as const,
-      };
-    case 'restore-workspace':
-      return {
-        confirmLabel: 'Restore workspace',
-        description: `Restore ${operation.name} to active status without changing its organization or memberships.`,
-        fieldName: 'workspaceId',
-        title: 'Restore workspace?',
-        variant: 'primary' as const,
-      };
-  }
-}
-
 export function OrganizationWorkspaceSettings({
   context,
   management,
@@ -86,47 +34,8 @@ export function OrganizationWorkspaceSettings({
     createOrganizationAction,
     initialCreateOrganizationState,
   );
-  const [archiveOrganizationState, archiveOrganization, isArchivingOrganization] = useActionState(
-    archiveOrganizationAction,
-    initialLifecycleState,
-  );
-  const [restoreOrganizationState, restoreOrganization, isRestoringOrganization] = useActionState(
-    restoreOrganizationAction,
-    initialLifecycleState,
-  );
-  const [archiveWorkspaceState, archiveWorkspace, isArchivingWorkspace] = useActionState(
-    archiveWorkspaceAction,
-    initialLifecycleState,
-  );
-  const [restoreWorkspaceState, restoreWorkspace, isRestoringWorkspace] = useActionState(
-    restoreWorkspaceAction,
-    initialLifecycleState,
-  );
-  const [lifecycleOperation, setLifecycleOperation] = useState<LifecycleOperation | null>(null);
   const activeOrganization = context?.activeOrganization;
   const activeWorkspace = context?.activeWorkspace;
-  const lifecycle = lifecycleOperation ? lifecycleCopy(lifecycleOperation) : null;
-  const selectedAction = lifecycleOperation
-    ? {
-        'archive-organization': archiveOrganization,
-        'archive-workspace': archiveWorkspace,
-        'restore-organization': restoreOrganization,
-        'restore-workspace': restoreWorkspace,
-      }[lifecycleOperation.kind]
-    : undefined;
-  const selectedState = lifecycleOperation
-    ? {
-        'archive-organization': archiveOrganizationState,
-        'archive-workspace': archiveWorkspaceState,
-        'restore-organization': restoreOrganizationState,
-        'restore-workspace': restoreWorkspaceState,
-      }[lifecycleOperation.kind]
-    : initialLifecycleState;
-  const lifecyclePending =
-    isArchivingOrganization ||
-    isRestoringOrganization ||
-    isArchivingWorkspace ||
-    isRestoringWorkspace;
 
   return (
     <div className="mx-auto max-w-6xl">
@@ -194,20 +103,12 @@ export function OrganizationWorkspaceSettings({
                     ? 'Archiving preserves this tenant and its history for later restoration.'
                     : 'Only an active organization owner can archive this organization.'}
                 </p>
-                <Button
+                <TenantLifecycleControl
                   disabled={!management.canArchiveOrganization}
-                  onClick={() =>
-                    setLifecycleOperation({
-                      id: activeOrganization.id,
-                      kind: 'archive-organization',
-                      name: activeOrganization.name,
-                    })
-                  }
-                  size="small"
-                  variant="danger"
-                >
-                  Archive organization
-                </Button>
+                  id={activeOrganization.id}
+                  name={activeOrganization.name}
+                  operation="archive-organization"
+                />
               </div>
             ) : null}
           </Card>
@@ -297,20 +198,12 @@ export function OrganizationWorkspaceSettings({
                     ? 'Archived workspaces leave normal product context but retain their data and memberships.'
                     : 'Workspace archive authority is required for this action.'}
                 </p>
-                <Button
+                <TenantLifecycleControl
                   disabled={!management.canArchiveWorkspace}
-                  onClick={() =>
-                    setLifecycleOperation({
-                      id: activeWorkspace.id,
-                      kind: 'archive-workspace',
-                      name: activeWorkspace.name,
-                    })
-                  }
-                  size="small"
-                  variant="danger"
-                >
-                  Archive workspace
-                </Button>
+                  id={activeWorkspace.id}
+                  name={activeWorkspace.name}
+                  operation="archive-workspace"
+                />
               </div>
             ) : null}
           </Card>
@@ -388,18 +281,11 @@ export function OrganizationWorkspaceSettings({
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       <Badge tone="warning">Archived</Badge>
-                      <Button
-                        onClick={() =>
-                          setLifecycleOperation({
-                            id: organization.id,
-                            kind: 'restore-organization',
-                            name: organization.name,
-                          })
-                        }
-                        size="small"
-                      >
-                        Restore
-                      </Button>
+                      <TenantLifecycleControl
+                        id={organization.id}
+                        name={organization.name}
+                        operation="restore-organization"
+                      />
                     </div>
                   </li>
                 ))}
@@ -429,18 +315,11 @@ export function OrganizationWorkspaceSettings({
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       <Badge tone="warning">Archived</Badge>
-                      <Button
-                        onClick={() =>
-                          setLifecycleOperation({
-                            id: workspace.id,
-                            kind: 'restore-workspace',
-                            name: workspace.name,
-                          })
-                        }
-                        size="small"
-                      >
-                        Restore
-                      </Button>
+                      <TenantLifecycleControl
+                        id={workspace.id}
+                        name={workspace.name}
+                        operation="restore-workspace"
+                      />
                     </div>
                   </li>
                 ))}
@@ -449,47 +328,6 @@ export function OrganizationWorkspaceSettings({
           ) : null}
         </div>
       </div>
-
-      <Dialog
-        description={lifecycle?.description}
-        footer={
-          lifecycleOperation && lifecycle ? (
-            <div className="flex justify-end gap-3">
-              <Button disabled={lifecyclePending} onClick={() => setLifecycleOperation(null)}>
-                Cancel
-              </Button>
-              <Button
-                disabled={lifecyclePending}
-                form="tenant-lifecycle-confirmation"
-                type="submit"
-                variant={lifecycle.variant}
-              >
-                {lifecyclePending ? 'Workingâ€¦' : lifecycle.confirmLabel}
-              </Button>
-            </div>
-          ) : null
-        }
-        onOpenChange={(open) => {
-          if (!open && !lifecyclePending) setLifecycleOperation(null);
-        }}
-        open={lifecycleOperation !== null}
-        title={lifecycle?.title ?? 'Confirm lifecycle change'}
-      >
-        {lifecycleOperation && lifecycle && selectedAction ? (
-          <form action={selectedAction} id="tenant-lifecycle-confirmation">
-            <input name={lifecycle.fieldName} type="hidden" value={lifecycleOperation.id} />
-            <p className="text-sm leading-6 text-muted-foreground">
-              This transition is audited. Hard deletion remains unsupported, and the current slug
-              policy is unchanged.
-            </p>
-            {selectedState.error ? (
-              <p aria-live="polite" className="mt-4 text-sm leading-6 text-danger">
-                {selectedState.error}
-              </p>
-            ) : null}
-          </form>
-        ) : null}
-      </Dialog>
     </div>
   );
 }

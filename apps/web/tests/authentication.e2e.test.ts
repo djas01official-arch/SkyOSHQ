@@ -15,6 +15,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { encode } from 'next-auth/jwt';
 
 import { PrismaClient, UserStatus, type User } from '../../../database/generated/client/client';
+import { runTenantLifecycleE2eScenarios, type LifecycleCookieJar } from './tenant-lifecycle.e2e';
 
 const TEST_FILE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const WEB_ROOT = resolve(TEST_FILE_DIRECTORY, '..');
@@ -439,14 +440,18 @@ function assertRedirectsTo(response: Response, baseUrl: string, pathname: string
   return redirectUrl;
 }
 
-async function assertProtectedRouteDenied(jar: CookieJar, baseUrl: string): Promise<void> {
-  const { response } = await jar.request('/dashboard');
+async function assertProtectedRouteDenied(
+  jar: CookieJar,
+  baseUrl: string,
+  pathname = '/dashboard',
+): Promise<void> {
+  const { response } = await jar.request(pathname);
   const redirectUrl = assertRedirectsTo(response, baseUrl, '/login');
   const callbackUrlValue = redirectUrl.searchParams.get('callbackUrl');
   assert.ok(callbackUrlValue, 'Protected-route redirect must preserve its callback URL.');
   const callbackUrl = new URL(callbackUrlValue);
   assertEquivalentLoopbackOrigin(callbackUrl, baseUrl);
-  assert.equal(callbackUrl.pathname, '/dashboard');
+  assert.equal(callbackUrl.pathname, pathname);
   assert.equal(callbackUrl.search, '');
   assert.equal(callbackUrl.hash, '');
 }
@@ -475,7 +480,7 @@ async function getRenderedLoginRedirect(baseUrl: string, callbackUrl: string): P
 }
 
 test(
-  'SkyOS authentication works through real HTTP requests and disposable PostgreSQL',
+  'SkyOS authentication and tenant lifecycle work through real HTTP requests and disposable PostgreSQL',
   { timeout: 180_000 },
   async (context) => {
     const adminUrl = getAdminDatabaseUrl();
@@ -684,6 +689,23 @@ test(
           await assertProtectedRouteDenied(expiredJar, baseUrl);
         },
       );
+
+      await runTenantLifecycleE2eScenarios(context, {
+        assertProtectedRouteDenied: async (jar: LifecycleCookieJar, pathname: string) => {
+          assert.ok(jar instanceof CookieJar);
+          await assertProtectedRouteDenied(jar, baseUrl, pathname);
+        },
+        assertRedirectsTo: (response: Response, pathname: string) =>
+          assertRedirectsTo(response, baseUrl, pathname),
+        baseUrl,
+        createIdentity: (label: string) => createIdentity(prisma!, label, password, passwordHash),
+        createJar: () => new CookieJar(baseUrl),
+        login: async (jar: LifecycleCookieJar, identity) => {
+          assert.ok(jar instanceof CookieJar);
+          return (await loginWithCredentials(jar, baseUrl, identity, '/settings')).response;
+        },
+        prisma,
+      });
     } catch (error) {
       if (getWebLogs) {
         context.diagnostic(`Next.js output:\n${getWebLogs()}`);

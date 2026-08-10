@@ -45,7 +45,8 @@ pnpm build        # Run build tasks in all workspaces that define one
 pnpm dev          # Run development tasks in all workspaces that define one
 pnpm db:generate  # Generate the ignored Prisma Client from the committed schema
 pnpm test:domain  # Test the application-owned role and permission policy
-pnpm test:auth:e2e # Test authentication through real HTTP requests and disposable PostgreSQL
+pnpm test:e2e     # Test authentication and tenant lifecycle through real HTTP requests
+pnpm test:auth:e2e # Compatibility alias for the same black-box application suite
 ```
 
 ## Continuous integration
@@ -59,7 +60,7 @@ pnpm db:generate       # Generate the ignored Prisma Client used by later checks
 pnpm db:migrate:deploy # Replay all committed migrations into empty skyos_ci
 pnpm db:check          # Validate Prisma, live schema drift, and database indexes
 pnpm db:test           # Migrate and test only the isolated skyos_test database
-pnpm test:auth:e2e     # Create, migrate, test, and drop a separate auth E2E database
+pnpm test:e2e          # Create, migrate, test, and drop a separate application E2E database
 pnpm test:domain
 pnpm check             # Hygiene, formatting, linting, and strict workspace type checks
 pnpm build
@@ -75,7 +76,7 @@ pnpm db:test:up
 pnpm db:migrate:deploy
 pnpm db:check
 pnpm db:test
-AUTH_E2E_DATABASE_ADMIN_URL=postgresql://skyos_test:skyos_test_local_only@127.0.0.1:5433/postgres pnpm test:auth:e2e
+AUTH_E2E_DATABASE_ADMIN_URL=postgresql://skyos_test:skyos_test_local_only@127.0.0.1:5433/postgres pnpm test:e2e
 pnpm test:domain
 pnpm check
 pnpm build
@@ -164,15 +165,17 @@ Authentication security and identity tests run as part of the existing isolated 
 pnpm db:test
 ```
 
-### Black-box authentication tests
+### Black-box authentication and tenant lifecycle tests
 
-The black-box harness starts the actual Next.js application on an available loopback port and uses Auth.js through real HTTP requests. It creates a randomly named PostgreSQL database, applies every committed migration, creates only random ephemeral identities, maintains real CSRF and session cookies, and drops the database after the web process stops. It validates protected-route redirects, valid and invalid credentials, session persistence, logout, suspended and deactivated users, redirect safety, development cookie attributes, and expired or forged sessions.
+The black-box harness starts the actual Next.js application on an available loopback port and uses Auth.js and progressively enhanced Settings server-action forms through real HTTP requests. It creates a randomly named PostgreSQL database, applies every committed migration, creates only random ephemeral identities and tenant fixtures, maintains real CSRF and session cookies, and drops the database after the web process stops. It validates protected-route redirects, valid and invalid credentials, session persistence, logout, suspended and deactivated users, redirect safety, development cookie attributes, expired or forged sessions, and the owner-authorized organization/workspace archive and restore flows.
+
+Lifecycle coverage submits the same confirmation forms rendered by `/settings`, then verifies persisted state, immutable audit events, preserved memberships, role denials, organization-admin container management, cross-tenant tampering rejection, and signed-session fallback. Direct database access is limited to isolated fixture setup and post-action assertions; lifecycle mutations themselves always cross the real application boundary.
 
 The harness requires a loopback PostgreSQL 17 server with pgvector and a dedicated test role allowed to create and drop databases. It deliberately does not read `DATABASE_URL`, `DATABASE_TEST_URL`, development credentials, or an auth secret from `.env`; the auth secret and identities are generated for each run. Pass the administrative test connection explicitly:
 
 ```sh
 pnpm db:test:up
-AUTH_E2E_DATABASE_ADMIN_URL=postgresql://skyos_test:skyos_test_local_only@127.0.0.1:5433/postgres pnpm test:auth:e2e
+AUTH_E2E_DATABASE_ADMIN_URL=postgresql://skyos_test:skyos_test_local_only@127.0.0.1:5433/postgres pnpm test:e2e
 ```
 
 PowerShell:
@@ -180,11 +183,11 @@ PowerShell:
 ```powershell
 pnpm db:test:up
 $env:AUTH_E2E_DATABASE_ADMIN_URL = "postgresql://skyos_test:skyos_test_local_only@127.0.0.1:5433/postgres"
-pnpm test:auth:e2e
+pnpm test:e2e
 Remove-Item Env:AUTH_E2E_DATABASE_ADMIN_URL
 ```
 
-The command regenerates the ignored Prisma Client before starting. External database hosts, non-`postgres` administrative databases, and credentials without an explicit username and password are rejected before any mutation. Cleanup runs in `finally`, including when an assertion fails. GitHub Actions reuses its existing local pgvector service but receives a separate random database for this harness.
+`pnpm test:auth:e2e` remains a compatibility alias for the same complete suite. The command regenerates the ignored Prisma Client before starting. External database hosts, non-`postgres` administrative databases, and credentials without an explicit username and password are rejected before any mutation. Cleanup runs in `finally`, including when an assertion fails: the Next.js process is terminated, Prisma disconnects, the disposable database is dropped, and temporary storage/build directories are removed. GitHub Actions reuses its existing local pgvector service but receives a separate random database for this harness.
 
 ## Organization and workspace context
 

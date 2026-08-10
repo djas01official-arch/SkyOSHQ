@@ -57,7 +57,7 @@ async function main(): Promise<void> {
     DATABASE_URL: getGenerationDatabaseUrl(),
   });
   await run(
-    'Black-box authentication test process',
+    'Black-box application test process',
     tsxCliPath,
     ['--test', '--test-concurrency=1', testPath],
     process.env,
@@ -65,7 +65,7 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error: unknown) => {
-  console.error('Black-box authentication tests failed to run.');
+  console.error('Black-box application tests failed to run.');
   console.error(error instanceof Error ? error.message : 'Unknown runner error.');
   process.exitCode = 1;
 });
