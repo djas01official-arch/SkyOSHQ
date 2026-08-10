@@ -26,6 +26,7 @@ const NEXT_CLI_PATH = webRequire.resolve('next/dist/bin/next');
 const SESSION_COOKIE_NAME = 'authjs.session-token';
 const EXPECTED_SESSION_LIFETIME_MS = 8 * 60 * 60 * 1000;
 const PROCESS_TIMEOUT_MS = 60_000;
+const TRUSTED_LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
 
 type TestIdentity = Pick<User, 'id'> & {
   email: string;
@@ -131,11 +132,9 @@ function getAdminDatabaseUrl(): URL {
   }
 
   const url = new URL(configuredUrl);
-  const loopbackHosts = new Set(['127.0.0.1', 'localhost', '[::1]']);
-
   if (
     !['postgres:', 'postgresql:'].includes(url.protocol) ||
-    !loopbackHosts.has(url.hostname) ||
+    !TRUSTED_LOOPBACK_HOSTS.has(url.hostname) ||
     url.pathname !== '/postgres' ||
     !url.username ||
     !url.password
@@ -373,7 +372,7 @@ async function loginWithCredentials(
 ): Promise<HttpResult> {
   const csrfToken = await getCsrfToken(jar);
   const body = new URLSearchParams({
-    callbackUrl: new URL(callbackPath, baseUrl).toString(),
+    callbackUrl: callbackPath,
     csrfToken,
     email: identity.email,
     password: identity.password,
@@ -392,7 +391,7 @@ async function loginWithCredentials(
 async function logout(jar: CookieJar, baseUrl: string): Promise<HttpResult> {
   const csrfToken = await getCsrfToken(jar);
   const body = new URLSearchParams({
-    callbackUrl: new URL('/login', baseUrl).toString(),
+    callbackUrl: '/login',
     csrfToken,
   });
 
@@ -406,6 +405,27 @@ async function logout(jar: CookieJar, baseUrl: string): Promise<HttpResult> {
   });
 }
 
+function assertEquivalentLoopbackOrigin(actualUrl: URL, expectedBaseUrl: string): void {
+  const expectedUrl = new URL(expectedBaseUrl);
+
+  assert.ok(
+    TRUSTED_LOOPBACK_HOSTS.has(actualUrl.hostname),
+    `Redirect host must be trusted loopback; received ${actualUrl.hostname}.`,
+  );
+  assert.ok(
+    TRUSTED_LOOPBACK_HOSTS.has(expectedUrl.hostname),
+    `Test base host must be trusted loopback; received ${expectedUrl.hostname}.`,
+  );
+  assert.equal(
+    actualUrl.protocol,
+    expectedUrl.protocol,
+    'Redirect protocol must remain unchanged.',
+  );
+  assert.equal(actualUrl.port, expectedUrl.port, 'Redirect must remain on the test server port.');
+  assert.equal(actualUrl.username, '', 'Redirect URL must not contain a username.');
+  assert.equal(actualUrl.password, '', 'Redirect URL must not contain a password.');
+}
+
 function assertRedirectsTo(response: Response, baseUrl: string, pathname: string): URL {
   assert.ok(
     [302, 303, 307, 308].includes(response.status),
@@ -414,6 +434,7 @@ function assertRedirectsTo(response: Response, baseUrl: string, pathname: string
   const location = response.headers.get('location');
   assert.ok(location, 'Redirect response must include a Location header.');
   const redirectUrl = new URL(location, baseUrl);
+  assertEquivalentLoopbackOrigin(redirectUrl, baseUrl);
   assert.equal(redirectUrl.pathname, pathname);
   return redirectUrl;
 }
@@ -421,7 +442,13 @@ function assertRedirectsTo(response: Response, baseUrl: string, pathname: string
 async function assertProtectedRouteDenied(jar: CookieJar, baseUrl: string): Promise<void> {
   const { response } = await jar.request('/dashboard');
   const redirectUrl = assertRedirectsTo(response, baseUrl, '/login');
-  assert.equal(redirectUrl.searchParams.get('callbackUrl'), `${baseUrl}/dashboard`);
+  const callbackUrlValue = redirectUrl.searchParams.get('callbackUrl');
+  assert.ok(callbackUrlValue, 'Protected-route redirect must preserve its callback URL.');
+  const callbackUrl = new URL(callbackUrlValue);
+  assertEquivalentLoopbackOrigin(callbackUrl, baseUrl);
+  assert.equal(callbackUrl.pathname, '/dashboard');
+  assert.equal(callbackUrl.search, '');
+  assert.equal(callbackUrl.hash, '');
 }
 
 function decodeHtmlAttribute(value: string): string {
@@ -609,7 +636,12 @@ test(
 
         for (const unsafeRedirect of [
           'https://attacker.example/collect',
+          'javascript:alert(1)',
+          'data:text/html,<script>alert(1)</script>',
           '//attacker.example/collect',
+          '/\\attacker.example/collect',
+          '/%5c%5cattacker.example/collect',
+          '/dashboard%00',
           '/dashboard%0d%0aLocation:https://attacker.example',
           '/login',
           '/login/again',
@@ -619,8 +651,14 @@ test(
 
         const identity = await createIdentity(prisma!, 'redirect', password, passwordHash);
         const jar = new CookieJar(baseUrl);
-        const loginResult = await loginWithCredentials(jar, baseUrl, identity, '/settings');
-        assertRedirectsTo(loginResult.response, baseUrl, '/settings');
+        const loginResult = await loginWithCredentials(
+          jar,
+          baseUrl,
+          identity,
+          '/settings?source=auth&mode=e2e',
+        );
+        const safeCallbackUrl = assertRedirectsTo(loginResult.response, baseUrl, '/settings');
+        assert.equal(safeCallbackUrl.search, '?source=auth&mode=e2e');
         assert.equal((await jar.request('/settings')).response.status, 200);
       });
 

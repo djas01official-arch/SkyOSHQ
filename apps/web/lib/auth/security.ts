@@ -1,6 +1,6 @@
 const AUTH_SECRET_MINIMUM_LENGTH = 32;
 const AUTH_SECRET_PLACEHOLDER_PATTERN = /(change[-_ ]?me|example|replace[-_ ]?with)/i;
-const ENCODED_UNSAFE_CHARACTER_PATTERN = /%(?:0a|0d|5c)/i;
+const ENCODED_UNSAFE_CHARACTER_PATTERN = /%(?:0[0-9a-f]|1[0-9a-f]|5c|7f)/i;
 
 export const AUTH_SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
 export const DEFAULT_SIGN_IN_REDIRECT = '/dashboard';
