@@ -104,6 +104,10 @@ async function loadHtml(jar: ServerActionCookieJar, path: string): Promise<strin
   return response.text();
 }
 
+function normalizeLineEndings(value: string): string {
+  return value.replace(/\r\n?/gu, '\n');
+}
+
 export async function runKnowledgeMvpE2eScenario(
   context: TestContext,
   harness: KnowledgeE2eHarness,
@@ -146,6 +150,7 @@ export async function runKnowledgeMvpE2eScenario(
         where: { title: originalTitle, workspaceId },
       });
       assert.equal(document.authorUserId, owner.id);
+      assert.equal(normalizeLineEndings(document.content), normalizeLineEndings(originalContent));
       assert.equal(document.version, 1);
       assert.equal(
         await harness.prisma.knowledgeDocumentVersion.count({
@@ -193,7 +198,7 @@ export async function runKnowledgeMvpE2eScenario(
       const updated = await harness.prisma.knowledgeDocument.findUniqueOrThrow({
         where: { id: document.id },
       });
-      assert.equal(updated.content, updatedContent);
+      assert.equal(normalizeLineEndings(updated.content), normalizeLineEndings(updatedContent));
       assert.equal(updated.title, updatedTitle);
       assert.equal(updated.version, 2);
       assert.deepEqual(
@@ -203,10 +208,13 @@ export async function runKnowledgeMvpE2eScenario(
             select: { markdownContent: true, versionNumber: true },
             where: { documentId: document.id },
           })
-        ).map(({ markdownContent, versionNumber }) => ({ markdownContent, versionNumber })),
+        ).map(({ markdownContent, versionNumber }) => ({
+          markdownContent: normalizeLineEndings(markdownContent),
+          versionNumber,
+        })),
         [
-          { markdownContent: originalContent, versionNumber: 1 },
-          { markdownContent: updatedContent, versionNumber: 2 },
+          { markdownContent: normalizeLineEndings(originalContent), versionNumber: 1 },
+          { markdownContent: normalizeLineEndings(updatedContent), versionNumber: 2 },
         ],
       );
       assert.equal(
