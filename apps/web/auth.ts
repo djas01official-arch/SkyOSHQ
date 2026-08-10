@@ -3,8 +3,15 @@ import NextAuth from 'next-auth';
 import Credentials from 'next-auth/providers/credentials';
 
 import { authenticateCredentials } from '../../database/auth/credentials';
+import { findActiveSessionUser } from '../../database/auth/session-user';
 import { getOrganizationContext } from '../../database/context/organization-context';
 
+import {
+  AUTH_SESSION_MAX_AGE_SECONDS,
+  getSessionCookie,
+  hasAuthenticatedUser,
+  requireAuthSecret,
+} from '@/lib/auth/security';
 import { prisma } from '@/lib/prisma';
 
 function getSessionSelection(value: unknown): string | null {
@@ -15,12 +22,16 @@ export const { auth, handlers, signIn, signOut, unstable_update } = NextAuth({
   adapter: PrismaAdapter(prisma),
   callbacks: {
     authorized({ auth: session }) {
-      return Boolean(session?.user);
+      return hasAuthenticatedUser(session);
     },
     async jwt({ session, token, trigger, user }) {
       const userId = user?.id ?? token.sub;
 
-      if (!userId || (trigger !== 'signIn' && trigger !== 'update')) {
+      if (!userId || !(await findActiveSessionUser(prisma, userId))) {
+        return null;
+      }
+
+      if (trigger !== 'signIn' && trigger !== 'update') {
         return token;
       }
 
@@ -50,6 +61,9 @@ export const { auth, handlers, signIn, signOut, unstable_update } = NextAuth({
   pages: {
     signIn: '/login',
   },
+  cookies: {
+    sessionToken: getSessionCookie(process.env.NODE_ENV === 'production'),
+  },
   providers: [
     Credentials({
       credentials: {
@@ -63,6 +77,8 @@ export const { auth, handlers, signIn, signOut, unstable_update } = NextAuth({
     }),
   ],
   session: {
+    maxAge: AUTH_SESSION_MAX_AGE_SECONDS,
     strategy: 'jwt',
   },
+  secret: requireAuthSecret(process.env.AUTH_SECRET),
 });

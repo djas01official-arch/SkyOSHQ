@@ -1,11 +1,21 @@
 import { LoginForm } from '@/components/auth/login-form';
 import { Wordmark } from '@/components/brand/wordmark';
+import { getSafeSignInRedirect } from '@/lib/auth/security';
 
 export const metadata = {
   title: 'Sign in',
 };
 
-export default function LoginPage() {
+type LoginPageProps = {
+  searchParams: Promise<{ callbackUrl?: string | string[] }>;
+};
+
+export default async function LoginPage({ searchParams }: LoginPageProps) {
+  const callbackUrl = (await searchParams).callbackUrl;
+  const redirectTo = getSafeSignInRedirect(
+    Array.isArray(callbackUrl) ? callbackUrl[0] : callbackUrl,
+  );
+
   return (
     <main className="relative grid min-h-screen place-items-center overflow-hidden bg-background p-4">
       <div aria-hidden="true" className="shell-grid pointer-events-none absolute inset-0" />
@@ -21,7 +31,7 @@ export default function LoginPage() {
           Use the configured development credentials to access the foundation environment.
         </p>
         <div className="mt-7">
-          <LoginForm />
+          <LoginForm redirectTo={redirectTo} />
         </div>
       </section>
     </main>

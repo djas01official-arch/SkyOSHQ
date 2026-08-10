@@ -85,7 +85,7 @@ The concurrency-focused integration tests currently expose a `pg@8.22.0` depreca
 
 ## Local database
 
-SkyOS uses PostgreSQL with Prisma ORM. Prisma provides the generated strict TypeScript client and reviewable migrations, while PostgreSQL constraints and triggers enforce invariants that an ORM schema cannot express. The rationale and consequences are recorded in [ADR 0001](./architecture/decisions/0001-postgresql-prisma.md).
+SkyOS uses PostgreSQL with Prisma ORM. Prisma provides the generated strict TypeScript client and reviewable migrations, while PostgreSQL constraints and triggers enforce invariants that an ORM schema cannot express. The rationale and consequences are recorded in [ADR 0001](./architecture/decisions/0001-postgresql-prisma.md). Authentication identity and session decisions are recorded in [ADR 0002](./architecture/decisions/0002-authentication.md).
 
 Copy the local configuration, start PostgreSQL, apply migrations, generate the client, and optionally seed the development data:
 
@@ -103,7 +103,7 @@ pnpm db:seed
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 ```
 
-Use the printed value for `AUTH_SECRET` in `.env`. Never commit `.env` or use the development password outside a local environment.
+Use the printed value for `AUTH_SECRET` in `.env`. The application rejects missing, shorter-than-32-character, and example/placeholder secrets when auth initializes. Never commit `.env` or use the development password outside a local environment.
 
 On PowerShell, use `Copy-Item .env.example .env` for the first command. The root database scripts pass `.env` to the Compose file explicitly, so setup behaves consistently regardless of the Compose file location. The local container exposes PostgreSQL only on `127.0.0.1:5432`; its data is stored in the named `skyos-postgres-data` volume. Use `pnpm db:down` to stop the repository containers. To intentionally delete local database data, run the underlying Compose command with `down -v` only after confirming the named volumes are disposable.
 
@@ -147,9 +147,19 @@ The SkyOS placeholder homepage is then available at [http://localhost:3000](http
 The web application uses Auth.js with the Prisma adapter and the App Router. For local development, sign in at [http://localhost:3000/login](http://localhost:3000/login) with `AUTH_DEV_EMAIL` and `AUTH_DEV_PASSWORD` after running `pnpm db:seed`.
 
 - The web workspace loads the root `.env` for local monorepo commands; deployed environments must provide the same values through their platform configuration.
-- Sessions use Auth.js signed JWT cookies because the development credentials provider does not persist credential users through the adapter. The Prisma adapter schema is present for future OAuth or email-provider accounts; OAuth and invitations are not configured yet.
-- `/dashboard`, `/ai`, `/knowledge`, `/tasks`, and `/settings` require a session and also re-check that the persisted user remains active. `GET /api/me` returns the active signed-in user or `401`.
+- Sessions use Auth.js encrypted and signed JWT cookies with an eight-hour maximum lifetime. Cookies are `HttpOnly`, `SameSite=Lax`, scoped to `/`, and `Secure` with the `__Secure-` prefix in production. The development credentials provider does not persist sessions through the adapter.
+- Every session read resolves the signed stable `User.id` against PostgreSQL. Suspended, deactivated, and soft-deleted users are denied on their next request; email addresses and session-selected tenant IDs are not authorization identities.
+- `/dashboard`, `/ai`, `/knowledge`, `/tasks`, and `/settings`, including nested routes, are protected by the server-side Next.js proxy and re-check the persisted user in pages and actions. `GET /api/me` returns the active signed-in user or `401`.
+- Successful sign-in returns only to a validated same-origin application path; unsafe, malformed, and login-loop destinations fall back to `/dashboard`. Authentication errors do not disclose whether an account exists.
+- Logout uses the server-side Auth.js sign-out action to expire the active browser cookie. JWT sessions do not yet have a central per-token revocation registry, so a copied token remains valid until its eight-hour expiry unless the user is made inactive or `AUTH_SECRET` is rotated.
 - A successful credential sign-in for a user with no organization membership creates one active organization and owner membership atomically. It does not create a workspace or grant implicit workspace access.
+- The Prisma adapter `Account` model maps each future external `(provider, providerAccountId)` identity to exactly one stable SkyOS user. OAuth/OIDC selection, account linking, registration, invitations, password recovery, MFA, SSO, and SCIM remain out of scope.
+
+Authentication security and identity tests run as part of the existing isolated database suite:
+
+```sh
+pnpm db:test
+```
 
 ## Organization and workspace context
 

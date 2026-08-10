@@ -4,6 +4,8 @@ import { UserStatus, type PrismaClient } from '../generated/client/client';
 
 import { bootstrapOrganizationForFirstSignIn } from './bootstrap';
 
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+$/;
+
 export type AuthenticatedUser = {
   email: string;
   id: string;
@@ -11,9 +13,14 @@ export type AuthenticatedUser = {
   name: string | null;
 };
 
-type CredentialInput = Readonly<{
+export type CredentialInput = Readonly<{
   email?: unknown;
   password?: unknown;
+}>;
+
+export type NormalizedCredentials = Readonly<{
+  email: string;
+  password: string;
 }>;
 
 function getEmail(value: unknown): string | null {
@@ -22,11 +29,18 @@ function getEmail(value: unknown): string | null {
   }
 
   const email = value.trim().toLowerCase();
-  return email.length > 0 && email.length <= 320 && email.includes('@') ? email : null;
+  return email.length <= 320 && EMAIL_PATTERN.test(email) ? email : null;
 }
 
 function getPassword(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 && value.length <= 1024 ? value : null;
+}
+
+export function normalizeCredentials(input: CredentialInput): NormalizedCredentials | null {
+  const email = getEmail(input.email);
+  const password = getPassword(input.password);
+
+  return email && password ? { email, password } : null;
 }
 
 /**
@@ -36,14 +50,13 @@ export async function authenticateCredentials(
   prisma: PrismaClient,
   input: CredentialInput,
 ): Promise<AuthenticatedUser | null> {
-  const email = getEmail(input.email);
-  const password = getPassword(input.password);
+  const credentials = normalizeCredentials(input);
 
-  if (!email || !password) {
+  if (!credentials) {
     return null;
   }
 
-  const user = await prisma.user.findUnique({ where: { email } });
+  const user = await prisma.user.findUnique({ where: { email: credentials.email } });
 
   if (
     !user ||
@@ -55,7 +68,7 @@ export async function authenticateCredentials(
     return null;
   }
 
-  const passwordMatches = await argon2.verify(user.passwordHash, password);
+  const passwordMatches = await argon2.verify(user.passwordHash, credentials.password);
 
   if (!passwordMatches) {
     return null;

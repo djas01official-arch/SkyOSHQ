@@ -7,7 +7,8 @@ import { after, beforeEach, test } from 'node:test';
 import argon2 from 'argon2';
 import { PrismaPg } from '@prisma/adapter-pg';
 
-import { authenticateCredentials } from '../auth/credentials';
+import { authenticateCredentials, normalizeCredentials } from '../auth/credentials';
+import { findActiveSessionUser } from '../auth/session-user';
 import {
   MembershipStatus,
   OrganizationRole,
@@ -95,4 +96,87 @@ test('credentials authenticate active users and bootstrap one organization-owner
     data: { status: UserStatus.SUSPENDED },
   });
   assert.equal(await authenticateCredentials(prisma, { email, password }), null);
+});
+
+test('credential validation is normalized and rejects malformed input without a lookup', () => {
+  assert.deepEqual(
+    normalizeCredentials({ email: '  Developer@SkyOS.Local ', password: 'secret' }),
+    { email: 'developer@skyos.local', password: 'secret' },
+  );
+  assert.equal(normalizeCredentials({ email: 'not-an-email', password: 'secret' }), null);
+  assert.equal(normalizeCredentials({ email: 'invalid@@skyos.local', password: 'secret' }), null);
+  assert.equal(normalizeCredentials({ email: 'user@skyos.local', password: '' }), null);
+  assert.equal(
+    normalizeCredentials({ email: 'user@skyos.local', password: 'x'.repeat(1025) }),
+    null,
+  );
+});
+
+test('session subjects resolve only active users while preserving the stable user id', async () => {
+  const originalEmail = `identity-${randomUUID()}@skyos.local`;
+  const updatedEmail = `renamed-${randomUUID()}@skyos.local`;
+  const user = await prisma.user.create({
+    data: {
+      displayName: 'Stable Identity',
+      email: originalEmail,
+      identitySubject: `credentials:${randomUUID()}`,
+      status: UserStatus.ACTIVE,
+    },
+  });
+
+  assert.deepEqual(await findActiveSessionUser(prisma, user.id), {
+    displayName: 'Stable Identity',
+    email: originalEmail,
+    id: user.id,
+    image: null,
+  });
+
+  await prisma.user.update({ where: { id: user.id }, data: { email: updatedEmail } });
+  assert.equal((await findActiveSessionUser(prisma, user.id))?.id, user.id);
+  assert.equal((await findActiveSessionUser(prisma, user.id))?.email, updatedEmail);
+
+  await prisma.user.update({ where: { id: user.id }, data: { status: UserStatus.SUSPENDED } });
+  assert.equal(await findActiveSessionUser(prisma, user.id), null);
+
+  await prisma.user.update({ where: { id: user.id }, data: { status: UserStatus.DEACTIVATED } });
+  assert.equal(await findActiveSessionUser(prisma, user.id), null);
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { deletedAt: new Date(), status: UserStatus.ACTIVE },
+  });
+  assert.equal(await findActiveSessionUser(prisma, user.id), null);
+});
+
+test('an external provider identity maps to exactly one internal user', async () => {
+  const firstUser = await prisma.user.create({ data: { status: UserStatus.ACTIVE } });
+  const secondUser = await prisma.user.create({ data: { status: UserStatus.ACTIVE } });
+  const providerAccountId = `subject-${randomUUID()}`;
+
+  await prisma.account.create({
+    data: {
+      provider: 'test-provider',
+      providerAccountId,
+      type: 'oidc',
+      userId: firstUser.id,
+    },
+  });
+
+  const account = await prisma.account.findUniqueOrThrow({
+    where: {
+      provider_providerAccountId: { provider: 'test-provider', providerAccountId },
+    },
+  });
+  assert.equal(account.userId, firstUser.id);
+
+  await assert.rejects(
+    prisma.account.create({
+      data: {
+        provider: 'test-provider',
+        providerAccountId,
+        type: 'oidc',
+        userId: secondUser.id,
+      },
+    }),
+  );
 });
