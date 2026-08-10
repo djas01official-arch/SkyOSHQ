@@ -1,0 +1,269 @@
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import type { TestContext } from 'node:test';
+
+import { AuditAction } from '../../../database/audit/audit-event';
+import {
+  MembershipStatus,
+  OrganizationRole,
+  OrganizationStatus,
+  type PrismaClient,
+  WorkspaceRole,
+  WorkspaceStatus,
+} from '../../../database/generated/client/client';
+import { submitServerActionForm, type ServerActionCookieJar } from './server-action-form';
+
+type TestIdentity = {
+  email: string;
+  id: string;
+  password: string;
+};
+
+export type KnowledgeE2eHarness = {
+  assertRedirectsTo(response: Response, pathname: string): URL;
+  baseUrl: string;
+  createIdentity(label: string): Promise<TestIdentity>;
+  createJar(): ServerActionCookieJar;
+  getRedirectUrl(response: Response): URL;
+  login(jar: ServerActionCookieJar, identity: TestIdentity): Promise<Response>;
+  prisma: PrismaClient;
+};
+
+async function createWorkspaceFixture(
+  prisma: PrismaClient,
+  ownerUserId: string,
+): Promise<{ organizationId: string; workspaceId: string }> {
+  const suffix = randomUUID();
+  const organization = await prisma.organization.create({
+    data: {
+      createdByUserId: ownerUserId,
+      name: `Knowledge E2E ${suffix}`,
+      slug: `knowledge-e2e-${suffix}`,
+      status: OrganizationStatus.ACTIVE,
+    },
+  });
+  await prisma.organizationMembership.create({
+    data: {
+      activatedAt: new Date(),
+      organizationId: organization.id,
+      role: OrganizationRole.OWNER,
+      status: MembershipStatus.ACTIVE,
+      userId: ownerUserId,
+    },
+  });
+  const workspace = await prisma.workspace.create({
+    data: {
+      createdByUserId: ownerUserId,
+      name: `Knowledge Workspace ${suffix}`,
+      organizationId: organization.id,
+      slug: `knowledge-workspace-${suffix}`,
+      status: WorkspaceStatus.ACTIVE,
+    },
+  });
+  await prisma.workspaceMembership.create({
+    data: {
+      activatedAt: new Date(),
+      role: WorkspaceRole.OWNER,
+      status: MembershipStatus.ACTIVE,
+      userId: ownerUserId,
+      workspaceId: workspace.id,
+    },
+  });
+  return { organizationId: organization.id, workspaceId: workspace.id };
+}
+
+async function addViewer(
+  prisma: PrismaClient,
+  identity: TestIdentity,
+  organizationId: string,
+  workspaceId: string,
+): Promise<void> {
+  await prisma.organizationMembership.create({
+    data: {
+      activatedAt: new Date(),
+      organizationId,
+      role: OrganizationRole.MEMBER,
+      status: MembershipStatus.ACTIVE,
+      userId: identity.id,
+    },
+  });
+  await prisma.workspaceMembership.create({
+    data: {
+      activatedAt: new Date(),
+      role: WorkspaceRole.VIEWER,
+      status: MembershipStatus.ACTIVE,
+      userId: identity.id,
+      workspaceId,
+    },
+  });
+}
+
+async function loadHtml(jar: ServerActionCookieJar, path: string): Promise<string> {
+  const { response } = await jar.request(path);
+  assert.equal(response.status, 200, `${path} must render successfully.`);
+  return response.text();
+}
+
+export async function runKnowledgeMvpE2eScenario(
+  context: TestContext,
+  harness: KnowledgeE2eHarness,
+): Promise<void> {
+  await context.test(
+    'Knowledge owner creates, edits, versions, processes, and searches while a viewer remains read-only',
+    async () => {
+      const owner = await harness.createIdentity('knowledge-owner');
+      const { organizationId, workspaceId } = await createWorkspaceFixture(
+        harness.prisma,
+        owner.id,
+      );
+      const ownerJar = harness.createJar();
+      harness.assertRedirectsTo(await harness.login(ownerJar, owner), '/knowledge');
+
+      const initialList = await loadHtml(ownerJar, '/knowledge');
+      assert.match(initialList, /No documents yet/u);
+      assert.match(initialList, /New document/u);
+
+      const suffix = randomUUID().slice(0, 8);
+      const originalTitle = `HTTP Knowledge ${suffix}`;
+      const originalContent = `# Runbook ${suffix}\n\nCreated through the real Knowledge form.`;
+      const newPage = await loadHtml(ownerJar, '/knowledge/new');
+      const createResponse = await submitServerActionForm(
+        ownerJar,
+        harness.baseUrl,
+        '/knowledge/new',
+        newPage,
+        {
+          markerName: 'data-knowledge-document-form',
+          markerValue: 'create',
+        },
+        { content: originalContent, title: originalTitle },
+      );
+      const createdUrl = harness.getRedirectUrl(createResponse);
+      assert.match(createdUrl.pathname, /^\/knowledge\/[a-z0-9-]+$/u);
+      assert.equal(createdUrl.search, '');
+
+      const document = await harness.prisma.knowledgeDocument.findFirstOrThrow({
+        where: { title: originalTitle, workspaceId },
+      });
+      assert.equal(document.authorUserId, owner.id);
+      assert.equal(document.version, 1);
+      assert.equal(
+        await harness.prisma.knowledgeDocumentVersion.count({
+          where: { documentId: document.id },
+        }),
+        1,
+      );
+      assert.equal(
+        await harness.prisma.auditEvent.count({
+          where: {
+            action: AuditAction.KNOWLEDGE_DOCUMENT_CREATED,
+            actorUserId: owner.id,
+            targetId: document.id,
+            workspaceId,
+          },
+        }),
+        1,
+      );
+
+      const detailPath = createdUrl.pathname;
+      const createdDetail = await loadHtml(ownerJar, detailPath);
+      assert.ok(createdDetail.includes(originalTitle));
+      assert.ok(createdDetail.includes(`Runbook ${suffix}`));
+      assert.match(createdDetail, /Not processed for the current version/u);
+
+      const editPath = `${detailPath}/edit`;
+      const editPage = await loadHtml(ownerJar, editPath);
+      const searchMarker = `knowledgeflow${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+      const updatedTitle = `Updated HTTP Knowledge ${suffix}`;
+      const updatedContent = `# Updated runbook\n\nSearch marker ${searchMarker}.`;
+      const updateResponse = await submitServerActionForm(
+        ownerJar,
+        harness.baseUrl,
+        editPath,
+        editPage,
+        {
+          markerName: 'data-knowledge-document-form',
+          markerValue: 'edit',
+          requiredFields: { slug: document.slug, version: '1' },
+        },
+        { content: updatedContent, title: updatedTitle },
+      );
+      harness.assertRedirectsTo(updateResponse, detailPath);
+
+      const updated = await harness.prisma.knowledgeDocument.findUniqueOrThrow({
+        where: { id: document.id },
+      });
+      assert.equal(updated.content, updatedContent);
+      assert.equal(updated.title, updatedTitle);
+      assert.equal(updated.version, 2);
+      assert.deepEqual(
+        (
+          await harness.prisma.knowledgeDocumentVersion.findMany({
+            orderBy: { versionNumber: 'asc' },
+            select: { markdownContent: true, versionNumber: true },
+            where: { documentId: document.id },
+          })
+        ).map(({ markdownContent, versionNumber }) => ({ markdownContent, versionNumber })),
+        [
+          { markdownContent: originalContent, versionNumber: 1 },
+          { markdownContent: updatedContent, versionNumber: 2 },
+        ],
+      );
+      assert.equal(
+        await harness.prisma.auditEvent.count({
+          where: {
+            action: AuditAction.KNOWLEDGE_DOCUMENT_UPDATED,
+            actorUserId: owner.id,
+            targetId: document.id,
+            workspaceId,
+          },
+        }),
+        1,
+      );
+
+      const updatedDetail = await loadHtml(ownerJar, detailPath);
+      assert.ok(updatedDetail.includes(updatedTitle));
+      const chunkResponse = await submitServerActionForm(
+        ownerJar,
+        harness.baseUrl,
+        detailPath,
+        updatedDetail,
+        {
+          markerName: 'data-knowledge-chunking-form',
+          markerValue: 'document',
+          requiredFields: { slug: document.slug },
+        },
+      );
+      assert.equal(chunkResponse.status, 200);
+      const chunkSet = await harness.prisma.knowledgeChunkSet.findFirstOrThrow({
+        where: {
+          sourceId: document.id,
+          sourceVersion: 2,
+          workspaceId,
+        },
+      });
+      assert.ok(chunkSet.chunkCount > 0);
+      const processedDetail = await loadHtml(ownerJar, detailPath);
+      assert.ok(processedDetail.includes(`${chunkSet.chunkCount} chunks`));
+
+      const search = new URLSearchParams({ mode: 'keyword', q: searchMarker });
+      const searchPage = await loadHtml(ownerJar, `/knowledge?${search.toString()}`);
+      assert.ok(searchPage.includes(updatedTitle));
+      assert.ok(searchPage.includes(searchMarker));
+
+      const historyPage = await loadHtml(ownerJar, `${detailPath}/history`);
+      assert.match(historyPage, /Version 2/u);
+      assert.match(historyPage, /Version 1/u);
+
+      const viewer = await harness.createIdentity('knowledge-viewer');
+      await addViewer(harness.prisma, viewer, organizationId, workspaceId);
+      const viewerJar = harness.createJar();
+      harness.assertRedirectsTo(await harness.login(viewerJar, viewer), '/knowledge');
+      const viewerList = await loadHtml(viewerJar, '/knowledge');
+      assert.ok(viewerList.includes(updatedTitle));
+      assert.equal((await viewerJar.request(detailPath)).response.status, 200);
+      assert.equal(viewerList.includes('New document'), false);
+      harness.assertRedirectsTo((await viewerJar.request('/knowledge/new')).response, '/dashboard');
+    },
+  );
+}

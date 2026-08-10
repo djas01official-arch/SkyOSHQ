@@ -18,6 +18,7 @@ import { Icon } from '@/components/ui/icon';
 import { Input } from '@/components/ui/input';
 import { PageHeader } from '@/components/ui/page-header';
 import { Select } from '@/components/ui/select';
+import { StatusIndicator } from '@/components/ui/status-indicator';
 import { requireCurrentUser } from '@/lib/auth/current-user';
 import { knowledgeSearchDependencies } from '@/lib/knowledge-search';
 import { hasWorkspaceCapability, requireWorkspaceCapability } from '@/lib/organization-context';
@@ -140,6 +141,11 @@ export default async function KnowledgePage({ searchParams }: KnowledgePageProps
         </Button>
       </form>
 
+      <p className="mb-6 text-xs leading-5 text-muted-foreground">
+        Search covers successfully processed chunks from the current document versions and active
+        attachments. New or edited content appears after a workspace writer processes its chunks.
+      </p>
+
       {query ? (
         <p className="mb-4 text-sm text-muted-foreground">
           {searchError ? 'Search unavailable' : `${results.length} results`} for “{query}” ·{' '}
@@ -212,7 +218,10 @@ export default async function KnowledgePage({ searchParams }: KnowledgePageProps
                       })}
                     </p>
                   </div>
-                  <Badge tone="accent">v{document.version}</Badge>
+                  <div className="flex shrink-0 items-center gap-3">
+                    <StatusIndicator tone="success">Active</StatusIndicator>
+                    <Badge tone="accent">v{document.version}</Badge>
+                  </div>
                 </div>
               </Card>
             </Link>

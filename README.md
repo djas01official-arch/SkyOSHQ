@@ -45,7 +45,7 @@ pnpm build        # Run build tasks in all workspaces that define one
 pnpm dev          # Run development tasks in all workspaces that define one
 pnpm db:generate  # Generate the ignored Prisma Client from the committed schema
 pnpm test:domain  # Test the application-owned role and permission policy
-pnpm test:e2e     # Test authentication and tenant lifecycle through real HTTP requests
+pnpm test:e2e     # Test authentication, tenant lifecycle, and Knowledge MVP through real HTTP
 pnpm test:auth:e2e # Compatibility alias for the same black-box application suite
 ```
 
@@ -60,7 +60,7 @@ pnpm db:generate       # Generate the ignored Prisma Client used by later checks
 pnpm db:migrate:deploy # Replay all committed migrations into empty skyos_ci
 pnpm db:check          # Validate Prisma, live schema drift, and database indexes
 pnpm db:test           # Migrate and test only the isolated skyos_test database
-pnpm test:e2e          # Create, migrate, test, and drop a separate application E2E database
+pnpm test:e2e          # Test auth, tenant lifecycle, and Knowledge in a disposable E2E database
 pnpm test:domain
 pnpm check             # Hygiene, formatting, linting, and strict workspace type checks
 pnpm build
@@ -165,11 +165,13 @@ Authentication security and identity tests run as part of the existing isolated 
 pnpm db:test
 ```
 
-### Black-box authentication and tenant lifecycle tests
+### Black-box authentication, tenant lifecycle, and Knowledge MVP tests
 
-The black-box harness starts the actual Next.js application on an available loopback port and uses Auth.js and progressively enhanced Settings server-action forms through real HTTP requests. It creates a randomly named PostgreSQL database, applies every committed migration, creates only random ephemeral identities and tenant fixtures, maintains real CSRF and session cookies, and drops the database after the web process stops. It validates protected-route redirects, valid and invalid credentials, session persistence, logout, suspended and deactivated users, redirect safety, development cookie attributes, expired or forged sessions, and the owner-authorized organization/workspace archive and restore flows.
+The black-box harness starts the actual Next.js application on an available loopback port and uses Auth.js plus progressively enhanced server-action forms through real HTTP requests. It creates a randomly named PostgreSQL database, applies every committed migration, creates only random ephemeral identities and tenant fixtures, maintains real CSRF and session cookies, and drops the database after the web process stops. It validates protected-route redirects, valid and invalid credentials, session persistence, logout, suspended and deactivated users, redirect safety, development cookie attributes, expired or forged sessions, and the owner-authorized organization/workspace archive and restore flows.
 
 Lifecycle coverage submits the same confirmation forms rendered by `/settings`, then verifies persisted state, immutable audit events, preserved memberships, role denials, organization-admin container management, cross-tenant tampering rejection, and signed-session fallback. Direct database access is limited to isolated fixture setup and post-action assertions; lifecycle mutations themselves always cross the real application boundary.
+
+Knowledge coverage follows one high-value owner flow through the real `/knowledge` create and edit forms, verifies immutable versions and audit persistence, processes the current Markdown revision through the existing synchronous durable-job boundary, and confirms workspace-scoped keyword search. The same scenario verifies that a workspace viewer can list and open the document but cannot enter the creation flow.
 
 The harness requires a loopback PostgreSQL 17 server with pgvector and a dedicated test role allowed to create and drop databases. It deliberately does not read `DATABASE_URL`, `DATABASE_TEST_URL`, development credentials, or an auth secret from `.env`; the auth secret and identities are generated for each run. Pass the administrative test connection explicitly:
 
@@ -242,17 +244,39 @@ Audit events are append-only. SkyOS application services do not expose update or
 
 `/knowledge` is the first workspace-scoped vertical slice. Effective workspace members can read active Markdown documents; viewers are read-only, while members, admins, and owners may create, edit, archive, and restore documents. Organization-level administration alone does not grant document access.
 
+- The normal document list is ordered by most recently updated and bounded to 100 active documents per request. It includes title, creator attribution, update time, active status, and current version.
+- Creation requires a normalized nonempty title and non-whitespace Markdown content. The document, version 1 snapshot, creator attribution, and `knowledge_document.created` audit event commit atomically.
+- `/knowledge/[slug]` renders the current sanitized Markdown and metadata. `/knowledge/[slug]/edit` uses optimistic concurrency, and `/knowledge/[slug]/history` exposes immutable snapshots newest first.
 - Documents belong to exactly one workspace and are never moved between workspaces.
 - Normal lists exclude archived documents. An authorized user may restore an archived document through its detail URL.
 - Create, update, archive, and restore operations are version-checked and write immutable audit events in the same transaction.
 - Every revision-bearing mutation appends an immutable document snapshot. `/knowledge/[slug]/history` lists snapshots newest first, and a user with `knowledge.write` may restore an older snapshot by creating a new latest version; history is never overwritten.
 - Markdown is rendered as sanitized CommonMark. Raw HTML is discarded, unsafe URL schemes are rejected, remote images are not loaded, and external HTTP(S) links open with `noopener noreferrer nofollow`.
-- The Knowledge page searches active document titles and Markdown source with a PostgreSQL full-text GIN index. Search always uses the effective selected workspace and requires `knowledge.read`.
+- The Knowledge page searches the current successfully chunked Markdown revision and active attachment extractions using the existing keyword, semantic, or hybrid retrieval service. Search always uses the effective selected workspace, requires `knowledge.read`, and never accepts workspace authority from the query string.
 - Knowledge documents support workspace-scoped PDF, DOCX, PNG, and JPEG attachments. Readers may list and download active attachments; writers may upload, archive, and restore them with optimistic concurrency and transactional audit events.
 - Upload validation matches the original extension, declared MIME type, and binary signature; filenames never form storage paths. Active duplicate content is rejected within the same document by SHA-256 checksum.
 - Local development binaries use the key-based storage adapter under `KNOWLEDGE_STORAGE_ROOT` (default `.skyos/knowledge`, ignored by Git). `KNOWLEDGE_MAX_FILE_SIZE_BYTES` defaults to 10 MiB and is capped at 100 MiB. Relative storage roots resolve from the monorepo root; deployments should configure an absolute durable path until an S3-compatible adapter is introduced.
 - Downloads require current `knowledge.read`, are returned with `Content-Disposition: attachment`, `nosniff`, private/no-store caching, and a restrictive sandbox policy. Files are not parsed, rendered as HTML, or made public.
 - PDF and DOCX attachments can be processed into immutable plain-text extraction records. The original binary is retained unchanged, and PNG/JPEG attachments remain downloadable but are not text-processable.
+
+The MVP permission boundary is fixed by `@skyos/domain`:
+
+| Effective role                                        | List/read/search/history | Create/edit/process |
+| ----------------------------------------------------- | ------------------------ | ------------------- |
+| Workspace owner                                       | Allow                    | Allow               |
+| Workspace admin                                       | Allow                    | Allow               |
+| Workspace member                                      | Allow                    | Allow               |
+| Workspace viewer                                      | Allow                    | Deny                |
+| Organization owner/admin without workspace membership | Deny                     | Deny                |
+
+Suspended or revoked organization/workspace membership and archived workspaces deny normal Knowledge activity. Missing and cross-tenant document URLs resolve through the selected effective workspace and do not disclose foreign records.
+
+Run the service and real-HTTP Knowledge coverage with the existing isolated database workflows:
+
+```sh
+pnpm db:test
+AUTH_E2E_DATABASE_ADMIN_URL=postgresql://skyos_test:skyos_test_local_only@127.0.0.1:5433/postgres pnpm test:e2e
+```
 
 ## Document processing foundation
 
@@ -271,7 +295,7 @@ Run `pnpm db:migrate` after pulling this foundation, then use the existing web c
 pnpm --filter @skyos/web dev
 ```
 
-OCR, embeddings, vector search, AI, PDF/DOCX rendering, and multi-host worker orchestration remain intentionally excluded.
+OCR, public sharing, collaborative editing, browser rendering of uploaded office files, production object storage, malware scanning, and multi-host worker orchestration remain intentionally excluded. The deterministic local embedding provider exercises semantic search without adding external AI calls or credentials.
 
 ## Knowledge chunking foundation
 

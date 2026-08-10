@@ -11,6 +11,7 @@ import {
   KnowledgeAuthorizationError,
   KnowledgeConflictError,
   KnowledgeNotFoundError,
+  KnowledgeValidationError,
   archiveKnowledgeDocument,
   createKnowledgeDocument,
   getKnowledgeDocument,
@@ -204,14 +205,16 @@ test('search matches active document titles and Markdown content only in the sel
   );
 });
 
-test('viewers can read but only members, admins, and owners can write knowledge', async () => {
+test('workspace roles enforce the application-owned Knowledge permission matrix', async () => {
   const ownerId = await createUser();
   const viewerId = await createUser();
   const memberId = await createUser();
+  const adminId = await createUser();
   const organizationId = await createOrganization(ownerId);
   const workspaceId = await createWorkspace(organizationId, ownerId);
   await addWorkspaceUser(organizationId, workspaceId, viewerId, WorkspaceRole.VIEWER);
   await addWorkspaceUser(organizationId, workspaceId, memberId, WorkspaceRole.MEMBER);
+  await addWorkspaceUser(organizationId, workspaceId, adminId, WorkspaceRole.ADMIN);
   const document = await createKnowledgeDocument(prisma, ownerId, workspaceId, {
     content: 'Read-only to viewers.',
     title: 'Access model',
@@ -241,6 +244,128 @@ test('viewers can read but only members, admins, and owners can write knowledge'
     { content: 'Member-authored Markdown, revised.', title: 'Member note revised' },
   );
   assert.equal(updated.version, 2);
+
+  const adminDocument = await createKnowledgeDocument(prisma, adminId, workspaceId, {
+    content: 'Workspace administrator authored content.',
+    title: 'Administrator note',
+  });
+  assert.equal(
+    (await getKnowledgeDocument(prisma, adminId, workspaceId, adminDocument.slug)).authorUserId,
+    adminId,
+  );
+});
+
+test('effective parent and workspace membership state gates all Knowledge access', async () => {
+  const ownerId = await createUser();
+  const organizationAdminId = await createUser();
+  const organizationId = await createOrganization(ownerId);
+  const workspaceId = await createWorkspace(organizationId, ownerId);
+  const document = await createKnowledgeDocument(prisma, ownerId, workspaceId, {
+    content: 'Effective membership only.',
+    title: 'Membership boundary',
+  });
+
+  await prisma.organizationMembership.create({
+    data: {
+      activatedAt: new Date(),
+      organizationId,
+      role: OrganizationRole.ADMIN,
+      status: MembershipStatus.ACTIVE,
+      userId: organizationAdminId,
+    },
+  });
+  await assert.rejects(
+    listKnowledgeDocuments(prisma, organizationAdminId, workspaceId),
+    KnowledgeAuthorizationError,
+  );
+
+  for (const [scope, status] of [
+    ['organization', MembershipStatus.SUSPENDED],
+    ['organization', MembershipStatus.REVOKED],
+    ['workspace', MembershipStatus.SUSPENDED],
+    ['workspace', MembershipStatus.REVOKED],
+  ] as const) {
+    const actorId = await createUser();
+    await addWorkspaceUser(organizationId, workspaceId, actorId, WorkspaceRole.MEMBER);
+    const revokedAt = status === MembershipStatus.REVOKED ? new Date() : null;
+
+    if (scope === 'organization') {
+      await prisma.organizationMembership.update({
+        data: { revokedAt, status },
+        where: { organizationId_userId: { organizationId, userId: actorId } },
+      });
+    } else {
+      await prisma.workspaceMembership.update({
+        data: { revokedAt, status },
+        where: { workspaceId_userId: { userId: actorId, workspaceId } },
+      });
+    }
+
+    await assert.rejects(
+      getKnowledgeDocument(prisma, actorId, workspaceId, document.slug),
+      KnowledgeAuthorizationError,
+    );
+  }
+
+  await prisma.workspace.update({
+    data: { archivedAt: new Date(), status: WorkspaceStatus.ARCHIVED },
+    where: { id: workspaceId },
+  });
+  await assert.rejects(
+    listKnowledgeDocuments(prisma, ownerId, workspaceId),
+    KnowledgeAuthorizationError,
+  );
+});
+
+test('cross-organization document access and creation are denied', async () => {
+  const firstOwnerId = await createUser();
+  const secondOwnerId = await createUser();
+  const firstOrganizationId = await createOrganization(firstOwnerId);
+  const secondOrganizationId = await createOrganization(secondOwnerId);
+  const firstWorkspaceId = await createWorkspace(firstOrganizationId, firstOwnerId);
+  const secondWorkspaceId = await createWorkspace(secondOrganizationId, secondOwnerId);
+  const document = await createKnowledgeDocument(prisma, firstOwnerId, firstWorkspaceId, {
+    content: 'Organization one only.',
+    title: 'Tenant private',
+  });
+
+  await assert.rejects(
+    getKnowledgeDocument(prisma, secondOwnerId, firstWorkspaceId, document.slug),
+    KnowledgeAuthorizationError,
+  );
+  await assert.rejects(
+    createKnowledgeDocument(prisma, firstOwnerId, secondWorkspaceId, {
+      content: 'Denied cross-tenant creation.',
+      title: 'Denied',
+    }),
+    KnowledgeAuthorizationError,
+  );
+});
+
+test('document creation rejects empty, whitespace-only, and oversized input', async () => {
+  const ownerId = await createUser();
+  const organizationId = await createOrganization(ownerId);
+  const workspaceId = await createWorkspace(organizationId, ownerId);
+
+  for (const content of ['', ' \n\t ']) {
+    await assert.rejects(
+      createKnowledgeDocument(prisma, ownerId, workspaceId, {
+        content,
+        title: 'Invalid content',
+      }),
+      KnowledgeValidationError,
+    );
+  }
+  await assert.rejects(
+    createKnowledgeDocument(prisma, ownerId, workspaceId, {
+      content: 'x'.repeat(100_001),
+      title: 'Oversized content',
+    }),
+    KnowledgeValidationError,
+  );
+  assert.equal(await prisma.knowledgeDocument.count(), 0);
+  assert.equal(await prisma.knowledgeDocumentVersion.count(), 0);
+  assert.equal(await prisma.auditEvent.count(), 0);
 });
 
 test('archived documents leave normal lists and restore with a new version and audit event', async () => {

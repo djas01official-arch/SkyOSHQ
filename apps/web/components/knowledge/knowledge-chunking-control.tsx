@@ -25,7 +25,11 @@ export function KnowledgeChunkingControl({
 }: KnowledgeChunkingControlProps) {
   const [state, formAction, pending] = useActionState(action, initialState);
   return (
-    <form action={formAction} className="flex items-center gap-2">
+    <form
+      action={formAction}
+      className="flex items-center gap-2"
+      data-knowledge-chunking-form={attachmentId ? 'attachment' : 'document'}
+    >
       <input name="slug" type="hidden" value={slug} />
       {attachmentId ? <input name="attachmentId" type="hidden" value={attachmentId} /> : null}
       {state.error ? (

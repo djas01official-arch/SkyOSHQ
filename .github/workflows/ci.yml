@@ -82,7 +82,7 @@ jobs:
       - name: Run database integration tests
         run: pnpm db:test
 
-      - name: Run black-box authentication and tenant lifecycle tests
+      - name: Run black-box authentication, tenant lifecycle, and Knowledge MVP tests
         run: pnpm test:e2e
 
       - name: Run domain policy tests

@@ -58,6 +58,7 @@ export default async function EditKnowledgeDocumentPage({
         <KnowledgeDocumentForm
           action={updateKnowledgeDocumentAction}
           content={document.content}
+          kind="edit"
           slug={document.slug}
           submitLabel="Save changes"
           title={document.title}

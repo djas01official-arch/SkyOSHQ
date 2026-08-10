@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   KnowledgeDocumentStatus,
   MembershipStatus,
+  OrganizationStatus,
   type Prisma,
   type PrismaClient,
   UserStatus,
@@ -23,6 +24,8 @@ export class KnowledgeNotFoundError extends KnowledgeDocumentError {}
 export class KnowledgeStateError extends KnowledgeDocumentError {}
 
 export class KnowledgeValidationError extends KnowledgeDocumentError {}
+
+export const KNOWLEDGE_DOCUMENT_LIST_LIMIT = 100;
 
 type Transaction = Prisma.TransactionClient;
 
@@ -56,6 +59,10 @@ function getTitle(value: string): string {
 }
 
 function getContent(value: string): string {
+  if (value.trim().length < 1) {
+    throw new KnowledgeValidationError('Markdown content must contain at least one character.');
+  }
+
   if (value.length > 100_000) {
     throw new KnowledgeValidationError('Markdown content must not exceed 100,000 characters.');
   }
@@ -97,7 +104,7 @@ export async function requireKnowledgeWorkspaceAccess(
         id: workspaceId,
         organization: {
           deletedAt: null,
-          status: WorkspaceStatus.ACTIVE,
+          status: OrganizationStatus.ACTIVE,
         },
         status: WorkspaceStatus.ACTIVE,
       },
@@ -208,7 +215,8 @@ export async function listKnowledgeDocuments(
       updatedAt: true,
       version: true,
     },
-    orderBy: [{ updatedAt: 'desc' }, { title: 'asc' }],
+    orderBy: [{ updatedAt: 'desc' }, { title: 'asc' }, { id: 'asc' }],
+    take: KNOWLEDGE_DOCUMENT_LIST_LIMIT,
   });
 }
 

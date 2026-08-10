@@ -11,6 +11,7 @@ import { getKnowledgeEmbeddingOverview } from '../../../../../database/knowledge
 import {
   KnowledgeAttachmentProcessingStatus,
   KnowledgeAttachmentStatus,
+  KnowledgeChunkingJobStatus,
   KnowledgeDocumentStatus,
   KnowledgeEmbeddingJobStatus,
 } from '../../../../../database/generated/client/client';
@@ -82,7 +83,7 @@ type ChunkingSummary = Readonly<{
   chunkSet: { chunkCount: number } | null;
   errorMessage: string | null;
   sourceVersion: number;
-  status: KnowledgeEmbeddingJobStatus;
+  status: KnowledgeChunkingJobStatus;
 }>;
 
 function describeChunking(

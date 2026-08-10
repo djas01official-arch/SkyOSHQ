@@ -13,6 +13,7 @@ type KnowledgeDocumentFormProps = Readonly<{
     formData: FormData,
   ) => Promise<KnowledgeDocumentActionState>;
   content?: string;
+  kind: 'create' | 'edit';
   slug?: string;
   submitLabel: string;
   title?: string;
@@ -24,6 +25,7 @@ const initialState: KnowledgeDocumentActionState = { error: null };
 export function KnowledgeDocumentForm({
   action,
   content = '',
+  kind,
   slug,
   submitLabel,
   title = '',
@@ -32,7 +34,7 @@ export function KnowledgeDocumentForm({
   const [state, formAction, isPending] = useActionState(action, initialState);
 
   return (
-    <form action={formAction} className="space-y-5">
+    <form action={formAction} className="space-y-5" data-knowledge-document-form={kind}>
       {slug ? <input name="slug" type="hidden" value={slug} /> : null}
       {version ? <input name="version" type="hidden" value={version} /> : null}
       <label className="block">

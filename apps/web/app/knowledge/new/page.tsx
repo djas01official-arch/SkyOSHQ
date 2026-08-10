@@ -19,6 +19,7 @@ export default async function NewKnowledgeDocumentPage() {
       <Card>
         <KnowledgeDocumentForm
           action={createKnowledgeDocumentAction}
+          kind="create"
           submitLabel="Create document"
         />
       </Card>

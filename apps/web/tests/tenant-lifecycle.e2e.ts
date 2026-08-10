@@ -12,6 +12,7 @@ import {
   WorkspaceRole,
   WorkspaceStatus,
 } from '../../../database/generated/client/client';
+import { submitServerActionForm, type ServerActionCookieJar } from './server-action-form';
 
 type TestIdentity = {
   email: string;
@@ -19,14 +20,7 @@ type TestIdentity = {
   password: string;
 };
 
-type HttpResult = {
-  response: Response;
-  setCookies: string[];
-};
-
-export type LifecycleCookieJar = {
-  request(path: string, init?: RequestInit): Promise<HttpResult>;
-};
+export type LifecycleCookieJar = ServerActionCookieJar;
 
 export type TenantLifecycleE2eHarness = {
   assertProtectedRouteDenied(jar: LifecycleCookieJar, pathname: string): Promise<void>;
@@ -37,69 +31,6 @@ export type TenantLifecycleE2eHarness = {
   login(jar: LifecycleCookieJar, identity: TestIdentity): Promise<Response>;
   prisma: PrismaClient;
 };
-
-type ParsedLifecycleForm = {
-  fields: Array<readonly [string, string]>;
-  operation: string;
-};
-
-function decodeHtml(value: string): string {
-  return value
-    .replace(/&#x([0-9a-f]+);/giu, (_, code: string) =>
-      String.fromCodePoint(Number.parseInt(code, 16)),
-    )
-    .replace(/&#(\d+);/gu, (_, code: string) => String.fromCodePoint(Number.parseInt(code, 10)))
-    .replaceAll('&amp;', '&')
-    .replaceAll('&quot;', '"')
-    .replaceAll('&#x27;', "'")
-    .replaceAll('&#39;', "'")
-    .replaceAll('&lt;', '<')
-    .replaceAll('&gt;', '>');
-}
-
-function parseAttributes(tag: string): Map<string, string> {
-  const attributes = new Map<string, string>();
-  const pattern = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/gu;
-
-  for (const match of tag.matchAll(pattern)) {
-    const [, name = '', doubleQuoted, singleQuoted, unquoted] = match;
-    if (name === 'form' || name === 'input') continue;
-    attributes.set(name, decodeHtml(doubleQuoted ?? singleQuoted ?? unquoted ?? ''));
-  }
-
-  return attributes;
-}
-
-function findLifecycleForm(
-  html: string,
-  operation: string,
-  fieldName: string,
-  targetId: string,
-): ParsedLifecycleForm {
-  const forms = html.matchAll(/<form\b([^>]*)>([\s\S]*?)<\/form>/gu);
-
-  for (const form of forms) {
-    const formAttributes = parseAttributes(`form ${form[1] ?? ''}`);
-    if (formAttributes.get('data-lifecycle-operation') !== operation) continue;
-
-    const fields: Array<readonly [string, string]> = [];
-    for (const input of (form[2] ?? '').matchAll(/<input\b([^>]*)>/gu)) {
-      const attributes = parseAttributes(`input ${input[1] ?? ''}`);
-      const name = attributes.get('name');
-      if (name) fields.push([name, attributes.get('value') ?? '']);
-    }
-
-    if (fields.some(([name, value]) => name === fieldName && value === targetId)) {
-      assert.ok(
-        fields.some(([name]) => name.startsWith('$ACTION_')),
-        'Rendered lifecycle form must contain React server-action metadata.',
-      );
-      return { fields, operation };
-    }
-  }
-
-  throw new Error(`Unable to find ${operation} form for ${targetId}.`);
-}
 
 async function loadSettings(jar: LifecycleCookieJar): Promise<string> {
   const { response } = await jar.request('/settings');
@@ -116,19 +47,18 @@ async function submitLifecycleForm(
   renderedTargetId: string,
   submittedTargetId = renderedTargetId,
 ): Promise<Response> {
-  const form = findLifecycleForm(html, operation, fieldName, renderedTargetId);
-  const body = new FormData();
-
-  for (const [name, value] of form.fields) {
-    body.append(name, name === fieldName ? submittedTargetId : value);
-  }
-
-  const { response } = await jar.request('/settings', {
-    body,
-    headers: { Origin: baseUrl },
-    method: 'POST',
-  });
-  return response;
+  return submitServerActionForm(
+    jar,
+    baseUrl,
+    '/settings',
+    html,
+    {
+      markerName: 'data-lifecycle-operation',
+      markerValue: operation,
+      requiredFields: { [fieldName]: renderedTargetId },
+    },
+    { [fieldName]: submittedTargetId },
+  );
 }
 
 async function readSession(jar: LifecycleCookieJar): Promise<{

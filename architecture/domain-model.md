@@ -110,21 +110,21 @@ Every persisted record has an immutable opaque `id`, `createdAt`, and `updatedAt
 
 **Responsibility:** retain one Markdown-only knowledge record within exactly one workspace.
 
-| Attribute      | Notes                                                                                                 |
-| -------------- | ----------------------------------------------------------------------------------------------------- |
-| `id`           | Immutable document identifier.                                                                        |
-| `workspaceId`  | Immutable parent workspace identifier; a document is never moved between workspaces.                  |
-| `authorUserId` | User that created the document; retained for attribution.                                             |
-| `title`        | Required human-readable title.                                                                        |
-| `slug`         | Workspace-local URL identifier, unique within the workspace.                                          |
-| `content`      | Unmodified Markdown source. Generated content, comments, and sharing metadata are outside this model. |
-| `status`       | `active` or `archived`.                                                                               |
-| `archivedAt`   | Set while archived.                                                                                   |
-| `version`      | Positive revision counter used for optimistic concurrency on updates and state transitions.           |
+| Attribute      | Notes                                                                                                                          |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `id`           | Immutable document identifier.                                                                                                 |
+| `workspaceId`  | Immutable parent workspace identifier; a document is never moved between workspaces.                                           |
+| `authorUserId` | User that created the document; retained for attribution.                                                                      |
+| `title`        | Required human-readable title.                                                                                                 |
+| `slug`         | Workspace-local URL identifier, unique within the workspace.                                                                   |
+| `content`      | Required non-whitespace, unmodified Markdown source. Generated content, comments, and sharing metadata are outside this model. |
+| `status`       | `active` or `archived`.                                                                                                        |
+| `archivedAt`   | Set while archived.                                                                                                            |
+| `version`      | Positive revision counter used for optimistic concurrency on updates and state transitions.                                    |
 
 **Relationships:** belongs to exactly one workspace and one author user, and may have many attachment metadata records. The workspace relationship supplies the organization tenancy boundary; a document never has an independently assignable organization.
 
-**Lifecycle:** an actor with an effective workspace `knowledge.write` grant creates an active document. Actors with `knowledge.read` may read active documents, while `knowledge.write` is required to update, archive, or restore. Active documents appear in normal lists; archived documents are omitted and may only be restored through an authorized, version-checked operation. A stale update or transition fails without overwriting a newer version.
+**Lifecycle:** an actor with an effective workspace `knowledge.write` grant creates an active document and its initial immutable version in one audited transaction. The service validates a nonempty normalized title and non-whitespace bounded Markdown while preserving accepted source unchanged. Actors with `knowledge.read` may read active documents, while `knowledge.write` is required to update, archive, or restore. Active documents appear in bounded, stably ordered normal lists; archived documents are omitted and may only be restored through an authorized, version-checked operation. A stale update or transition fails without overwriting a newer version.
 
 ### KnowledgeDocumentVersion
 

@@ -15,6 +15,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { encode } from 'next-auth/jwt';
 
 import { PrismaClient, UserStatus, type User } from '../../../database/generated/client/client';
+import { runKnowledgeMvpE2eScenario } from './knowledge-mvp.e2e';
 import { runTenantLifecycleE2eScenarios, type LifecycleCookieJar } from './tenant-lifecycle.e2e';
 
 const TEST_FILE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
@@ -427,7 +428,7 @@ function assertEquivalentLoopbackOrigin(actualUrl: URL, expectedBaseUrl: string)
   assert.equal(actualUrl.password, '', 'Redirect URL must not contain a password.');
 }
 
-function assertRedirectsTo(response: Response, baseUrl: string, pathname: string): URL {
+function getTrustedRedirectUrl(response: Response, baseUrl: string): URL {
   assert.ok(
     [302, 303, 307, 308].includes(response.status),
     `Expected redirect, got ${response.status}.`,
@@ -436,6 +437,11 @@ function assertRedirectsTo(response: Response, baseUrl: string, pathname: string
   assert.ok(location, 'Redirect response must include a Location header.');
   const redirectUrl = new URL(location, baseUrl);
   assertEquivalentLoopbackOrigin(redirectUrl, baseUrl);
+  return redirectUrl;
+}
+
+function assertRedirectsTo(response: Response, baseUrl: string, pathname: string): URL {
+  const redirectUrl = getTrustedRedirectUrl(response, baseUrl);
   assert.equal(redirectUrl.pathname, pathname);
   return redirectUrl;
 }
@@ -480,8 +486,8 @@ async function getRenderedLoginRedirect(baseUrl: string, callbackUrl: string): P
 }
 
 test(
-  'SkyOS authentication and tenant lifecycle work through real HTTP requests and disposable PostgreSQL',
-  { timeout: 180_000 },
+  'SkyOS authentication, tenant lifecycle, and Knowledge MVP work through real HTTP requests and disposable PostgreSQL',
+  { timeout: 240_000 },
   async (context) => {
     const adminUrl = getAdminDatabaseUrl();
     const databaseName = `skyos_auth_e2e_${process.pid}_${randomBytes(4).toString('hex')}`;
@@ -703,6 +709,20 @@ test(
         login: async (jar: LifecycleCookieJar, identity) => {
           assert.ok(jar instanceof CookieJar);
           return (await loginWithCredentials(jar, baseUrl, identity, '/settings')).response;
+        },
+        prisma,
+      });
+
+      await runKnowledgeMvpE2eScenario(context, {
+        assertRedirectsTo: (response: Response, pathname: string) =>
+          assertRedirectsTo(response, baseUrl, pathname),
+        baseUrl,
+        createIdentity: (label: string) => createIdentity(prisma!, label, password, passwordHash),
+        createJar: () => new CookieJar(baseUrl),
+        getRedirectUrl: (response: Response) => getTrustedRedirectUrl(response, baseUrl),
+        login: async (jar, identity) => {
+          assert.ok(jar instanceof CookieJar);
+          return (await loginWithCredentials(jar, baseUrl, identity, '/knowledge')).response;
         },
         prisma,
       });
