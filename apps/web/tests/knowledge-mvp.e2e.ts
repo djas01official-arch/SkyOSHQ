@@ -104,6 +104,81 @@ async function loadHtml(jar: ServerActionCookieJar, path: string): Promise<strin
   return response.text();
 }
 
+async function assertStreamedRedirectTo(
+  response: Response,
+  requestPath: string,
+  targetPath: string,
+): Promise<void> {
+  assert.equal(response.status, 200, 'A streamed App Router redirect must return its HTML shell.');
+  const responseUrl = new URL(response.url);
+  assert.equal(responseUrl.pathname, requestPath);
+  assert.equal(responseUrl.search, '');
+
+  const html = await response.text();
+  const redirectMeta = html.match(/<meta(?=[^>]*\bid="__next-page-redirect")[^>]*>/u)?.[0];
+  assert.ok(redirectMeta, 'Denied page render must include the Next.js redirect instruction.');
+  assert.match(redirectMeta, /\bhttp-equiv="refresh"/u);
+  assert.equal(redirectMeta.match(/\bcontent="([^"]*)"/u)?.[1], `1;url=${targetPath}`);
+  assert.equal(
+    html.includes('data-knowledge-document-form="create"'),
+    false,
+    'Denied page render must not expose the create form.',
+  );
+}
+
+async function readKnowledgeWriteState(
+  prisma: PrismaClient,
+  workspaceId: string,
+): Promise<{ auditEvents: number; documents: number; versions: number }> {
+  const [auditEvents, documents, versions] = await Promise.all([
+    prisma.auditEvent.count({
+      where: { action: AuditAction.KNOWLEDGE_DOCUMENT_CREATED, workspaceId },
+    }),
+    prisma.knowledgeDocument.count({ where: { workspaceId } }),
+    prisma.knowledgeDocumentVersion.count({ where: { document: { workspaceId } } }),
+  ]);
+
+  return { auditEvents, documents, versions };
+}
+
+async function assertKnowledgeCreationDenied(
+  harness: KnowledgeE2eHarness,
+  jar: ServerActionCookieJar,
+  formHtml: string,
+  actorUserId: string,
+  workspaceId: string,
+  actorLabel: string,
+): Promise<void> {
+  const before = await readKnowledgeWriteState(harness.prisma, workspaceId);
+  const response = await submitServerActionForm(
+    jar,
+    harness.baseUrl,
+    '/knowledge/new',
+    formHtml,
+    {
+      markerName: 'data-knowledge-document-form',
+      markerValue: 'create',
+    },
+    {
+      content: `# Denied ${actorLabel} content`,
+      title: `Denied ${actorLabel} document`,
+      workspaceId,
+    },
+  );
+
+  harness.assertRedirectsTo(response, '/dashboard');
+  assert.deepEqual(await readKnowledgeWriteState(harness.prisma, workspaceId), before);
+  assert.equal(
+    await harness.prisma.auditEvent.count({
+      where: {
+        action: AuditAction.KNOWLEDGE_DOCUMENT_CREATED,
+        actorUserId,
+      },
+    }),
+    0,
+  );
+}
+
 function normalizeLineEndings(value: string): string {
   return value.replace(/\r\n?/gu, '\n');
 }
@@ -284,7 +359,56 @@ export async function runKnowledgeMvpE2eScenario(
       assert.ok(viewerList.includes(updatedTitle));
       assert.equal((await viewerJar.request(detailPath)).response.status, 200);
       assert.equal(viewerList.includes('New document'), false);
-      harness.assertRedirectsTo((await viewerJar.request('/knowledge/new')).response, '/dashboard');
+
+      await assertStreamedRedirectTo(
+        (await viewerJar.request('/knowledge/new')).response,
+        '/knowledge/new',
+        '/dashboard',
+      );
+      await assertKnowledgeCreationDenied(
+        harness,
+        viewerJar,
+        newPage,
+        viewer.id,
+        workspaceId,
+        'viewer',
+      );
+      assert.equal((await viewerJar.request(detailPath)).response.status, 200);
+
+      const organizationAdmin = await harness.createIdentity('knowledge-organization-admin');
+      await harness.prisma.organizationMembership.create({
+        data: {
+          activatedAt: new Date(),
+          organizationId,
+          role: OrganizationRole.ADMIN,
+          status: MembershipStatus.ACTIVE,
+          userId: organizationAdmin.id,
+        },
+      });
+      const organizationAdminJar = harness.createJar();
+      harness.assertRedirectsTo(
+        await harness.login(organizationAdminJar, organizationAdmin),
+        '/knowledge',
+      );
+      await assertStreamedRedirectTo(
+        (await organizationAdminJar.request(detailPath)).response,
+        detailPath,
+        '/dashboard',
+      );
+      await assertKnowledgeCreationDenied(
+        harness,
+        organizationAdminJar,
+        newPage,
+        organizationAdmin.id,
+        workspaceId,
+        'organization admin',
+      );
+      assert.equal(
+        await harness.prisma.workspaceMembership.count({
+          where: { userId: organizationAdmin.id, workspaceId },
+        }),
+        0,
+      );
     },
   );
 }
