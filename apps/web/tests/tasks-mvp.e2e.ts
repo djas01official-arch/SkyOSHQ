@@ -13,6 +13,7 @@ import {
   WorkspaceRole,
   WorkspaceStatus,
 } from '../../../database/generated/client/client';
+import { listTasks } from '../../../database/tasks/tasks';
 import {
   assertStreamedRedirectTo,
   findServerActionForm,
@@ -283,12 +284,70 @@ export async function runTasksMvpE2eScenario(
       assert.ok(currentDetail.includes(updatedTitle));
       assert.equal(currentDetail.includes(`Stale HTTP Task ${suffix}`), false);
 
+      const paginationTitles: string[] = [];
+      for (let index = 0; index < 25; index += 1) {
+        const title = `Pagination Task ${suffix} ${index.toString().padStart(2, '0')}`;
+        paginationTitles.push(title);
+        const paginationCreateResponse = await submitServerActionForm(
+          ownerJar,
+          harness.baseUrl,
+          '/tasks/new',
+          newPage,
+          { markerName: 'data-task-form', markerValue: 'create' },
+          {
+            assigneeUserId: '',
+            description: `Cursor boundary fixture ${index}`,
+            dueAt: '2026-09-15',
+            priority: TaskPriority.MEDIUM,
+            status: TaskStatus.TODO,
+            title,
+          },
+        );
+        assert.match(
+          harness.getRedirectUrl(paginationCreateResponse).pathname,
+          /^\/tasks\/[0-9a-f-]+$/u,
+        );
+      }
+
+      const firstTaskPage = await listTasks(harness.prisma, owner.id, workspaceId);
+      assert.equal(firstTaskPage.items.length, 25);
+      assert.equal(firstTaskPage.hasNextPage, true);
+      assert.ok(firstTaskPage.nextCursor);
+      const firstPageHtml = await loadHtml(ownerJar, '/tasks');
+      assert.ok(firstPageHtml.includes('data-task-pagination="next"'));
+      assert.ok(firstPageHtml.includes(firstTaskPage.nextCursor));
+      for (const title of paginationTitles) assert.ok(firstPageHtml.includes(title));
+      assert.equal(firstPageHtml.includes(updatedTitle), false);
+
+      const secondTaskPage = await listTasks(harness.prisma, owner.id, workspaceId, {
+        cursor: firstTaskPage.nextCursor,
+      });
+      assert.deepEqual(
+        secondTaskPage.items.map(({ id }) => id),
+        [task.id],
+      );
+      assert.equal(secondTaskPage.hasNextPage, false);
+      assert.equal(secondTaskPage.nextCursor, null);
+      const secondPagePath = `/tasks?cursor=${encodeURIComponent(firstTaskPage.nextCursor)}`;
+      const secondPageHtml = await loadHtml(ownerJar, secondPagePath);
+      assert.ok(secondPageHtml.includes(updatedTitle));
+      assert.equal(secondPageHtml.includes('data-task-pagination="next"'), false);
+      for (const title of paginationTitles) assert.equal(secondPageHtml.includes(title), false);
+
+      const malformedCursorHtml = await loadHtml(ownerJar, '/tasks?cursor=malformed!');
+      assert.ok(malformedCursorHtml.includes('Tasks page unavailable'));
+      assert.ok(malformedCursorHtml.includes('data-task-pagination="reset"'));
+
       const viewer = await harness.createIdentity('tasks-viewer');
       await addViewer(harness.prisma, viewer, organizationId, workspaceId);
       const viewerJar = harness.createJar();
       harness.assertRedirectsTo(await harness.login(viewerJar, viewer), '/tasks');
       const viewerList = await loadHtml(viewerJar, '/tasks');
-      assert.ok(viewerList.includes(updatedTitle));
+      assert.ok(viewerList.includes('data-task-pagination="next"'));
+      assert.equal(viewerList.includes(updatedTitle), false);
+      const viewerSecondPage = await loadHtml(viewerJar, secondPagePath);
+      assert.ok(viewerSecondPage.includes(updatedTitle));
+      assert.equal(viewerSecondPage.includes('data-task-pagination="next"'), false);
       assert.equal(viewerList.includes('New Task'), false);
       const viewerDetail = await loadHtml(viewerJar, detailPath);
       assert.equal(viewerDetail.includes(`href="${editPath}"`), false);
@@ -352,6 +411,11 @@ export async function runTasksMvpE2eScenario(
         '/tasks',
       );
       await assertStreamedRedirectTo(
+        (await organizationAdminJar.request(secondPagePath)).response,
+        secondPagePath,
+        '/dashboard',
+      );
+      await assertStreamedRedirectTo(
         (await organizationAdminJar.request(detailPath)).response,
         detailPath,
         '/dashboard',
@@ -389,7 +453,7 @@ export async function runTasksMvpE2eScenario(
         }),
         1,
       );
-      assert.equal((await loadHtml(ownerJar, '/tasks')).includes(updatedTitle), false);
+      assert.equal((await loadHtml(ownerJar, secondPagePath)).includes(updatedTitle), false);
     },
   );
 }

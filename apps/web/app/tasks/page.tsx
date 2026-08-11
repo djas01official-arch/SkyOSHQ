@@ -1,7 +1,7 @@
 import Link from 'next/link';
 
 import {
-  TASK_LIST_LIMIT,
+  TaskValidationError,
   isTaskAssigneeEffective,
   listTasks,
 } from '../../../../database/tasks/tasks';
@@ -22,17 +22,43 @@ import { requireCurrentUser } from '@/lib/auth/current-user';
 import { hasWorkspaceCapability, requireWorkspaceCapability } from '@/lib/organization-context';
 import { prisma } from '@/lib/prisma';
 
-export default async function TasksPage() {
-  const [user, context] = await Promise.all([
+type TasksPageProps = Readonly<{
+  searchParams: Promise<{ cursor?: string | string[] }>;
+}>;
+
+export default async function TasksPage({ searchParams }: TasksPageProps) {
+  const [user, context, resolvedSearchParams] = await Promise.all([
     requireCurrentUser(),
     requireWorkspaceCapability('tasks.read'),
+    searchParams,
   ]);
   const workspace = context.activeWorkspace;
   if (!workspace) return null;
 
-  const tasks = await listTasks(prisma, user.id, workspace.id);
+  let taskPage: Awaited<ReturnType<typeof listTasks>> | null = null;
+  let paginationError = false;
+  try {
+    if (
+      resolvedSearchParams.cursor !== undefined &&
+      typeof resolvedSearchParams.cursor !== 'string'
+    ) {
+      throw new TaskValidationError('The Task cursor is invalid.');
+    }
+    taskPage = await listTasks(prisma, user.id, workspace.id, {
+      cursor: resolvedSearchParams.cursor,
+    });
+  } catch (error) {
+    if (!(error instanceof TaskValidationError)) throw error;
+    paginationError = true;
+  }
+
+  const tasks = taskPage?.items ?? [];
   const canWrite = hasWorkspaceCapability(workspace.role, 'tasks.write');
   const incompleteCount = tasks.filter(({ status }) => status !== TaskStatus.DONE).length;
+  const isContinuation = typeof resolvedSearchParams.cursor === 'string';
+  const nextPageHref = taskPage?.nextCursor
+    ? `/tasks?cursor=${encodeURIComponent(taskPage.nextCursor)}`
+    : null;
 
   return (
     <div className="mx-auto max-w-5xl">
@@ -50,11 +76,27 @@ export default async function TasksPage() {
         title="Tasks"
       />
 
-      {tasks.length ? (
+      {paginationError ? (
+        <Card className="grid min-h-72 place-items-center">
+          <EmptyState
+            action={
+              <Link
+                className={buttonClassName({ variant: 'secondary' })}
+                data-task-pagination="reset"
+                href="/tasks"
+              >
+                Return to first page
+              </Link>
+            }
+            description="This page link is invalid or belongs to another workspace. Start again from the first page."
+            icon="checkSquare"
+            title="Tasks page unavailable"
+          />
+        </Card>
+      ) : tasks.length ? (
         <>
           <p className="mb-4 text-sm text-muted-foreground">
-            {incompleteCount} incomplete · {tasks.length} active
-            {tasks.length === TASK_LIST_LIMIT ? '+' : ''}
+            {incompleteCount} incomplete · {tasks.length} active on this page
           </p>
           <div className="grid gap-3">
             {tasks.map((task) => {
@@ -90,12 +132,35 @@ export default async function TasksPage() {
               );
             })}
           </div>
-          {tasks.length === TASK_LIST_LIMIT ? (
-            <p className="mt-5 text-xs leading-5 text-muted-foreground">
-              Showing the first {TASK_LIST_LIMIT} active Tasks in the documented workspace order.
-            </p>
+          {nextPageHref ? (
+            <div className="mt-6 flex justify-end border-t border-border pt-5">
+              <Link
+                className={buttonClassName({ variant: 'secondary' })}
+                data-task-pagination="next"
+                href={nextPageHref}
+              >
+                Next page
+              </Link>
+            </div>
           ) : null}
         </>
+      ) : isContinuation ? (
+        <Card className="grid min-h-72 place-items-center">
+          <EmptyState
+            action={
+              <Link
+                className={buttonClassName({ variant: 'secondary' })}
+                data-task-pagination="reset"
+                href="/tasks"
+              >
+                Return to first page
+              </Link>
+            }
+            description="Tasks may have changed since this page link was created. Start again from the first page."
+            icon="checkSquare"
+            title="No Tasks on this page"
+          />
+        </Card>
       ) : (
         <Card className="grid min-h-72 place-items-center">
           <EmptyState
