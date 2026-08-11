@@ -395,6 +395,23 @@ export async function runTasksMvpE2eScenario(
         0,
       );
 
+      const crossWorkspaceViewer = await harness.createIdentity('tasks-cross-workspace-viewer');
+      await addViewer(harness.prisma, crossWorkspaceViewer, organizationId, forgedWorkspaceId);
+      const crossWorkspaceViewerJar = harness.createJar();
+      harness.assertRedirectsTo(
+        await harness.login(crossWorkspaceViewerJar, crossWorkspaceViewer),
+        '/tasks',
+      );
+      const crossWorkspaceList = await loadHtml(crossWorkspaceViewerJar, '/tasks');
+      assert.ok(crossWorkspaceList.includes('No active Tasks'));
+      const crossWorkspaceCursorPage = await loadHtml(crossWorkspaceViewerJar, secondPagePath);
+      assert.ok(crossWorkspaceCursorPage.includes('Tasks page unavailable'));
+      assert.ok(crossWorkspaceCursorPage.includes('data-task-pagination="reset"'));
+      assert.equal(crossWorkspaceCursorPage.includes(updatedTitle), false);
+      for (const title of paginationTitles) {
+        assert.equal(crossWorkspaceCursorPage.includes(title), false);
+      }
+
       const organizationAdmin = await harness.createIdentity('tasks-organization-admin');
       await harness.prisma.organizationMembership.create({
         data: {
@@ -410,10 +427,17 @@ export async function runTasksMvpE2eScenario(
         await harness.login(organizationAdminJar, organizationAdmin),
         '/tasks',
       );
+      const taskCountBeforeDeniedPagination = await harness.prisma.task.count({
+        where: { workspaceId },
+      });
       await assertStreamedRedirectTo(
         (await organizationAdminJar.request(secondPagePath)).response,
         secondPagePath,
         '/dashboard',
+      );
+      assert.equal(
+        await harness.prisma.task.count({ where: { workspaceId } }),
+        taskCountBeforeDeniedPagination,
       );
       await assertStreamedRedirectTo(
         (await organizationAdminJar.request(detailPath)).response,
@@ -453,7 +477,16 @@ export async function runTasksMvpE2eScenario(
         }),
         1,
       );
-      assert.equal((await loadHtml(ownerJar, secondPagePath)).includes(updatedTitle), false);
+      const refreshedAfterArchive = await listTasks(harness.prisma, owner.id, workspaceId);
+      assert.equal(
+        refreshedAfterArchive.items.some(({ id }) => id === task.id),
+        false,
+      );
+      assert.equal(refreshedAfterArchive.hasNextPage, false);
+      assert.equal(refreshedAfterArchive.nextCursor, null);
+      const postArchiveList = await loadHtml(ownerJar, '/tasks');
+      assert.equal(postArchiveList.includes(updatedTitle), false);
+      assert.equal(postArchiveList.includes('data-task-pagination="next"'), false);
     },
   );
 }

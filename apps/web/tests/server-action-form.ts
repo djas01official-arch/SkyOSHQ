@@ -17,8 +17,11 @@ export async function assertStreamedRedirectTo(
 ): Promise<void> {
   assert.equal(response.status, 200, 'A streamed App Router redirect must return its HTML shell.');
   const responseUrl = new URL(response.url);
-  assert.equal(responseUrl.pathname, requestPath);
-  assert.equal(responseUrl.search, '');
+  const expectedRequestUrl = new URL(requestPath, responseUrl.origin);
+  assert.equal(expectedRequestUrl.origin, responseUrl.origin);
+  assert.equal(responseUrl.pathname, expectedRequestUrl.pathname);
+  assert.equal(responseUrl.search, expectedRequestUrl.search);
+  assert.equal(expectedRequestUrl.hash, '');
 
   const html = await response.text();
   const redirectMeta = html.match(/<meta(?=[^>]*\bid="__next-page-redirect")[^>]*>/u)?.[0];
