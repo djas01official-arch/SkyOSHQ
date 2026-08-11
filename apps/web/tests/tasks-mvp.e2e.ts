@@ -15,6 +15,7 @@ import {
 } from '../../../database/generated/client/client';
 import {
   assertStreamedRedirectTo,
+  findServerActionForm,
   submitServerActionForm,
   type ServerActionCookieJar,
 } from './server-action-form';
@@ -190,6 +191,17 @@ export async function runTasksMvpE2eScenario(
 
       const editPath = `${detailPath}/edit`;
       const editPage = await loadHtml(ownerJar, editPath);
+      const editFields = findServerActionForm(editPage, {
+        markerName: 'data-task-form',
+        markerValue: 'edit',
+        requiredFields: { taskId: task.id },
+      });
+      assert.ok(
+        editFields.some(
+          ([name, value]) => name === 'expectedUpdatedAt' && value === task.updatedAt.toISOString(),
+        ),
+        'The rendered edit form must carry the canonical Task concurrency token.',
+      );
       const updatedTitle = `Updated HTTP Task ${suffix}`;
       const updateResponse = await submitServerActionForm(
         ownerJar,
@@ -224,6 +236,52 @@ export async function runTasksMvpE2eScenario(
         }),
         1,
       );
+
+      const staleResponse = await submitServerActionForm(
+        ownerJar,
+        harness.baseUrl,
+        editPath,
+        editPage,
+        {
+          markerName: 'data-task-form',
+          markerValue: 'edit',
+          requiredFields: { taskId: task.id },
+        },
+        {
+          assigneeUserId: owner.id,
+          description: 'This stale edit must not persist.',
+          dueAt: '2026-12-31',
+          priority: TaskPriority.LOW,
+          status: TaskStatus.DONE,
+          taskId: task.id,
+          title: `Stale HTTP Task ${suffix}`,
+        },
+      );
+      assert.equal(staleResponse.status, 200);
+      const staleBody = await staleResponse.text();
+      assert.ok(
+        staleBody.includes(
+          'This task changed since you opened it. Reload the latest version and try again.',
+        ),
+        'The stale server-action response must expose the accessible conflict message.',
+      );
+      assert.ok(staleBody.includes(`Stale HTTP Task ${suffix}`));
+      assert.ok(staleBody.includes('This stale edit must not persist.'));
+      const afterStale = await harness.prisma.task.findUniqueOrThrow({ where: { id: task.id } });
+      assert.equal(afterStale.title, updatedTitle);
+      assert.equal(afterStale.description, 'Updated through the real Tasks form.');
+      assert.equal(afterStale.status, TaskStatus.IN_PROGRESS);
+      assert.equal(afterStale.priority, TaskPriority.HIGH);
+      assert.equal(afterStale.updatedAt.toISOString(), updated.updatedAt.toISOString());
+      assert.equal(
+        await harness.prisma.auditEvent.count({
+          where: { action: AuditAction.TASK_UPDATED, targetId: task.id },
+        }),
+        1,
+      );
+      const currentDetail = await loadHtml(ownerJar, detailPath);
+      assert.ok(currentDetail.includes(updatedTitle));
+      assert.equal(currentDetail.includes(`Stale HTTP Task ${suffix}`), false);
 
       const viewer = await harness.createIdentity('tasks-viewer');
       await addViewer(harness.prisma, viewer, organizationId, workspaceId);
@@ -300,6 +358,17 @@ export async function runTasksMvpE2eScenario(
       );
 
       const updatedDetail = await loadHtml(ownerJar, detailPath);
+      assert.ok(
+        findServerActionForm(updatedDetail, {
+          markerName: 'data-task-operation',
+          markerValue: 'archive',
+          requiredFields: { taskId: task.id },
+        }).some(
+          ([name, value]) =>
+            name === 'expectedUpdatedAt' && value === updated.updatedAt.toISOString(),
+        ),
+        'The rendered archive form must carry the current Task concurrency token.',
+      );
       const archiveResponse = await submitServerActionForm(
         ownerJar,
         harness.baseUrl,

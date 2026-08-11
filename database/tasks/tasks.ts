@@ -19,11 +19,14 @@ export class TaskNotFoundError extends TaskError {}
 
 export class TaskValidationError extends TaskError {}
 
+export class TaskConflictError extends TaskError {}
+
 export const TASK_LIST_LIMIT = 100;
 export const TASK_TITLE_MAX_LENGTH = 200;
 export const TASK_DESCRIPTION_MAX_LENGTH = 10_000;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const CONCURRENCY_TOKEN_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 
 type Transaction = Prisma.TransactionClient;
 type TaskDatabase = PrismaClient | Transaction;
@@ -125,6 +128,35 @@ function getTaskValue(input: TaskInput): TaskValue {
 
 function dueDateValue(value: Date | null): string | null {
   return value?.toISOString().slice(0, 10) ?? null;
+}
+
+export function serializeTaskConcurrencyToken(updatedAt: Date): string {
+  return updatedAt.toISOString();
+}
+
+function getExpectedUpdatedAt(value: string): Date {
+  if (!CONCURRENCY_TOKEN_PATTERN.test(value)) {
+    throw new TaskValidationError('The Task version is unavailable. Reload and try again.');
+  }
+
+  const expectedUpdatedAt = new Date(value);
+  if (
+    Number.isNaN(expectedUpdatedAt.valueOf()) ||
+    serializeTaskConcurrencyToken(expectedUpdatedAt) !== value
+  ) {
+    throw new TaskValidationError('The Task version is unavailable. Reload and try again.');
+  }
+  return expectedUpdatedAt;
+}
+
+function getNextUpdatedAt(expectedUpdatedAt: Date): Date {
+  return new Date(Math.max(Date.now(), expectedUpdatedAt.getTime() + 1));
+}
+
+function requireTaskId(taskId: string): void {
+  if (!UUID_PATTERN.test(taskId)) {
+    throw new TaskNotFoundError('The Task was not found in this workspace.');
+  }
 }
 
 export async function requireTaskWorkspaceAccess(
@@ -307,9 +339,7 @@ async function findTask(
   workspaceId: string,
   taskId: string,
 ) {
-  if (!UUID_PATTERN.test(taskId)) {
-    throw new TaskNotFoundError('The Task was not found in this workspace.');
-  }
+  requireTaskId(taskId);
 
   const task = await prisma.task.findFirst({
     where: { archivedAt: null, id: taskId, workspaceId },
@@ -384,6 +414,7 @@ export async function updateTask(
   actorUserId: string,
   workspaceId: string,
   taskId: string,
+  expectedUpdatedAt: string,
   input: TaskInput,
 ) {
   return prisma.$transaction(async (transaction) => {
@@ -393,7 +424,8 @@ export async function updateTask(
       workspaceId,
       'tasks.write',
     );
-    const current = await findTask(transaction, access.organizationId, workspaceId, taskId);
+    requireTaskId(taskId);
+    const expectedUpdatedAtValue = getExpectedUpdatedAt(expectedUpdatedAt);
     const value = getTaskValue(input);
     await requireEffectiveAssignee(
       transaction,
@@ -401,11 +433,22 @@ export async function updateTask(
       access.organizationId,
       value.assigneeUserId,
     );
-    const task = await transaction.task.update({
-      data: value,
-      include: taskInclude(access.organizationId, workspaceId),
-      where: { id: current.id },
+    const current = await findTask(transaction, access.organizationId, workspaceId, taskId);
+    const updated = await transaction.task.updateMany({
+      data: { ...value, updatedAt: getNextUpdatedAt(expectedUpdatedAtValue) },
+      where: {
+        archivedAt: null,
+        id: current.id,
+        updatedAt: expectedUpdatedAtValue,
+        workspaceId,
+      },
     });
+    if (updated.count !== 1) {
+      throw new TaskConflictError(
+        'This task changed since you opened it. Reload the latest version and try again.',
+      );
+    }
+    const task = await findTask(transaction, access.organizationId, workspaceId, taskId);
 
     await appendAuditEvent(transaction, {
       action: AuditAction.TASK_UPDATED,
@@ -419,8 +462,10 @@ export async function updateTask(
         beforeDueAt: dueDateValue(current.dueAt),
         beforePriority: current.priority,
         beforeStatus: current.status,
+        beforeUpdatedAt: serializeTaskConcurrencyToken(current.updatedAt),
         descriptionChanged: current.description !== task.description,
         titleChanged: current.title !== task.title,
+        updatedAt: serializeTaskConcurrencyToken(task.updatedAt),
       },
       organizationId: access.organizationId,
       targetId: task.id,
@@ -437,6 +482,7 @@ export async function archiveTask(
   actorUserId: string,
   workspaceId: string,
   taskId: string,
+  expectedUpdatedAt: string,
 ) {
   return prisma.$transaction(async (transaction) => {
     const access = await requireTaskWorkspaceAccess(
@@ -445,16 +491,38 @@ export async function archiveTask(
       workspaceId,
       'tasks.write',
     );
+    requireTaskId(taskId);
+    const expectedUpdatedAtValue = getExpectedUpdatedAt(expectedUpdatedAt);
     const current = await findTask(transaction, access.organizationId, workspaceId, taskId);
-    const task = await transaction.task.update({
-      data: { archivedAt: new Date() },
-      where: { id: current.id },
+    const archivedAt = new Date();
+    const updated = await transaction.task.updateMany({
+      data: {
+        archivedAt,
+        updatedAt: getNextUpdatedAt(expectedUpdatedAtValue),
+      },
+      where: {
+        archivedAt: null,
+        id: current.id,
+        updatedAt: expectedUpdatedAtValue,
+        workspaceId,
+      },
     });
+    if (updated.count !== 1) {
+      throw new TaskConflictError(
+        'This task changed since you opened it. Reload the latest version and try again.',
+      );
+    }
+    const task = await transaction.task.findUniqueOrThrow({ where: { id: current.id } });
 
     await appendAuditEvent(transaction, {
       action: AuditAction.TASK_ARCHIVED,
       actorUserId,
-      metadata: { priority: task.priority, status: task.status },
+      metadata: {
+        beforeUpdatedAt: serializeTaskConcurrencyToken(current.updatedAt),
+        priority: task.priority,
+        status: task.status,
+        updatedAt: serializeTaskConcurrencyToken(task.updatedAt),
+      },
       organizationId: access.organizationId,
       targetId: task.id,
       targetType: AuditTargetType.TASK,

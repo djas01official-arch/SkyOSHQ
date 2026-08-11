@@ -20,6 +20,7 @@ import {
 } from '../generated/client/client';
 import {
   TaskAuthorizationError,
+  TaskConflictError,
   TaskNotFoundError,
   TaskValidationError,
   TASK_LIST_LIMIT,
@@ -29,6 +30,7 @@ import {
   isTaskAssigneeEffective,
   listTaskAssignees,
   listTasks,
+  serializeTaskConcurrencyToken,
   updateTask,
 } from '../tasks/tasks';
 
@@ -137,6 +139,10 @@ function taskInput(title: string) {
   };
 }
 
+function taskToken(task: { updatedAt: Date }): string {
+  return serializeTaskConcurrencyToken(task.updatedAt);
+}
+
 async function resetTestDatabase(): Promise<void> {
   await prisma.$executeRawUnsafe(
     'TRUNCATE TABLE "audit_events", "tasks", "workspace_memberships", "organization_memberships", "workspaces", "organizations", "users" CASCADE;',
@@ -172,7 +178,7 @@ test('workspace owner, admin, and member can create, read, update, and archive T
     assert.equal((await getTask(prisma, actorId, workspaceId, task.id)).id, task.id);
     assert.ok((await listTasks(prisma, actorId, workspaceId)).some(({ id }) => id === task.id));
 
-    const updated = await updateTask(prisma, actorId, workspaceId, task.id, {
+    const updated = await updateTask(prisma, actorId, workspaceId, task.id, taskToken(task), {
       ...taskInput(`${role} task updated`),
       dueAt: null,
       priority: TaskPriority.HIGH,
@@ -182,7 +188,7 @@ test('workspace owner, admin, and member can create, read, update, and archive T
     assert.equal(updated.priority, TaskPriority.HIGH);
     assert.equal(updated.dueAt, null);
 
-    const archived = await archiveTask(prisma, actorId, workspaceId, task.id);
+    const archived = await archiveTask(prisma, actorId, workspaceId, task.id, taskToken(updated));
     assert.ok(archived.archivedAt);
     assert.equal(
       (await listTasks(prisma, actorId, workspaceId)).some(({ id }) => id === task.id),
@@ -218,13 +224,109 @@ test('viewer remains read-only and failed writes emit no success event', async (
     TaskAuthorizationError,
   );
   await assert.rejects(
-    updateTask(prisma, viewerId, workspaceId, task.id, taskInput('Denied update')),
+    updateTask(prisma, viewerId, workspaceId, task.id, taskToken(task), taskInput('Denied update')),
     TaskAuthorizationError,
   );
-  await assert.rejects(archiveTask(prisma, viewerId, workspaceId, task.id), TaskAuthorizationError);
+  await assert.rejects(
+    archiveTask(prisma, viewerId, workspaceId, task.id, taskToken(task)),
+    TaskAuthorizationError,
+  );
   assert.equal(
     await prisma.auditEvent.count({
       where: { actorUserId: viewerId, action: { startsWith: 'task.' } },
+    }),
+    0,
+  );
+});
+
+test('Task updates compare and swap updatedAt without stale overwrites or audit events', async () => {
+  const ownerId = await createUser();
+  const organizationId = await createOrganization(ownerId);
+  const workspaceId = await createWorkspace(organizationId, ownerId);
+  const task = await createTask(prisma, ownerId, workspaceId, taskInput('Original Task'));
+  const originalToken = taskToken(task);
+
+  const current = await updateTask(prisma, ownerId, workspaceId, task.id, originalToken, {
+    ...taskInput('Current Task'),
+    priority: TaskPriority.HIGH,
+    status: TaskStatus.IN_PROGRESS,
+  });
+  assert.ok(current.updatedAt.getTime() > task.updatedAt.getTime());
+  assert.equal(
+    await prisma.auditEvent.count({
+      where: { action: AuditAction.TASK_UPDATED, targetId: task.id },
+    }),
+    1,
+  );
+
+  await assert.rejects(
+    updateTask(prisma, ownerId, workspaceId, task.id, originalToken, taskInput('Stale Task')),
+    TaskConflictError,
+  );
+
+  const persisted = await prisma.task.findUniqueOrThrow({ where: { id: task.id } });
+  assert.equal(persisted.title, 'Current Task');
+  assert.equal(persisted.status, TaskStatus.IN_PROGRESS);
+  assert.equal(persisted.priority, TaskPriority.HIGH);
+  assert.equal(taskToken(persisted), taskToken(current));
+  assert.equal(
+    await prisma.auditEvent.count({
+      where: { action: AuditAction.TASK_UPDATED, targetId: task.id },
+    }),
+    1,
+  );
+});
+
+test('Task concurrency tokens are canonical, resource-specific compare values', async () => {
+  const ownerId = await createUser();
+  const organizationId = await createOrganization(ownerId);
+  const workspaceId = await createWorkspace(organizationId, ownerId);
+  const siblingWorkspaceId = await createWorkspace(organizationId, ownerId);
+  const target = await createTask(prisma, ownerId, workspaceId, taskInput('Token target'));
+  const other = await createTask(prisma, ownerId, workspaceId, taskInput('Other Task'));
+  const sibling = await createTask(prisma, ownerId, siblingWorkspaceId, taskInput('Sibling Task'));
+  const newerOther = await updateTask(
+    prisma,
+    ownerId,
+    workspaceId,
+    other.id,
+    taskToken(other),
+    taskInput('Newer other Task'),
+  );
+  const newerSibling = await updateTask(
+    prisma,
+    ownerId,
+    siblingWorkspaceId,
+    sibling.id,
+    taskToken(sibling),
+    taskInput('Newer sibling Task'),
+  );
+
+  for (const token of ['not-a-date', new Date().toUTCString()]) {
+    await assert.rejects(
+      updateTask(
+        prisma,
+        ownerId,
+        workspaceId,
+        target.id,
+        token,
+        taskInput('Malformed token update'),
+      ),
+      TaskValidationError,
+    );
+  }
+  for (const token of [taskToken(newerOther), taskToken(newerSibling)]) {
+    await assert.rejects(
+      updateTask(prisma, ownerId, workspaceId, target.id, token, taskInput('Foreign token update')),
+      TaskConflictError,
+    );
+  }
+
+  const persisted = await prisma.task.findUniqueOrThrow({ where: { id: target.id } });
+  assert.equal(persisted.title, 'Token target');
+  assert.equal(
+    await prisma.auditEvent.count({
+      where: { action: AuditAction.TASK_UPDATED, targetId: target.id },
     }),
     0,
   );
@@ -251,14 +353,39 @@ test('organization administration and client-selected workspace ids grant no Tas
   });
 
   await assert.rejects(listTasks(prisma, organizationAdminId, workspaceId), TaskAuthorizationError);
+  await assert.rejects(
+    updateTask(
+      prisma,
+      organizationAdminId,
+      workspaceId,
+      task.id,
+      taskToken(task),
+      taskInput('Organization admin denied update'),
+    ),
+    TaskAuthorizationError,
+  );
   await assert.rejects(getTask(prisma, ownerId, siblingWorkspaceId, task.id), TaskNotFoundError);
   await assert.rejects(
-    updateTask(prisma, ownerId, siblingWorkspaceId, task.id, taskInput('Cross-workspace update')),
+    updateTask(
+      prisma,
+      ownerId,
+      siblingWorkspaceId,
+      task.id,
+      taskToken(task),
+      taskInput('Cross-workspace update'),
+    ),
     TaskNotFoundError,
   );
   await assert.rejects(getTask(prisma, otherOwnerId, workspaceId, task.id), TaskAuthorizationError);
   await assert.rejects(
-    updateTask(prisma, otherOwnerId, otherWorkspaceId, task.id, taskInput('Forged update')),
+    updateTask(
+      prisma,
+      otherOwnerId,
+      otherWorkspaceId,
+      task.id,
+      taskToken(task),
+      taskInput('Forged update'),
+    ),
     TaskNotFoundError,
   );
   assert.equal((await getTask(prisma, ownerId, workspaceId, task.id)).title, 'Scoped task');
@@ -297,6 +424,17 @@ test('ineffective memberships and archived workspaces deny Task access', async (
       createTask(prisma, actorId, workspaceId, taskInput('Denied membership task')),
       TaskAuthorizationError,
     );
+    await assert.rejects(
+      updateTask(
+        prisma,
+        actorId,
+        workspaceId,
+        task.id,
+        taskToken(task),
+        taskInput('Denied membership update'),
+      ),
+      TaskAuthorizationError,
+    );
   }
 
   await prisma.workspace.update({
@@ -306,7 +444,14 @@ test('ineffective memberships and archived workspaces deny Task access', async (
   await assert.rejects(listTasks(prisma, ownerId, workspaceId), TaskAuthorizationError);
   await assert.rejects(getTask(prisma, ownerId, workspaceId, task.id), TaskAuthorizationError);
   await assert.rejects(
-    updateTask(prisma, ownerId, workspaceId, task.id, taskInput('Denied archive update')),
+    updateTask(
+      prisma,
+      ownerId,
+      workspaceId,
+      task.id,
+      taskToken(task),
+      taskInput('Denied archive update'),
+    ),
     TaskAuthorizationError,
   );
 });
@@ -359,13 +504,18 @@ test('assignees must remain effective members of the same workspace for every as
 
   for (const invalidAssignee of [siblingMemberId, outsideUserId, randomUUID()]) {
     await assert.rejects(
-      updateTask(prisma, ownerId, workspaceId, task.id, {
+      updateTask(prisma, ownerId, workspaceId, task.id, taskToken(task), {
         ...taskInput('Invalid reassignment'),
         assigneeUserId: invalidAssignee,
       }),
       TaskValidationError,
     );
   }
+
+  const current = await updateTask(prisma, ownerId, workspaceId, task.id, taskToken(task), {
+    ...taskInput('Assigned task current'),
+    assigneeUserId: assigneeId,
+  });
 
   await prisma.workspaceMembership.update({
     data: { status: MembershipStatus.SUSPENDED },
@@ -375,13 +525,13 @@ test('assignees must remain effective members of the same workspace for every as
   assert.equal(retained.assigneeUserId, assigneeId);
   assert.equal(isTaskAssigneeEffective(retained), false);
   await assert.rejects(
-    updateTask(prisma, ownerId, workspaceId, task.id, {
+    updateTask(prisma, ownerId, workspaceId, task.id, taskToken(task), {
       ...taskInput('Suspended reassignment'),
       assigneeUserId: assigneeId,
     }),
     TaskValidationError,
   );
-  const unassigned = await updateTask(prisma, ownerId, workspaceId, task.id, {
+  const unassigned = await updateTask(prisma, ownerId, workspaceId, task.id, taskToken(current), {
     ...taskInput('Unassigned task'),
     assigneeUserId: null,
   });
@@ -460,13 +610,64 @@ test('active Task listing is bounded and follows the deterministic Task order', 
     await createTask(prisma, ownerId, workspaceId, { ...taskInput(title), dueAt, status });
   }
   const archived = await createTask(prisma, ownerId, workspaceId, taskInput('Archived ordering'));
-  await archiveTask(prisma, ownerId, workspaceId, archived.id);
+  await archiveTask(prisma, ownerId, workspaceId, archived.id, taskToken(archived));
 
   const listed = await listTasks(prisma, ownerId, workspaceId);
   assert.ok(listed.length <= TASK_LIST_LIMIT);
   assert.deepEqual(
     listed.map(({ title }) => title),
     ['Todo earlier', 'Todo later', 'Todo null', 'Progress dated', 'Done dated'],
+  );
+});
+
+test('Task archive uses the same concurrency token and leaves stale requests active', async () => {
+  const ownerId = await createUser();
+  const organizationId = await createOrganization(ownerId);
+  const workspaceId = await createWorkspace(organizationId, ownerId);
+  const task = await createTask(prisma, ownerId, workspaceId, taskInput('Archive concurrency'));
+  const staleToken = taskToken(task);
+  const current = await updateTask(
+    prisma,
+    ownerId,
+    workspaceId,
+    task.id,
+    staleToken,
+    taskInput('Current before archive'),
+  );
+
+  await assert.rejects(
+    archiveTask(prisma, ownerId, workspaceId, task.id, staleToken),
+    TaskConflictError,
+  );
+  const stillActive = await prisma.task.findUniqueOrThrow({ where: { id: task.id } });
+  assert.equal(stillActive.archivedAt, null);
+  assert.equal(stillActive.title, 'Current before archive');
+  assert.equal(
+    await prisma.auditEvent.count({
+      where: { action: AuditAction.TASK_ARCHIVED, targetId: task.id },
+    }),
+    0,
+  );
+
+  const archived = await archiveTask(prisma, ownerId, workspaceId, task.id, taskToken(current));
+  assert.ok(archived.archivedAt);
+  assert.ok(archived.updatedAt.getTime() > current.updatedAt.getTime());
+  assert.equal(
+    await prisma.auditEvent.count({
+      where: { action: AuditAction.TASK_ARCHIVED, targetId: task.id },
+    }),
+    1,
+  );
+  await assert.rejects(
+    updateTask(
+      prisma,
+      ownerId,
+      workspaceId,
+      task.id,
+      taskToken(archived),
+      taskInput('Archived update denied'),
+    ),
+    TaskNotFoundError,
   );
 });
 
@@ -494,7 +695,7 @@ test('an audit insertion failure rolls back the Task mutation', async () => {
 
   try {
     await assert.rejects(
-      updateTask(prisma, ownerId, workspaceId, task.id, {
+      updateTask(prisma, ownerId, workspaceId, task.id, taskToken(task), {
         ...taskInput('Must roll back'),
         status: TaskStatus.DONE,
       }),
@@ -509,6 +710,7 @@ test('an audit insertion failure rolls back the Task mutation', async () => {
   const persisted = await prisma.task.findUniqueOrThrow({ where: { id: task.id } });
   assert.equal(persisted.title, 'Atomic Task');
   assert.equal(persisted.status, TaskStatus.TODO);
+  assert.equal(taskToken(persisted), taskToken(task));
   assert.equal(
     await prisma.auditEvent.count({
       where: { action: AuditAction.TASK_UPDATED, targetId: task.id },

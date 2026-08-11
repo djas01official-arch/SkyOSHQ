@@ -5,6 +5,7 @@ import {
   TaskNotFoundError,
   getTask,
   isTaskAssigneeEffective,
+  serializeTaskConcurrencyToken,
 } from '../../../../../database/tasks/tasks';
 
 import { TaskArchiveControl } from '@/components/tasks/task-archive-control';
@@ -65,7 +66,11 @@ export default async function TaskPage({ params }: TaskPageProps) {
             >
               Edit
             </Link>
-            <TaskArchiveControl taskId={task.id} title={task.title} />
+            <TaskArchiveControl
+              expectedUpdatedAt={serializeTaskConcurrencyToken(task.updatedAt)}
+              taskId={task.id}
+              title={task.title}
+            />
           </div>
         ) : null}
       </div>

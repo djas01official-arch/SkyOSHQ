@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useActionState } from 'react';
 
 import type { TaskActionState } from '@/app/tasks/actions';
@@ -20,6 +21,7 @@ type TaskFormProps = Readonly<{
   assignees: readonly AssigneeOption[];
   description?: string;
   dueAt?: string;
+  expectedUpdatedAt?: string;
   kind: 'create' | 'edit';
   priority?: string;
   status?: string;
@@ -28,7 +30,7 @@ type TaskFormProps = Readonly<{
   title?: string;
 }>;
 
-const initialState: TaskActionState = { error: null };
+const initialState: TaskActionState = { conflict: false, error: null, values: null };
 
 function assigneeLabel(assignee: AssigneeOption): string {
   return assignee.displayName ?? assignee.email ?? 'Unnamed workspace member';
@@ -40,6 +42,7 @@ export function TaskForm({
   assignees,
   description = '',
   dueAt = '',
+  expectedUpdatedAt,
   kind,
   priority = 'MEDIUM',
   status = 'TODO',
@@ -48,15 +51,20 @@ export function TaskForm({
   title = '',
 }: TaskFormProps) {
   const [state, formAction, isPending] = useActionState(action, initialState);
+  const values = state.values;
+  const formKey = values ? JSON.stringify(values) : 'initial';
 
   return (
-    <form action={formAction} className="space-y-5" data-task-form={kind}>
+    <form action={formAction} className="space-y-5" data-task-form={kind} key={formKey}>
       {taskId ? <input name="taskId" type="hidden" value={taskId} /> : null}
+      {expectedUpdatedAt ? (
+        <input name="expectedUpdatedAt" type="hidden" value={expectedUpdatedAt} />
+      ) : null}
       <label className="block">
         <span className="text-sm font-medium text-foreground">Title</span>
         <Input
           className="mt-2 h-11"
-          defaultValue={title}
+          defaultValue={values?.title ?? title}
           maxLength={200}
           name="title"
           placeholder="Task title"
@@ -67,7 +75,7 @@ export function TaskForm({
         <span className="text-sm font-medium text-foreground">Description</span>
         <Textarea
           className="mt-2 min-h-32"
-          defaultValue={description}
+          defaultValue={values?.description ?? description}
           maxLength={10000}
           name="description"
           placeholder="Optional context, outcome, or next step"
@@ -76,7 +84,7 @@ export function TaskForm({
       <div className="grid gap-5 sm:grid-cols-2">
         <label className="block">
           <span className="text-sm font-medium text-foreground">Status</span>
-          <Select className="mt-2 h-11" defaultValue={status} name="status">
+          <Select className="mt-2 h-11" defaultValue={values?.status ?? status} name="status">
             <option value="TODO">To do</option>
             <option value="IN_PROGRESS">In progress</option>
             <option value="DONE">Done</option>
@@ -84,7 +92,7 @@ export function TaskForm({
         </label>
         <label className="block">
           <span className="text-sm font-medium text-foreground">Priority</span>
-          <Select className="mt-2 h-11" defaultValue={priority} name="priority">
+          <Select className="mt-2 h-11" defaultValue={values?.priority ?? priority} name="priority">
             <option value="LOW">Low</option>
             <option value="MEDIUM">Medium</option>
             <option value="HIGH">High</option>
@@ -92,7 +100,11 @@ export function TaskForm({
         </label>
         <label className="block">
           <span className="text-sm font-medium text-foreground">Assignee</span>
-          <Select className="mt-2 h-11" defaultValue={assigneeUserId} name="assigneeUserId">
+          <Select
+            className="mt-2 h-11"
+            defaultValue={values ? (values.assigneeUserId ?? '') : assigneeUserId}
+            name="assigneeUserId"
+          >
             <option value="">Unassigned</option>
             {assignees.map((assignee) => (
               <option key={assignee.id} value={assignee.id}>
@@ -103,19 +115,34 @@ export function TaskForm({
         </label>
         <label className="block">
           <span className="text-sm font-medium text-foreground">Due date</span>
-          <Input className="mt-2 h-11" defaultValue={dueAt} name="dueAt" type="date" />
+          <Input
+            className="mt-2 h-11"
+            defaultValue={values ? (values.dueAt ?? '') : dueAt}
+            name="dueAt"
+            type="date"
+          />
         </label>
       </div>
       <p className="text-xs leading-5 text-muted-foreground">
         Due dates are calendar dates. SkyOS stores them without a time or timezone shift.
       </p>
       {state.error ? (
-        <p
+        <div
           aria-live="polite"
           className="rounded-control bg-danger-soft px-3 py-2 text-sm text-danger"
+          data-task-conflict={state.conflict ? 'true' : undefined}
+          role="alert"
         >
-          {state.error}
-        </p>
+          <p>{state.error}</p>
+          {state.conflict && taskId ? (
+            <Link
+              className="mt-2 inline-block font-semibold underline"
+              href={`/tasks/${taskId}/edit`}
+            >
+              Reload the latest Task
+            </Link>
+          ) : null}
+        </div>
       ) : null}
       <div className="flex justify-end">
         <Button disabled={isPending} type="submit" variant="primary">

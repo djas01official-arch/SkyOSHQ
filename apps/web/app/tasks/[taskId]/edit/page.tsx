@@ -6,6 +6,7 @@ import {
   getTask,
   isTaskAssigneeEffective,
   listTaskAssignees,
+  serializeTaskConcurrencyToken,
 } from '../../../../../../database/tasks/tasks';
 
 import { updateTaskAction } from '@/app/tasks/actions';
@@ -55,6 +56,7 @@ export default async function EditTaskPage({ params }: EditTaskPageProps) {
           assignees={assignees}
           description={task.description ?? ''}
           dueAt={task.dueAt?.toISOString().slice(0, 10) ?? ''}
+          expectedUpdatedAt={serializeTaskConcurrencyToken(task.updatedAt)}
           kind="edit"
           priority={task.priority}
           status={task.status}
