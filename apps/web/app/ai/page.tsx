@@ -27,7 +27,7 @@ export default async function AiPage() {
     <div className="mx-auto max-w-5xl">
       <PageHeader
         action={
-          <form action={createConversationAction}>
+          <form action={createConversationAction} data-ai-conversation-form="create">
             <Button type="submit" variant="primary">
               <Icon className="size-4" name="plus" />
               New conversation

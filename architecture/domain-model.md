@@ -30,8 +30,11 @@ Access is explicit, deny-by-default, and evaluated at the smallest applicable sc
 | Knowledge embedding job    | Durable, audited request to embed one immutable Knowledge chunk set.                             |
 | Knowledge embedding set    | Immutable provider/model-versioned vector collection for one exact chunk set.                    |
 | Knowledge embedding        | One immutable vector and input checksum mapped to exactly one chunk ordinal.                     |
-| Retrieval context          | Bounded, deterministic untrusted Knowledge excerpts prepared for a future AI run.                |
+| Retrieval context          | Bounded, deterministic untrusted Knowledge excerpts prepared for one AI run.                     |
 | Retrieval citation         | Stable provenance for the exact displayed excerpt included in one retrieval context.             |
+| AI conversation            | One user-owned, workspace-scoped ordered history of immutable user and assistant messages.       |
+| AI run                     | One durable provider execution attempt for one immutable user message.                           |
+| AI retrieval snapshot      | The exact bounded untrusted Knowledge context and permitted citations used by one run.           |
 | Membership                 | A scoped, revocable relationship between a user and an organization or workspace.                |
 | Role                       | A named, built-in bundle of permissions assigned through a membership.                           |
 | Permission                 | A stable capability key evaluated against either organization or workspace scope.                |
@@ -755,9 +758,9 @@ These rules must be enforced transactionally by any future persistence and autho
 72. Retrieved content is untrusted data. It is serialized as a versioned JSON payload behind explicit delimiters and cannot select or override identity, instructions, permissions, workspace, tools, providers, models, URLs, storage keys, secrets, or environment configuration.
 73. AI conversations are owned by one user in one workspace; ownership and workspace are immutable. Reads, messages, retry, archive, and restore require effective `ai.use`, and foreign conversation ids remain inaccessible.
 74. User and assistant messages, retrieval snapshots, and citation rows are append-only. A retry creates a new run for the same immutable user message and never duplicates that message.
-75. A run captures application-selected provider/model/version, timing, bounded usage, status, and safe failure category. Only `processing` may transition once to `succeeded` or `failed`; concurrent active runs for one user message are rejected.
+75. Accepting a user message, updating conversation recency/title, and creating its processing run commit atomically before external execution. A run captures application-selected provider/model/version, timing, bounded usage, status, and safe failure category. Only `processing` may transition once to `succeeded` or `failed`; concurrent active runs for one user message are rejected.
 76. Each successful run stores the exact retrieval context and all permitted citations transactionally with its assistant message and terminal state. Provider-referenced citation ids are intersected with that snapshot; fabricated ids are discarded.
-77. Conversation usage is bounded by server-owned message, context, output, timeout, and per-user/workspace request limits. Ordinary users cannot select provider configuration or another workspace.
+77. Conversation usage is bounded by server-owned message, prior-history, retrieval-context, output, timeout, and per-user/workspace request limits. A run receives at most the newest 12 complete prior messages and 8,000 prior-message characters in chronological order. Ordinary users cannot select provider configuration or another workspace.
 78. AI execution metadata is separate from tenancy `AuditEvent`; provider secrets, hidden prompts, raw vectors, authorization headers, and unnecessary full upstream payloads are never persisted.
 79. Every task belongs to exactly one workspace. Its `id`, `workspaceId`, and `createdByUserId` cannot be reassigned after creation, and creator attribution grants no authority.
 80. Listing or reading tasks requires effective `tasks.read`; creating, updating, assigning, unassigning, changing status or priority, and archiving requires effective `tasks.write`. All checks derive workspace scope from trusted server context and the persisted task, never a client-supplied workspace id.
@@ -828,7 +831,7 @@ Keyword mode does not depend on the embedding provider. Semantic mode requires a
 
 ## RAG context and citation lifecycle
 
-The RAG foundation produces an ephemeral retrieval snapshot in memory; conversation persistence is deliberately deferred. Search candidates are not sufficient by themselves: the retrieval transaction revalidates authorization and current active source generations, loads selected and neighboring chunks from exact immutable sets, then applies budgets and citations.
+The RAG boundary first produces a bounded retrieval result in memory. When an AI run succeeds, the exact context and every permitted citation are persisted as an immutable retrieval snapshot in the same transaction as the assistant message and successful terminal run state. Search candidates are not sufficient by themselves: the retrieval transaction revalidates authorization and current active source generations, loads selected and neighboring chunks from exact immutable sets, then applies budgets and citations.
 
 ```mermaid
 flowchart LR
@@ -879,7 +882,7 @@ The foundation persists an append-only audit event for organization and workspac
 | Knowledge chunking       | The MVP character-window strategy and token estimate are deterministic but not model-tokenizer-aware or linguistically optimized. Production needs strategy-version retention, scale limits for large histories, and an explicit retention/migration policy before downstream indexing.                                                              |
 | Knowledge embeddings     | The deterministic local model validates the pipeline but is not intended to provide production semantic quality. Production provider selection needs privacy, residency, cost, rate-limit, model-retirement, dimension-migration, and retention decisions before external calls or search.                                                           |
 | Knowledge retrieval      | Exact pgvector scans are appropriate only for the current MVP scale, and the deterministic local provider has limited semantic quality. Production needs relevance thresholds, index strategy, query-volume budgets, multilingual analysis, and provider/model migration evaluation.                                                                 |
-| RAG context              | Character budgets are deterministic but not model-tokenizer-aware, and ephemeral retrieval snapshots are not yet persisted. Conversation work must persist the exact permitted snapshot, validate model citation references against it, and define token-aware budgeting before real providers.                                                      |
+| RAG context              | Character budgets are deterministic but not model-tokenizer-aware. Successful runs persist the exact permitted snapshot and validate provider citation references against it, but production providers still need tokenizer-aware budgeting and model-specific context evaluation.                                                                   |
 | Background jobs          | PostgreSQL polling is intentionally simple and durable for the current scale. Production deployment must define worker concurrency, connection budgets, alert thresholds, rolling-shutdown grace periods, clock assumptions, and whether a broker is needed at substantially higher throughput.                                                      |
 
 ## Extension path

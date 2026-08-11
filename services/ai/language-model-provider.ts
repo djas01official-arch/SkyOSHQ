@@ -12,9 +12,15 @@ export type LanguageModelCitationInput = Readonly<{
   text: string;
 }>;
 
+export type LanguageModelHistoryMessage = Readonly<{
+  content: string;
+  role: 'assistant' | 'user';
+}>;
+
 export type LanguageModelRequest = Readonly<{
   context: string;
   citations: readonly LanguageModelCitationInput[];
+  history: readonly LanguageModelHistoryMessage[];
   userMessage: string;
 }>;
 
@@ -77,9 +83,11 @@ export class DeterministicFakeLanguageModelProvider implements LanguageModelProv
   readonly maxInputCharacters = 20_000;
   readonly maxOutputCharacters = 2_000;
   readonly timeoutMs = 3_000;
+  readonly #failureMessage: string | undefined;
 
-  constructor() {
+  constructor(options: Readonly<{ failureMessage?: string }> = {}) {
     validateDescriptor(this);
+    this.#failureMessage = options.failureMessage;
   }
 
   async generate(
@@ -89,10 +97,18 @@ export class DeterministicFakeLanguageModelProvider implements LanguageModelProv
     if (options?.signal?.aborted) {
       throw new LanguageModelProviderError('Generation was aborted.', 'provider_aborted', true);
     }
-    if (
-      request.userMessage.length < 1 ||
-      request.userMessage.length + request.context.length > this.maxInputCharacters
-    ) {
+    if (this.#failureMessage && request.userMessage === this.#failureMessage) {
+      throw new LanguageModelProviderError(
+        'Deterministic provider failure.',
+        'provider_unavailable',
+        true,
+      );
+    }
+    const inputCharacters =
+      request.userMessage.length +
+      request.context.length +
+      request.history.reduce((total, message) => total + message.content.length, 0);
+    if (request.userMessage.length < 1 || inputCharacters > this.maxInputCharacters) {
       throw new LanguageModelProviderError(
         'The generation input exceeds the configured provider limit.',
         'provider_input_limit',
@@ -107,10 +123,28 @@ export class DeterministicFakeLanguageModelProvider implements LanguageModelProv
       : 'No grounded Knowledge context is available for this question.';
     return {
       citationIds: selected.map((citation) => citation.citationId),
-      inputTokens: estimateTokens(request.userMessage + request.context),
+      inputTokens: estimateTokens(
+        `${request.history.map((message) => message.content).join('\n')}${request.userMessage}${request.context}`,
+      ),
       outputTokens: estimateTokens(text),
       text,
     };
+  }
+}
+
+class UnavailableLanguageModelProvider implements LanguageModelProvider {
+  readonly providerKey = 'unconfigured';
+  readonly modelKey = 'unavailable';
+  readonly modelVersion = '1.0.0';
+  readonly maxInputCharacters = 20_000;
+  readonly maxOutputCharacters = 2_000;
+  readonly timeoutMs = 1;
+
+  async generate(): Promise<never> {
+    throw new LanguageModelProviderError(
+      'No production language-model provider is configured.',
+      'provider_not_configured',
+    );
   }
 }
 
@@ -128,15 +162,23 @@ export class LanguageModelProviderRegistry {
 }
 
 export function createDefaultLanguageModelProviderRegistry(
-  configuredProvider = process.env.AI_PROVIDER,
+  options: Readonly<{
+    configuredProvider?: string;
+    deterministicFailureMessage?: string;
+    runtime?: string;
+  }> = {},
 ): LanguageModelProviderRegistry {
-  const local = new DeterministicFakeLanguageModelProvider();
-  const key = configuredProvider?.trim().toLowerCase() || local.providerKey;
-  if (key !== local.providerKey) {
-    throw new LanguageModelProviderError(
-      `AI provider "${key}" is not configured. Use "local" or install a validated provider adapter.`,
-      'provider_not_configured',
+  const configuredProvider = options.configuredProvider ?? process.env.AI_PROVIDER;
+  const runtime = options.runtime ?? process.env.NODE_ENV;
+  const key = configuredProvider?.trim().toLowerCase();
+
+  if ((key === undefined || key === 'local') && runtime !== 'production') {
+    return new LanguageModelProviderRegistry(
+      new DeterministicFakeLanguageModelProvider({
+        failureMessage: options.deterministicFailureMessage ?? process.env.AI_LOCAL_FAILURE_MESSAGE,
+      }),
     );
   }
-  return new LanguageModelProviderRegistry(local);
+
+  return new LanguageModelProviderRegistry(new UnavailableLanguageModelProvider());
 }

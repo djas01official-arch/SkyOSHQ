@@ -20,6 +20,7 @@ import {
   AiConversationAuthorizationError,
   AiConversationNotFoundError,
   AiConversationRateLimitError,
+  AiConversationValidationError,
   createAiConversation,
   getAiConversation,
   listAiConversations,
@@ -46,6 +47,7 @@ import {
   DeterministicFakeLanguageModelProvider,
   LanguageModelProviderError,
   LanguageModelProviderRegistry,
+  type LanguageModelRequest,
   type LanguageModelProvider,
 } from '../../services/ai/language-model-provider';
 import {
@@ -299,6 +301,113 @@ test('provider failure retains one user message and retry creates a new successf
   assert.equal(await prisma.aiMessage.count({ where: { role: AiMessageRole.USER } }), 1);
 });
 
+test('message and opaque conversation identifiers are validated before persistence', async () => {
+  const f = await fixture();
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+
+  for (const content of ['   ', 'x'.repeat(4_001)]) {
+    await assert.rejects(
+      submitAiMessage(prisma, dependencies(), f.ownerId, f.workspaceId, conversation.id, content),
+      AiConversationValidationError,
+    );
+  }
+  await assert.rejects(
+    getAiConversation(prisma, f.ownerId, f.workspaceId, 'not-a-conversation-id'),
+    AiConversationNotFoundError,
+  );
+  assert.equal(await prisma.aiMessage.count(), 0);
+  assert.equal(await prisma.aiRun.count(), 0);
+});
+
+test('accepted user message, conversation recency, and processing run commit atomically', async () => {
+  const f = await fixture();
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+  await prisma.$executeRawUnsafe(`
+    CREATE FUNCTION reject_ai_run_insert_for_test() RETURNS trigger AS $$
+    BEGIN
+      RAISE EXCEPTION 'forced AI run insert failure';
+    END;
+    $$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TRIGGER reject_ai_run_insert_for_test
+    BEFORE INSERT ON "ai_runs"
+    FOR EACH ROW EXECUTE FUNCTION reject_ai_run_insert_for_test();
+  `);
+
+  try {
+    await assert.rejects(
+      submitAiMessage(
+        prisma,
+        dependencies(),
+        f.ownerId,
+        f.workspaceId,
+        conversation.id,
+        'must roll back',
+      ),
+    );
+    assert.equal(await prisma.aiMessage.count(), 0);
+    assert.equal(await prisma.aiRun.count(), 0);
+    assert.deepEqual(
+      await prisma.aiConversation.findUniqueOrThrow({ where: { id: conversation.id } }),
+      conversation,
+    );
+  } finally {
+    await prisma.$executeRawUnsafe(
+      'DROP TRIGGER IF EXISTS reject_ai_run_insert_for_test ON "ai_runs";',
+    );
+    await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS reject_ai_run_insert_for_test();');
+  }
+});
+
+test('model requests receive only bounded chronological prior conversation messages', async () => {
+  const f = await fixture();
+  const observed: LanguageModelRequest[] = [];
+  const provider: LanguageModelProvider = {
+    ...fakeModel,
+    generate: async (request) => {
+      observed.push(request);
+      return { citationIds: [], text: 'a'.repeat(1_900) };
+    },
+  };
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+
+  for (let index = 0; index < 5; index += 1) {
+    await submitAiMessage(
+      prisma,
+      dependencies(provider),
+      f.ownerId,
+      f.workspaceId,
+      conversation.id,
+      `history ${index}`,
+    );
+  }
+  await submitAiMessage(
+    prisma,
+    dependencies(provider),
+    f.ownerId,
+    f.workspaceId,
+    conversation.id,
+    'final request',
+  );
+
+  const history = observed.at(-1)?.history ?? [];
+  assert.equal(history.length, 8);
+  assert.ok(history.reduce((total, message) => total + message.content.length, 0) <= 8_000);
+  assert.equal(
+    history.some((message) => message.content === 'history 0'),
+    false,
+  );
+  assert.equal(
+    history.some((message) => message.content === 'history 4'),
+    true,
+  );
+  assert.deepEqual(
+    history.map((message) => message.role),
+    ['user', 'assistant', 'user', 'assistant', 'user', 'assistant', 'user', 'assistant'],
+  );
+});
+
 test('conversation ownership, workspace scope, viewer policy, and archive lifecycle are enforced', async () => {
   const f = await fixture();
   const viewer = await add(f, WorkspaceRole.VIEWER);
@@ -313,6 +422,10 @@ test('conversation ownership, workspace scope, viewer policy, and archive lifecy
     AiConversationNotFoundError,
   );
   const other = await fixture();
+  await assert.rejects(
+    getAiConversation(prisma, f.ownerId, other.workspaceId, conversation.id),
+    AiConversationAuthorizationError,
+  );
   await assert.rejects(
     getAiConversation(prisma, other.ownerId, other.workspaceId, conversation.id),
     AiConversationNotFoundError,
@@ -336,6 +449,93 @@ test('conversation ownership, workspace scope, viewer policy, and archive lifecy
   );
   await setAiConversationArchived(prisma, f.ownerId, f.workspaceId, conversation.id, false);
   assert.equal((await listAiConversations(prisma, f.ownerId, f.workspaceId)).length, 1);
+});
+
+test('ineffective memberships, organization-only administration, and archives deny AI access', async () => {
+  const f = await fixture();
+  const memberId = await add(f, WorkspaceRole.MEMBER);
+  const conversation = await createAiConversation(prisma, memberId, f.workspaceId);
+  const organizationMembership = await prisma.organizationMembership.findUniqueOrThrow({
+    where: { organizationId_userId: { organizationId: f.organizationId, userId: memberId } },
+  });
+  const workspaceMembership = await prisma.workspaceMembership.findUniqueOrThrow({
+    where: { workspaceId_userId: { userId: memberId, workspaceId: f.workspaceId } },
+  });
+
+  await prisma.organizationMembership.update({
+    where: { id: organizationMembership.id },
+    data: { status: MembershipStatus.SUSPENDED },
+  });
+  await assert.rejects(
+    getAiConversation(prisma, memberId, f.workspaceId, conversation.id),
+    AiConversationAuthorizationError,
+  );
+  await prisma.organizationMembership.update({
+    where: { id: organizationMembership.id },
+    data: { activatedAt: new Date(), status: MembershipStatus.ACTIVE },
+  });
+
+  await prisma.workspaceMembership.update({
+    where: { id: workspaceMembership.id },
+    data: { status: MembershipStatus.SUSPENDED },
+  });
+  await assert.rejects(
+    getAiConversation(prisma, memberId, f.workspaceId, conversation.id),
+    AiConversationAuthorizationError,
+  );
+  await prisma.workspaceMembership.update({
+    where: { id: workspaceMembership.id },
+    data: { activatedAt: new Date(), status: MembershipStatus.ACTIVE },
+  });
+  await prisma.organizationMembership.update({
+    where: { id: organizationMembership.id },
+    data: { revokedAt: new Date(), status: MembershipStatus.REVOKED },
+  });
+  await assert.rejects(
+    getAiConversation(prisma, memberId, f.workspaceId, conversation.id),
+    AiConversationAuthorizationError,
+  );
+
+  const revokedWorkspaceMemberId = await add(f, WorkspaceRole.MEMBER);
+  const revokedConversation = await createAiConversation(
+    prisma,
+    revokedWorkspaceMemberId,
+    f.workspaceId,
+  );
+  await prisma.workspaceMembership.update({
+    where: {
+      workspaceId_userId: { userId: revokedWorkspaceMemberId, workspaceId: f.workspaceId },
+    },
+    data: { revokedAt: new Date(), status: MembershipStatus.REVOKED },
+  });
+  await assert.rejects(
+    getAiConversation(prisma, revokedWorkspaceMemberId, f.workspaceId, revokedConversation.id),
+    AiConversationAuthorizationError,
+  );
+
+  const organizationAdminId = await user();
+  await prisma.organizationMembership.create({
+    data: {
+      activatedAt: new Date(),
+      organizationId: f.organizationId,
+      role: OrganizationRole.ADMIN,
+      status: MembershipStatus.ACTIVE,
+      userId: organizationAdminId,
+    },
+  });
+  await assert.rejects(
+    createAiConversation(prisma, organizationAdminId, f.workspaceId),
+    AiConversationAuthorizationError,
+  );
+
+  await prisma.workspace.update({
+    where: { id: f.workspaceId },
+    data: { archivedAt: new Date(), status: WorkspaceStatus.ARCHIVED },
+  });
+  await assert.rejects(
+    getAiConversation(prisma, f.ownerId, f.workspaceId, conversation.id),
+    AiConversationAuthorizationError,
+  );
 });
 
 test('per-user workspace throttling rejects the next request without adding a message', async () => {

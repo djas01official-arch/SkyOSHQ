@@ -45,7 +45,7 @@ pnpm build        # Run build tasks in all workspaces that define one
 pnpm dev          # Run development tasks in all workspaces that define one
 pnpm db:generate  # Generate the ignored Prisma Client from the committed schema
 pnpm test:domain  # Test the application-owned role and permission policy
-pnpm test:e2e     # Test authentication, tenant lifecycle, Tasks, and Knowledge through real HTTP
+pnpm test:e2e     # Test authentication, tenancy, Knowledge, Tasks, and AI through real HTTP
 pnpm test:auth:e2e # Compatibility alias for the same black-box application suite
 ```
 
@@ -60,7 +60,7 @@ pnpm db:generate       # Generate the ignored Prisma Client used by later checks
 pnpm db:migrate:deploy # Replay all committed migrations into empty skyos_ci
 pnpm db:check          # Validate Prisma, live schema drift, and database indexes
 pnpm db:test           # Migrate and test only the isolated skyos_test database
-pnpm test:e2e          # Test auth, tenant lifecycle, Tasks, and Knowledge in a disposable E2E database
+pnpm test:e2e          # Test auth, tenancy, Knowledge, Tasks, and AI in a disposable E2E database
 pnpm test:domain
 pnpm check             # Hygiene, formatting, linting, and strict workspace type checks
 pnpm build
@@ -165,7 +165,7 @@ Authentication security and identity tests run as part of the existing isolated 
 pnpm db:test
 ```
 
-### Black-box authentication, tenant lifecycle, Tasks, and Knowledge MVP tests
+### Black-box authentication, tenancy, Knowledge, Tasks, and AI MVP tests
 
 The black-box harness starts the actual Next.js application on an available loopback port and uses Auth.js plus progressively enhanced server-action forms through real HTTP requests. It creates a randomly named PostgreSQL database, applies every committed migration, creates only random ephemeral identities and tenant fixtures, maintains real CSRF and session cookies, and drops the database after the web process stops. It validates protected-route redirects, valid and invalid credentials, session persistence, logout, suspended and deactivated users, redirect safety, development cookie attributes, expired or forged sessions, and the owner-authorized organization/workspace archive and restore flows.
 
@@ -174,6 +174,8 @@ Lifecycle coverage submits the same confirmation forms rendered by `/settings`, 
 Knowledge coverage follows one high-value owner flow through the real `/knowledge` create and edit forms, verifies immutable versions and audit persistence, processes the current Markdown revision through the existing synchronous durable-job boundary, and confirms workspace-scoped keyword search. The same scenario verifies that a workspace viewer can list and open the document but cannot enter the creation flow.
 
 Tasks coverage follows one owner flow through the real `/tasks` create, edit, and archive forms, verifies persisted workspace scope and transactional audit events, and confirms archived-list exclusion. It traverses a real cursor page boundary, including viewer access and invalid or unauthorized cursor handling. It also proves that a workspace viewer remains read-only, an organization administrator without workspace membership remains denied, and a forged client workspace id cannot redirect authority.
+
+AI coverage creates a conversation and submits the rendered App Router message form against the deterministic local provider. It verifies grounded retrieval and persisted citations, immutable user/assistant messages and run state, safe provider failure without a fabricated assistant response, viewer and organization-admin denial, and rejection of cross-workspace conversation and Knowledge context. The scenario uses no network access or external provider credential.
 
 The harness requires a loopback PostgreSQL 17 server with pgvector and a dedicated test role allowed to create and drop databases. It deliberately does not read `DATABASE_URL`, `DATABASE_TEST_URL`, development credentials, or an auth secret from `.env`; the auth secret and identities are generated for each run. Pass the administrative test connection explicitly:
 
@@ -410,16 +412,18 @@ Authorized non-viewer workspace users can inspect selected chunks, citations, sc
 
 ## AI conversation foundation
 
-The `/ai` workspace now provides owner-scoped conversations backed by the grounded retrieval boundary. The default `AI_PROVIDER=local` adapter is deterministic and network-free; builds, seeds, and tests require no external credentials or paid requests.
+The `/ai` workspace provides owner-scoped conversations backed by the grounded retrieval boundary. `AI_PROVIDER=local` selects a deterministic, network-free adapter only in development and tests; CI requires no external credentials or paid requests. Production resolves to a safe unavailable provider until a reviewed real adapter is installed, so an accepted message produces a durable failed run rather than an invented answer or a leaked configuration error.
 
 - User and assistant messages, AI runs, exact retrieval snapshots, and citation rows are append-only. Database constraints and triggers enforce workspace/source consistency, legal run transitions, excerpt checksums, and snapshot citation counts.
+- Message acceptance updates conversation recency/title and creates the processing run in one database transaction. The external provider call occurs afterward and cannot be database-atomic; success commits the assistant message, exact retrieval snapshot, citations, and terminal run state together, while failure records only a safe failed-run state.
 - Each run records provider/model/version, status, duration, optional token estimates, safe failure category, and the allowlisted citation ids actually referenced by the response. Provider-supplied fabricated citation ids are ignored.
 - A failed generation retains its user message. Retry creates a new run for that same immutable message and cannot create two concurrent runs for it.
 - Conversations are visible only to their owner in the effective workspace, require `ai.use`, and support archive/restore. Viewers are denied. Message length, provider input/output/time, and ten requests per user/workspace minute are bounded.
+- Each model request includes at most the newest 12 complete prior messages and at most 8,000 prior-message characters, ordered chronologically. The current user message remains separate, and retrieved Knowledge remains bounded untrusted reference context.
 - When retrieval returns nothing, the provider stores an explicit no-grounded-context response with no citations. Retrieved content remains untrusted JSON data and cannot change the provider boundary.
 - The UI includes conversation list/open/new, composer, pending/failure/retry states, archive/restore, assistant messages, and links for validated citations. Streaming is intentionally deferred.
 
-No external language-model adapter is installed. `AI_PROVIDER` cannot be selected by browser input, and provider credentials, hidden prompts, raw vectors, and full upstream payloads are not stored.
+No external language-model adapter is installed. `AI_PROVIDER` cannot be selected by browser input, the deterministic provider is rejected in production runtime, and provider credentials, hidden prompts, raw vectors, and full upstream payloads are not stored.
 
 ## Repository structure
 

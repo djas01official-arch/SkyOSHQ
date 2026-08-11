@@ -15,6 +15,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { encode } from 'next-auth/jwt';
 
 import { PrismaClient, UserStatus, type User } from '../../../database/generated/client/client';
+import { AI_E2E_FAILURE_MESSAGE, runAiMvpE2eScenario } from './ai-mvp.e2e';
 import { runKnowledgeMvpE2eScenario } from './knowledge-mvp.e2e';
 import { runTasksMvpE2eScenario } from './tasks-mvp.e2e';
 import { runTenantLifecycleE2eScenarios, type LifecycleCookieJar } from './tenant-lifecycle.e2e';
@@ -487,7 +488,7 @@ async function getRenderedLoginRedirect(baseUrl: string, callbackUrl: string): P
 }
 
 test(
-  'SkyOS authentication, tenant lifecycle, Knowledge, and Tasks MVPs work through real HTTP requests and disposable PostgreSQL',
+  'SkyOS authentication, tenancy, Knowledge, Tasks, and AI MVPs work through real HTTP and disposable PostgreSQL',
   { timeout: 240_000 },
   async (context) => {
     const adminUrl = getAdminDatabaseUrl();
@@ -513,6 +514,7 @@ test(
       const port = await getAvailablePort();
       const baseUrl = `http://127.0.0.1:${port}`;
       const started = startWebApplication({
+        AI_LOCAL_FAILURE_MESSAGE: AI_E2E_FAILURE_MESSAGE,
         AI_PROVIDER: 'local',
         AUTH_SECRET: authSecret,
         AUTH_TRUST_HOST: 'true',
@@ -738,6 +740,20 @@ test(
         login: async (jar, identity) => {
           assert.ok(jar instanceof CookieJar);
           return (await loginWithCredentials(jar, baseUrl, identity, '/tasks')).response;
+        },
+        prisma,
+      });
+
+      await runAiMvpE2eScenario(context, {
+        assertRedirectsTo: (response: Response, pathname: string) =>
+          assertRedirectsTo(response, baseUrl, pathname),
+        baseUrl,
+        createIdentity: (label: string) => createIdentity(prisma!, label, password, passwordHash),
+        createJar: () => new CookieJar(baseUrl),
+        getRedirectUrl: (response: Response) => getTrustedRedirectUrl(response, baseUrl),
+        login: async (jar, identity) => {
+          assert.ok(jar instanceof CookieJar);
+          return (await loginWithCredentials(jar, baseUrl, identity, '/ai')).response;
         },
         prisma,
       });

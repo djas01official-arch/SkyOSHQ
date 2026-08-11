@@ -21,7 +21,10 @@ import {
 } from '../../services/ai/language-model-provider';
 
 const MAX_MESSAGE_CHARACTERS = 4_000;
+const MAX_HISTORY_CHARACTERS = 8_000;
+const MAX_HISTORY_MESSAGES = 12;
 const MAX_REQUESTS_PER_MINUTE = 10;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export type AiConversationDependencies = Readonly<{
   providers: LanguageModelProviderRegistry;
@@ -77,6 +80,12 @@ async function findOwnedConversation(
   includeArchived = false,
 ) {
   await requireAiAccess(prisma, actorUserId, workspaceId);
+  if (!UUID_PATTERN.test(conversationId)) {
+    throw new AiConversationNotFoundError(
+      'The AI conversation was not found in this workspace.',
+      'conversation_not_found',
+    );
+  }
   const conversation = await prisma.aiConversation.findFirst({
     where: {
       id: conversationId,
@@ -92,6 +101,44 @@ async function findOwnedConversation(
     );
   }
   return conversation;
+}
+
+async function loadBoundedHistory(
+  prisma: PrismaClient,
+  workspaceId: string,
+  conversationId: string,
+  userMessageId: string,
+) {
+  const currentMessage = await prisma.aiMessage.findFirstOrThrow({
+    where: { conversationId, id: userMessageId, workspaceId },
+    select: { createdAt: true, id: true },
+  });
+  const candidates = await prisma.aiMessage.findMany({
+    where: {
+      conversationId,
+      OR: [
+        { createdAt: { lt: currentMessage.createdAt } },
+        { createdAt: currentMessage.createdAt, id: { lt: currentMessage.id } },
+      ],
+      workspaceId,
+    },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { content: true, role: true },
+    take: MAX_HISTORY_MESSAGES,
+  });
+  const selected: typeof candidates = [];
+  let characterCount = 0;
+
+  for (const message of candidates) {
+    if (characterCount + message.content.length > MAX_HISTORY_CHARACTERS) break;
+    selected.push(message);
+    characterCount += message.content.length;
+  }
+
+  return selected.reverse().map((message) => ({
+    content: message.content,
+    role: message.role === AiMessageRole.USER ? ('user' as const) : ('assistant' as const),
+  }));
 }
 
 export async function createAiConversation(
@@ -212,6 +259,16 @@ async function executeRun(
 ) {
   const startedAt = Date.now();
   try {
+    const run = await prisma.aiRun.findUniqueOrThrow({
+      where: { id: runId },
+      select: { conversationId: true, userMessageId: true },
+    });
+    const history = await loadBoundedHistory(
+      prisma,
+      workspaceId,
+      run.conversationId,
+      run.userMessageId,
+    );
     const retrieval = await retrieveKnowledgeContext(
       prisma,
       dependencies.retrieval,
@@ -226,9 +283,10 @@ async function executeRun(
         text: item.text,
       })),
       context: retrieval.context,
+      history,
       userMessage,
     });
-    if (response.text.length < 1 || response.text.length > provider.maxOutputCharacters) {
+    if (response.text.trim().length < 1 || response.text.length > provider.maxOutputCharacters) {
       throw new LanguageModelProviderError(
         'Provider output is invalid.',
         'provider_output_invalid',
@@ -328,7 +386,6 @@ async function createRunForMessage(
   userMessageId: string,
   content: string,
 ) {
-  await enforceRateLimit(prisma, actorUserId, workspaceId);
   const provider = dependencies.providers.getCurrent();
   const run = await prisma.aiRun.create({
     data: {
@@ -360,30 +417,38 @@ export async function submitAiMessage(
     conversationId,
   );
   await enforceRateLimit(prisma, actorUserId, workspaceId);
-  const message = await prisma.aiMessage.create({
-    data: {
-      authorUserId: actorUserId,
-      content,
-      conversationId,
-      role: AiMessageRole.USER,
-      workspaceId,
-    },
-  });
-  if (conversation.title === 'New conversation') {
-    await prisma.aiConversation.update({
-      where: { id: conversation.id },
-      data: { title: titleFrom(content) },
+  const provider = dependencies.providers.getCurrent();
+  const acceptedAt = new Date();
+  const run = await prisma.$transaction(async (transaction) => {
+    const message = await transaction.aiMessage.create({
+      data: {
+        authorUserId: actorUserId,
+        content,
+        conversationId,
+        role: AiMessageRole.USER,
+        workspaceId,
+      },
     });
-  }
-  return createRunForMessage(
-    prisma,
-    dependencies,
-    actorUserId,
-    workspaceId,
-    conversationId,
-    message.id,
-    content,
-  );
+    await transaction.aiConversation.update({
+      where: { id: conversation.id },
+      data: {
+        title: conversation.title === 'New conversation' ? titleFrom(content) : conversation.title,
+        updatedAt: acceptedAt,
+      },
+    });
+    return transaction.aiRun.create({
+      data: {
+        conversationId,
+        modelKey: provider.modelKey,
+        modelVersion: provider.modelVersion,
+        providerKey: provider.providerKey,
+        requestedByUserId: actorUserId,
+        userMessageId: message.id,
+        workspaceId,
+      },
+    });
+  });
+  return executeRun(prisma, dependencies, actorUserId, workspaceId, run.id, content);
 }
 
 export async function retryAiRun(
@@ -393,6 +458,10 @@ export async function retryAiRun(
   workspaceId: string,
   failedRunId: string,
 ) {
+  await requireAiAccess(prisma, actorUserId, workspaceId);
+  if (!UUID_PATTERN.test(failedRunId)) {
+    throw new AiConversationNotFoundError('The failed AI run was not found.', 'run_not_found');
+  }
   const failed = await prisma.aiRun.findFirst({
     where: {
       id: failedRunId,
@@ -406,6 +475,7 @@ export async function retryAiRun(
     throw new AiConversationNotFoundError('The failed AI run was not found.', 'run_not_found');
   }
   await findOwnedConversation(prisma, actorUserId, workspaceId, failed.conversationId);
+  await enforceRateLimit(prisma, actorUserId, workspaceId);
   return createRunForMessage(
     prisma,
     dependencies,

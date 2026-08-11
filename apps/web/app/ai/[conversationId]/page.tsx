@@ -6,14 +6,10 @@ import {
   getAiConversation,
 } from '../../../../../database/ai/ai-conversations';
 
-import {
-  retryRunAction,
-  setConversationArchivedAction,
-  submitMessageAction,
-} from '@/app/ai/actions';
+import { retryRunAction, setConversationArchivedAction } from '@/app/ai/actions';
+import { AiMessageComposer } from '@/components/ai/ai-message-composer';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { Textarea } from '@/components/ui/textarea';
 import { requireCurrentUser } from '@/lib/auth/current-user';
 import { requireWorkspaceCapability } from '@/lib/organization-context';
 import { prisma } from '@/lib/prisma';
@@ -112,22 +108,7 @@ export default async function ConversationPage({ params }: ConversationPageProps
           ))}
         </div>
       ) : null}
-      <form action={submitMessageAction} className="mt-6">
-        <input name="conversationId" type="hidden" value={conversation.id} />
-        <label className="sr-only" htmlFor="ai-message">
-          Message
-        </label>
-        <Textarea
-          id="ai-message"
-          maxLength={4000}
-          name="message"
-          placeholder="Ask about workspace Knowledge"
-          required
-        />
-        <Button className="mt-2" type="submit" variant="primary">
-          Send
-        </Button>
-      </form>
+      <AiMessageComposer conversationId={conversation.id} />
     </div>
   );
 }
