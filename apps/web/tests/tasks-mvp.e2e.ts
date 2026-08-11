@@ -43,7 +43,7 @@ async function createWorkspaceFixture(
   prisma: PrismaClient,
   ownerUserId: string,
 ): Promise<{ forgedWorkspaceId: string; organizationId: string; workspaceId: string }> {
-  const suffix = randomUUID();
+  const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
   const organization = await prisma.organization.create({
     data: {
       createdByUserId: ownerUserId,
@@ -66,14 +66,14 @@ async function createWorkspaceFixture(
     ownerUserId,
     organization.id,
     `Tasks Workspace ${suffix}`,
-    `tasks-workspace-${suffix}`,
+    `tasks-a-${suffix}`,
   );
   const forgedWorkspace = await createWorkspaceForOrganization(
     prisma,
     ownerUserId,
     organization.id,
     `Unselected Tasks Workspace ${suffix}`,
-    `unselected-tasks-workspace-${suffix}`,
+    `tasks-b-${suffix}`,
   );
 
   return {
