@@ -9,6 +9,31 @@ export type ServerActionCookieJar = {
   request(path: string, init?: RequestInit): Promise<HttpResult>;
 };
 
+export async function assertStreamedRedirectTo(
+  response: Response,
+  requestPath: string,
+  targetPath: string,
+  forbiddenHtml?: string,
+): Promise<void> {
+  assert.equal(response.status, 200, 'A streamed App Router redirect must return its HTML shell.');
+  const responseUrl = new URL(response.url);
+  assert.equal(responseUrl.pathname, requestPath);
+  assert.equal(responseUrl.search, '');
+
+  const html = await response.text();
+  const redirectMeta = html.match(/<meta(?=[^>]*\bid="__next-page-redirect")[^>]*>/u)?.[0];
+  assert.ok(redirectMeta, 'Denied page render must include the Next.js redirect instruction.');
+  assert.match(redirectMeta, /\bhttp-equiv="refresh"/u);
+  assert.equal(redirectMeta.match(/\bcontent="([^"]*)"/u)?.[1], `1;url=${targetPath}`);
+  if (forbiddenHtml) {
+    assert.equal(
+      html.includes(forbiddenHtml),
+      false,
+      'Denied page render must not expose protected form content.',
+    );
+  }
+}
+
 type ServerActionFormSelector = Readonly<{
   markerName: string;
   markerValue: string;

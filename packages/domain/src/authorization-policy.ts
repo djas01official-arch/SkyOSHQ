@@ -161,15 +161,11 @@ export const workspacePermissions = Object.freeze({
     'knowledge.write',
     'Create or modify Knowledge resources in the workspace.',
   ),
-  'tasks.read': definePermission(
-    'workspace',
-    'tasks.read',
-    'Read task resources in the workspace.',
-  ),
+  'tasks.read': definePermission('workspace', 'tasks.read', 'Read active Tasks in the workspace.'),
   'tasks.write': definePermission(
     'workspace',
     'tasks.write',
-    'Create or modify task resources in the workspace.',
+    'Create, update, assign, and archive Tasks in the workspace.',
   ),
   'ai.use': definePermission('workspace', 'ai.use', 'Use workspace-scoped AI capabilities.'),
 } satisfies Record<

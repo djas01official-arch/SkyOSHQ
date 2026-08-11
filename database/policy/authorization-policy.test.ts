@@ -30,6 +30,9 @@ test('Prisma workspace roles map to the application-owned policy catalog', () =>
   assert.equal(workspaceRoleGrantsPermission(WorkspaceRole.OWNER, 'workspace.archive'), true);
   assert.equal(workspaceRoleGrantsPermission(WorkspaceRole.ADMIN, 'workspace.archive'), false);
   assert.equal(workspaceRoleGrantsPermission(WorkspaceRole.MEMBER, 'knowledge.write'), true);
+  assert.equal(workspaceRoleGrantsPermission(WorkspaceRole.MEMBER, 'tasks.write'), true);
   assert.equal(workspaceRoleGrantsPermission(WorkspaceRole.VIEWER, 'knowledge.write'), false);
   assert.equal(workspaceRoleGrantsPermission(WorkspaceRole.VIEWER, 'knowledge.read'), true);
+  assert.equal(workspaceRoleGrantsPermission(WorkspaceRole.VIEWER, 'tasks.read'), true);
+  assert.equal(workspaceRoleGrantsPermission(WorkspaceRole.VIEWER, 'tasks.write'), false);
 });

@@ -123,6 +123,18 @@ enum AiRunStatus {
   FAILED
 }
 
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
 model User {
   id                        String                     @id @default(uuid()) @db.Uuid
   name                      String?
@@ -150,6 +162,8 @@ model User {
   aiConversations          AiConversation[]           @relation("AiConversationOwner")
   aiMessages               AiMessage[]                @relation("AiMessageAuthor")
   aiRuns                   AiRun[]                    @relation("AiRunRequester")
+  createdTasks             Task[]                     @relation("TaskCreator")
+  assignedTasks            Task[]                     @relation("TaskAssignee")
   organizationMemberships   OrganizationMembership[]
   sessions                  Session[]
   workspaceMemberships      WorkspaceMembership[]
@@ -287,6 +301,7 @@ model Workspace {
   aiMessages             AiMessage[]
   aiRuns                 AiRun[]
   aiRetrievalSnapshots   AiRetrievalSnapshot[]
+  tasks                  Task[]
 
   @@index([organizationId, status])
   @@index([deletedAt])
@@ -632,6 +647,30 @@ model WorkspaceMembership {
   @@index([workspaceId, status, role])
   @@index([userId, status])
   @@map("workspace_memberships")
+}
+
+model Task {
+  id              String       @id @default(uuid()) @db.Uuid
+  workspaceId     String       @db.Uuid
+  title           String
+  description     String?      @db.Text
+  status          TaskStatus   @default(TODO)
+  priority        TaskPriority @default(MEDIUM)
+  assigneeUserId  String?      @db.Uuid
+  dueAt           DateTime?    @db.Date
+  createdByUserId String       @db.Uuid
+  createdAt       DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime     @updatedAt @db.Timestamptz(6)
+  archivedAt      DateTime?    @db.Timestamptz(6)
+  workspace       Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdBy       User         @relation("TaskCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  assignee        User?        @relation("TaskAssignee", fields: [assigneeUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([workspaceId, status, dueAt, updatedAt(sort: Desc), id], map: "tasks_active_workspace_list_idx", where: raw("(\"archivedAt\" IS NULL)"))
+  @@index([workspaceId])
+  @@index([createdByUserId, createdAt])
+  @@index([assigneeUserId, updatedAt])
+  @@map("tasks")
 }
 
 model AiConversation {

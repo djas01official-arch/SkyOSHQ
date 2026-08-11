@@ -18,6 +18,7 @@ Access is explicit, deny-by-default, and evaluated at the smallest applicable sc
 | User                       | A SkyOS actor with a stable internal identifier. Identity verification is outside this model.    |
 | Organization               | The top-level tenant that owns workspaces, membership administration, and organization settings. |
 | Workspace                  | An organization-owned work boundary for future product data and collaboration.                   |
+| Task                       | A workspace-scoped unit of work with lifecycle, priority, optional assignee, and due date.       |
 | Knowledge document         | A workspace-scoped Markdown record of durable operational knowledge.                             |
 | Knowledge document version | An immutable snapshot of a document revision used for history and restoration.                   |
 | Knowledge attachment       | Workspace-scoped metadata and a protected binary object attached to one knowledge document.      |
@@ -50,7 +51,7 @@ Every persisted record has an immutable opaque `id`, `createdAt`, and `updatedAt
 | `displayName`     | Optional presentation value; not an authorization input.                                          |
 | `identitySubject` | Optional future reference to an external identity subject. No provider is selected by this model. |
 
-**Relationships:** a user may have many organization memberships and many workspace memberships.
+**Relationships:** a user may have many organization memberships and workspace memberships, may create many tasks, and may be assigned many tasks.
 
 **Lifecycle:** a user is provisioned as `active`; it may be `suspended` temporarily or `deactivated` permanently. Deactivation removes effective access without requiring membership deletion. The record remains for attribution.
 
@@ -102,9 +103,32 @@ Every persisted record has an immutable opaque `id`, `createdAt`, and `updatedAt
 | `archivedAt`      | Set only when archived.                                 |
 | `createdByUserId` | Attribution only.                                       |
 
-**Relationships:** belongs to one organization and has many workspace memberships and knowledge documents.
+**Relationships:** belongs to one organization and has many workspace memberships, tasks, and knowledge documents.
 
 **Lifecycle:** an active organization creates an active workspace. The creating user receives an active workspace `owner` membership in the same operation. An active workspace may be archived and restored by an authorized organization administrator or workspace owner. Archiving blocks product activity and membership changes except restoration.
+
+### Task
+
+**Responsibility:** represent one actionable unit of work within exactly one workspace.
+
+| Attribute         | Notes                                                                                                                      |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `id`              | Immutable task identifier.                                                                                                 |
+| `workspaceId`     | Immutable parent workspace identifier and sole tenancy boundary.                                                           |
+| `title`           | Required trimmed title, from 1 through 200 characters.                                                                     |
+| `description`     | Optional plain text, limited to 10,000 characters.                                                                         |
+| `status`          | `todo`, `in_progress`, or `done`; defaults to `todo`.                                                                      |
+| `priority`        | `low`, `medium`, or `high`; defaults to `medium`.                                                                          |
+| `assigneeUserId`  | Optional user. A new assignment requires an effective membership in this exact workspace.                                  |
+| `dueAt`           | Optional calendar date without time-of-day semantics, persisted as PostgreSQL `date` and rendered from UTC calendar parts. |
+| `createdByUserId` | Immutable creator attribution; it does not grant continuing access or ownership.                                           |
+| `archivedAt`      | Set when the task leaves the active list.                                                                                  |
+
+**Relationships:** belongs to exactly one workspace and one creator user, and optionally references one assignee user. Organization scope is derived only through the task's workspace.
+
+**Lifecycle:** creation produces an active `todo` task unless another valid status is submitted. Effective workspace members with `tasks.write` may create, edit, assign, unassign, change status or priority, and archive active tasks. Active lists contain at most 100 rows ordered by `status ASC`, `dueAt ASC NULLS LAST`, `updatedAt DESC`, and `id ASC`. Archiving is one-way in MVP v1: archived tasks are excluded from normal lists and detail reads, and no restore or hard-delete operation is exposed.
+
+An assignee is a coordination reference, not an authorization principal. Assignment and reassignment accept only an active user with active organization and workspace memberships for the task's current workspace. If that relationship later becomes ineffective, the historical assignee id remains for attribution and is displayed as unavailable; the user cannot be selected again until access is effective, while an authorized writer may unassign the task.
 
 ### KnowledgeDocument
 
@@ -560,18 +584,18 @@ Permissions are scoped deliberately. An organization permission may administer o
 
 ### Workspace-level permissions
 
-| Permission                 | Meaning                                                                      |
-| -------------------------- | ---------------------------------------------------------------------------- |
-| `workspace.read`           | Read workspace metadata.                                                     |
-| `workspace.update`         | Update workspace metadata and settings.                                      |
-| `workspace.archive`        | Archive or restore the workspace.                                            |
-| `workspace.members.read`   | Read workspace memberships.                                                  |
-| `workspace.members.manage` | Create, suspend, resume, revoke, and assign non-owner workspace memberships. |
-| `knowledge.read`           | Read future knowledge resources within the workspace.                        |
-| `knowledge.write`          | Create or modify future knowledge resources within the workspace.            |
-| `tasks.read`               | Read future task resources within the workspace.                             |
-| `tasks.write`              | Create or modify future task resources within the workspace.                 |
-| `ai.use`                   | Use AI retrieval and future conversation features within the workspace.      |
+| Permission                 | Meaning                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------- |
+| `workspace.read`           | Read workspace metadata.                                                      |
+| `workspace.update`         | Update workspace metadata and settings.                                       |
+| `workspace.archive`        | Archive or restore the workspace.                                             |
+| `workspace.members.read`   | Read workspace memberships.                                                   |
+| `workspace.members.manage` | Create, suspend, resume, revoke, and assign non-owner workspace memberships.  |
+| `knowledge.read`           | Read knowledge resources within the workspace.                                |
+| `knowledge.write`          | Create or modify knowledge resources within the workspace.                    |
+| `tasks.read`               | List and read active tasks within the workspace.                              |
+| `tasks.write`              | Create, update, assign, unassign, change, and archive tasks in the workspace. |
+| `ai.use`                   | Use AI retrieval and future conversation features within the workspace.       |
 
 The `knowledge`, `tasks`, and `ai` keys are stable authorization boundaries for their stated MVP domains. A permission key grants only implemented operations that explicitly enforce it; it does not imply access to future resources.
 
@@ -732,6 +756,13 @@ These rules must be enforced transactionally by any future persistence and autho
 76. Each successful run stores the exact retrieval context and all permitted citations transactionally with its assistant message and terminal state. Provider-referenced citation ids are intersected with that snapshot; fabricated ids are discarded.
 77. Conversation usage is bounded by server-owned message, context, output, timeout, and per-user/workspace request limits. Ordinary users cannot select provider configuration or another workspace.
 78. AI execution metadata is separate from tenancy `AuditEvent`; provider secrets, hidden prompts, raw vectors, authorization headers, and unnecessary full upstream payloads are never persisted.
+79. Every task belongs to exactly one workspace. Its `id`, `workspaceId`, and `createdByUserId` cannot be reassigned after creation, and creator attribution grants no authority.
+80. Listing or reading tasks requires effective `tasks.read`; creating, updating, assigning, unassigning, changing status or priority, and archiving requires effective `tasks.write`. All checks derive workspace scope from trusted server context and the persisted task, never a client-supplied workspace id.
+81. A non-null assignee must have active user, organization-membership, and workspace-membership state in the task's exact workspace at assignment time. Later loss of access does not erase historical attribution, does not grant access, and prevents reselection until membership becomes effective.
+82. Archived tasks are excluded from normal lists and detail reads. Task restore, hard delete, recurring work, comments, dependencies, subtasks, attachments, notifications, labels, custom fields, automations, reminders, and calendar integrations are outside Tasks MVP v1.
+83. Normal task lists return at most 100 active rows in deterministic `status ASC`, `dueAt ASC NULLS LAST`, `updatedAt DESC`, `id ASC` order.
+84. A task due date is a calendar date, not a timestamp. Persistence and presentation must preserve the selected date without local-time-zone drift.
+85. Task creation, update, and archive append immutable success audit events in the same transaction as the mutation. Validation and authorization denial append no success event; an audit insertion failure rolls back the protected write.
 
 ## Durable background-job lifecycle
 
@@ -809,7 +840,7 @@ Citation ids are not model-generated. They derive from trusted provenance and th
 
 ## Production-readiness audit requirement
 
-The foundation persists an append-only audit event for organization and workspace creation, organization and workspace archive or restoration, organization and workspace role changes, membership suspension, resumption, or revocation, ownership transfer, knowledge document creation and lifecycle changes, attachment upload, archive, or restoration, document-processing request, start, success, or failure, chunking request, start, success, or failure, and embedding request, start, success, or failure. Each event records the acting user, organization scope, optional workspace scope, action, target, timestamp, and structured non-secret metadata. The privileged service writes the event in the same transaction as the metadata state transition, so either both writes commit or both roll back. New privileged operations must join this audited service boundary before release.
+The foundation persists an append-only audit event for organization and workspace creation, organization and workspace archive or restoration, organization and workspace role changes, membership suspension, resumption, or revocation, ownership transfer, task creation, update, or archive, knowledge document creation and lifecycle changes, attachment upload, archive, or restoration, document-processing request, start, success, or failure, chunking request, start, success, or failure, and embedding request, start, success, or failure. Each event records the acting user, organization scope, optional workspace scope, action, target, timestamp, and structured non-secret metadata. The privileged service writes the event in the same transaction as the metadata state transition, so either both writes commit or both roll back. New privileged operations must join this audited service boundary before release.
 
 ## Assumptions
 
@@ -832,6 +863,8 @@ The foundation persists an append-only audit event for organization and workspac
 | Cross-workspace features | Future global search, analytics, and AI may need an explicit aggregate permission model; they must not bypass workspace checks.                                                                                                                                                                 |
 | Resource-level sharing   | Document-level, task-level, guest, external collaborator, and link-sharing access are intentionally excluded and should be modeled separately.                                                                                                                                                  |
 | Role evolution           | Define migration/versioning rules before granting new permissions to existing roles, particularly for sensitive future domains.                                                                                                                                                                 |
+| Task concurrency         | Tasks MVP v1 uses last-write-wins updates and has no optimistic version field. If concurrent editing becomes common, add an explicit version contract before expanding task workflows.                                                                                                          |
+| Task lifecycle           | Archive is intentionally one-way in MVP v1. Restore, retention, pagination beyond the bounded 100-row active list, and historical-assignee privacy need explicit product decisions before broader rollout.                                                                                      |
 | Knowledge lifecycle      | Define formal retention, export, legal-hold, and immutable-history growth policies before expanding document capabilities. Future Markdown extensions must preserve the current sanitization boundary.                                                                                          |
 | Knowledge pagination     | Forward keyset pages are stable for unchanged rows but do not preserve a cross-request snapshot. High-churn list UX may eventually need refresh indicators or an explicitly retained snapshot contract; cursors must remain versioned if ordering changes.                                      |
 | Binary storage           | Local disk is development-only. Production requires durable S3-compatible storage, encryption and access policy, coordinated database/object backups, orphan reconciliation, and lifecycle retention.                                                                                           |

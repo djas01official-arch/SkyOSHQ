@@ -29,6 +29,9 @@ export const AuditAction = {
   KNOWLEDGE_EMBEDDING_STARTED: 'knowledge_embedding.started',
   KNOWLEDGE_EMBEDDING_SUCCEEDED: 'knowledge_embedding.succeeded',
   KNOWLEDGE_EMBEDDING_FAILED: 'knowledge_embedding.failed',
+  TASK_CREATED: 'task.created',
+  TASK_UPDATED: 'task.updated',
+  TASK_ARCHIVED: 'task.archived',
   WORKSPACE_CREATED: 'workspace.created',
   WORKSPACE_ARCHIVED: 'workspace.archived',
   WORKSPACE_RESTORED: 'workspace.restored',
@@ -48,6 +51,7 @@ export const AuditTargetType = {
   KNOWLEDGE_ATTACHMENT: 'knowledge_attachment',
   KNOWLEDGE_CHUNKING_JOB: 'knowledge_chunking_job',
   KNOWLEDGE_EMBEDDING_JOB: 'knowledge_embedding_job',
+  TASK: 'task',
 } as const;
 
 type AuditEventWriter = Pick<PrismaClient, 'auditEvent'>;

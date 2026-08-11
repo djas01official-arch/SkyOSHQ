@@ -1,6 +1,6 @@
 # SkyOS
 
-SkyOS is an AI-native enterprise operating platform. The repository contains the evolving MVP foundation for its web, tenancy, Knowledge, storage, and document-processing domains.
+SkyOS is an AI-native enterprise operating platform. The repository contains the evolving MVP foundation for its web, tenancy, Tasks, Knowledge, storage, and document-processing domains.
 
 ## Tooling
 
@@ -45,7 +45,7 @@ pnpm build        # Run build tasks in all workspaces that define one
 pnpm dev          # Run development tasks in all workspaces that define one
 pnpm db:generate  # Generate the ignored Prisma Client from the committed schema
 pnpm test:domain  # Test the application-owned role and permission policy
-pnpm test:e2e     # Test authentication, tenant lifecycle, and Knowledge MVP through real HTTP
+pnpm test:e2e     # Test authentication, tenant lifecycle, Tasks, and Knowledge through real HTTP
 pnpm test:auth:e2e # Compatibility alias for the same black-box application suite
 ```
 
@@ -60,7 +60,7 @@ pnpm db:generate       # Generate the ignored Prisma Client used by later checks
 pnpm db:migrate:deploy # Replay all committed migrations into empty skyos_ci
 pnpm db:check          # Validate Prisma, live schema drift, and database indexes
 pnpm db:test           # Migrate and test only the isolated skyos_test database
-pnpm test:e2e          # Test auth, tenant lifecycle, and Knowledge in a disposable E2E database
+pnpm test:e2e          # Test auth, tenant lifecycle, Tasks, and Knowledge in a disposable E2E database
 pnpm test:domain
 pnpm check             # Hygiene, formatting, linting, and strict workspace type checks
 pnpm build
@@ -165,13 +165,15 @@ Authentication security and identity tests run as part of the existing isolated 
 pnpm db:test
 ```
 
-### Black-box authentication, tenant lifecycle, and Knowledge MVP tests
+### Black-box authentication, tenant lifecycle, Tasks, and Knowledge MVP tests
 
 The black-box harness starts the actual Next.js application on an available loopback port and uses Auth.js plus progressively enhanced server-action forms through real HTTP requests. It creates a randomly named PostgreSQL database, applies every committed migration, creates only random ephemeral identities and tenant fixtures, maintains real CSRF and session cookies, and drops the database after the web process stops. It validates protected-route redirects, valid and invalid credentials, session persistence, logout, suspended and deactivated users, redirect safety, development cookie attributes, expired or forged sessions, and the owner-authorized organization/workspace archive and restore flows.
 
 Lifecycle coverage submits the same confirmation forms rendered by `/settings`, then verifies persisted state, immutable audit events, preserved memberships, role denials, organization-admin container management, cross-tenant tampering rejection, and signed-session fallback. Direct database access is limited to isolated fixture setup and post-action assertions; lifecycle mutations themselves always cross the real application boundary.
 
 Knowledge coverage follows one high-value owner flow through the real `/knowledge` create and edit forms, verifies immutable versions and audit persistence, processes the current Markdown revision through the existing synchronous durable-job boundary, and confirms workspace-scoped keyword search. The same scenario verifies that a workspace viewer can list and open the document but cannot enter the creation flow.
+
+Tasks coverage follows one owner flow through the real `/tasks` create, edit, and archive forms, verifies persisted workspace scope and transactional audit events, and confirms archived-list exclusion. It also proves that a workspace viewer remains read-only, an organization administrator without workspace membership remains denied, and a forged client workspace id cannot redirect authority.
 
 The harness requires a loopback PostgreSQL 17 server with pgvector and a dedicated test role allowed to create and drop databases. It deliberately does not read `DATABASE_URL`, `DATABASE_TEST_URL`, development credentials, or an auth secret from `.env`; the auth secret and identities are generated for each run. Pass the administrative test connection explicitly:
 
@@ -275,6 +277,24 @@ Suspended or revoked organization/workspace membership and archived workspaces d
 Knowledge list pagination does not hold a database snapshot across requests. With unchanged rows, keyset traversal has no duplicates or gaps, including when timestamps tie. If a document is edited between page requests, its `updatedAt` position may move; a user should restart from the first page when they need a fresh recency view. A future snapshot-based browsing contract would require separate product and retention design.
 
 Run the service and real-HTTP Knowledge coverage with the existing isolated database workflows:
+
+```sh
+pnpm db:test
+AUTH_E2E_DATABASE_ADMIN_URL=postgresql://skyos_test:skyos_test_local_only@127.0.0.1:5433/postgres pnpm test:e2e
+```
+
+## Tasks MVP
+
+`/tasks` is a deliberately focused workspace-scoped work list. Effective workspace owners, admins, and members may create, edit, assign, unassign, change status or priority, and archive tasks. Workspace viewers may list and read active tasks but cannot mutate them. Organization-level administration alone does not grant task-content access.
+
+- Each task belongs to exactly one immutable workspace and records an immutable creator. A task has a required title, optional plain-text description, `todo`/`in_progress`/`done` status, `low`/`medium`/`high` priority, optional assignee, optional date-only due date, timestamps, and optional archive timestamp.
+- Assignees are selected only from users with effective organization and workspace membership in the current task workspace. A later membership suspension or revocation retains historical attribution but marks the assignee unavailable and grants no access.
+- Server actions resolve the selected workspace from the authenticated session. Submitted workspace ids are never an authorization source, and direct task reads are constrained by both the task id and trusted workspace id.
+- Task create, update, and archive operations write append-only audit events in the same PostgreSQL transaction. Validation and authorization failures emit no success event.
+- Active lists exclude archived tasks, return at most 100 rows, and use deterministic `status ASC`, `dueAt ASC NULLS LAST`, `updatedAt DESC`, `id ASC` ordering. Due dates are PostgreSQL `date` values and are rendered without local-time-zone conversion.
+- Archive is one-way in MVP v1. Restore, hard delete, comments, dependencies, subtasks, recurrence, reminders, notifications, labels, custom fields, attachments, automations, calendar views, and external integrations are intentionally excluded.
+
+Run the service and real-HTTP Tasks coverage through the same isolated workflows:
 
 ```sh
 pnpm db:test

@@ -34,8 +34,11 @@ test('workspace roles grant the approved workspace permissions', () => {
   assert.equal(hasWorkspacePermission('admin', 'workspace.archive'), false);
   assert.equal(hasWorkspacePermission('admin', 'workspace.members.manage'), true);
   assert.equal(hasWorkspacePermission('member', 'knowledge.write'), true);
+  assert.equal(hasWorkspacePermission('member', 'tasks.write'), true);
   assert.equal(hasWorkspacePermission('viewer', 'knowledge.read'), true);
   assert.equal(hasWorkspacePermission('viewer', 'knowledge.write'), false);
+  assert.equal(hasWorkspacePermission('viewer', 'tasks.read'), true);
+  assert.equal(hasWorkspacePermission('viewer', 'tasks.write'), false);
   assert.equal(hasWorkspacePermission('viewer', 'ai.use'), false);
 });
 

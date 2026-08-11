@@ -16,6 +16,7 @@ import { encode } from 'next-auth/jwt';
 
 import { PrismaClient, UserStatus, type User } from '../../../database/generated/client/client';
 import { runKnowledgeMvpE2eScenario } from './knowledge-mvp.e2e';
+import { runTasksMvpE2eScenario } from './tasks-mvp.e2e';
 import { runTenantLifecycleE2eScenarios, type LifecycleCookieJar } from './tenant-lifecycle.e2e';
 
 const TEST_FILE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
@@ -486,7 +487,7 @@ async function getRenderedLoginRedirect(baseUrl: string, callbackUrl: string): P
 }
 
 test(
-  'SkyOS authentication, tenant lifecycle, and Knowledge MVP work through real HTTP requests and disposable PostgreSQL',
+  'SkyOS authentication, tenant lifecycle, Knowledge, and Tasks MVPs work through real HTTP requests and disposable PostgreSQL',
   { timeout: 240_000 },
   async (context) => {
     const adminUrl = getAdminDatabaseUrl();
@@ -723,6 +724,20 @@ test(
         login: async (jar, identity) => {
           assert.ok(jar instanceof CookieJar);
           return (await loginWithCredentials(jar, baseUrl, identity, '/knowledge')).response;
+        },
+        prisma,
+      });
+
+      await runTasksMvpE2eScenario(context, {
+        assertRedirectsTo: (response: Response, pathname: string) =>
+          assertRedirectsTo(response, baseUrl, pathname),
+        baseUrl,
+        createIdentity: (label: string) => createIdentity(prisma!, label, password, passwordHash),
+        createJar: () => new CookieJar(baseUrl),
+        getRedirectUrl: (response: Response) => getTrustedRedirectUrl(response, baseUrl),
+        login: async (jar, identity) => {
+          assert.ok(jar instanceof CookieJar);
+          return (await loginWithCredentials(jar, baseUrl, identity, '/tasks')).response;
         },
         prisma,
       });

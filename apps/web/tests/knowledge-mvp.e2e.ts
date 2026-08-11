@@ -15,7 +15,11 @@ import {
   createKnowledgeDocument,
   listKnowledgeDocuments,
 } from '../../../database/knowledge/knowledge-documents';
-import { submitServerActionForm, type ServerActionCookieJar } from './server-action-form';
+import {
+  assertStreamedRedirectTo,
+  submitServerActionForm,
+  type ServerActionCookieJar,
+} from './server-action-form';
 
 type TestIdentity = {
   email: string;
@@ -106,28 +110,6 @@ async function loadHtml(jar: ServerActionCookieJar, path: string): Promise<strin
   const { response } = await jar.request(path);
   assert.equal(response.status, 200, `${path} must render successfully.`);
   return response.text();
-}
-
-async function assertStreamedRedirectTo(
-  response: Response,
-  requestPath: string,
-  targetPath: string,
-): Promise<void> {
-  assert.equal(response.status, 200, 'A streamed App Router redirect must return its HTML shell.');
-  const responseUrl = new URL(response.url);
-  assert.equal(responseUrl.pathname, requestPath);
-  assert.equal(responseUrl.search, '');
-
-  const html = await response.text();
-  const redirectMeta = html.match(/<meta(?=[^>]*\bid="__next-page-redirect")[^>]*>/u)?.[0];
-  assert.ok(redirectMeta, 'Denied page render must include the Next.js redirect instruction.');
-  assert.match(redirectMeta, /\bhttp-equiv="refresh"/u);
-  assert.equal(redirectMeta.match(/\bcontent="([^"]*)"/u)?.[1], `1;url=${targetPath}`);
-  assert.equal(
-    html.includes('data-knowledge-document-form="create"'),
-    false,
-    'Denied page render must not expose the create form.',
-  );
 }
 
 async function readKnowledgeWriteState(
@@ -368,6 +350,7 @@ export async function runKnowledgeMvpE2eScenario(
         (await viewerJar.request('/knowledge/new')).response,
         '/knowledge/new',
         '/dashboard',
+        'data-knowledge-document-form="create"',
       );
       await assertKnowledgeCreationDenied(
         harness,
