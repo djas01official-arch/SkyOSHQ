@@ -244,7 +244,8 @@ Audit events are append-only. SkyOS application services do not expose update or
 
 `/knowledge` is the first workspace-scoped vertical slice. Effective workspace members can read active Markdown documents; viewers are read-only, while members, admins, and owners may create, edit, archive, and restore documents. Organization-level administration alone does not grant document access.
 
-- The normal document list is ordered by most recently updated and bounded to 100 active documents per request. It includes title, creator attribution, update time, active status, and current version.
+- The normal document list uses opaque forward cursors and returns 25 active documents per page by default (maximum 100). Its deterministic order is `updatedAt DESC`, then `title ASC`, then `id ASC`; the UI exposes a **Next page** control only when another page exists. Each cursor is bound to the effective selected workspace, is validated as untrusted input, and cannot grant access.
+- Knowledge search remains a separate bounded retrieval path and is not cursor-paginated by the normal-list cursor. Archived documents are excluded from both normal lists and search.
 - Creation requires a normalized nonempty title and non-whitespace Markdown content. The document, version 1 snapshot, creator attribution, and `knowledge_document.created` audit event commit atomically.
 - `/knowledge/[slug]` renders the current sanitized Markdown and metadata. `/knowledge/[slug]/edit` uses optimistic concurrency, and `/knowledge/[slug]/history` exposes immutable snapshots newest first.
 - Documents belong to exactly one workspace and are never moved between workspaces.
@@ -270,6 +271,8 @@ The MVP permission boundary is fixed by `@skyos/domain`:
 | Organization owner/admin without workspace membership | Deny                     | Deny                |
 
 Suspended or revoked organization/workspace membership and archived workspaces deny normal Knowledge activity. Missing and cross-tenant document URLs resolve through the selected effective workspace and do not disclose foreign records.
+
+Knowledge list pagination does not hold a database snapshot across requests. With unchanged rows, keyset traversal has no duplicates or gaps, including when timestamps tie. If a document is edited between page requests, its `updatedAt` position may move; a user should restart from the first page when they need a fresh recency view. A future snapshot-based browsing contract would require separate product and retention design.
 
 Run the service and real-HTTP Knowledge coverage with the existing isolated database workflows:
 

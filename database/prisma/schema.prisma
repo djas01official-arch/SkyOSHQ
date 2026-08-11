@@ -315,7 +315,7 @@ model KnowledgeDocument {
 
   @@unique([workspaceId, slug])
   @@unique([id, workspaceId])
-  @@index([workspaceId, status, updatedAt])
+  @@index([workspaceId, status, updatedAt(sort: Desc), title, id], map: "knowledge_documents_list_page_idx")
   @@index([authorUserId, createdAt])
   @@index([searchVector], map: "knowledge_documents_active_search_idx", type: Gin, where: raw("(status = 'ACTIVE'::\"KnowledgeDocumentStatus\")"))
   @@map("knowledge_documents")

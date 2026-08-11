@@ -25,7 +25,12 @@ export class KnowledgeStateError extends KnowledgeDocumentError {}
 
 export class KnowledgeValidationError extends KnowledgeDocumentError {}
 
-export const KNOWLEDGE_DOCUMENT_LIST_LIMIT = 100;
+export const KNOWLEDGE_DOCUMENT_DEFAULT_PAGE_SIZE = 25;
+export const KNOWLEDGE_DOCUMENT_MAX_PAGE_SIZE = 100;
+
+const KNOWLEDGE_DOCUMENT_CURSOR_VERSION = 1;
+const KNOWLEDGE_DOCUMENT_CURSOR_MAX_LENGTH = 1_024;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 type Transaction = Prisma.TransactionClient;
 
@@ -40,6 +45,19 @@ export type KnowledgeSearchResult = Readonly<{
   title: string;
   updatedAt: Date;
   version: number;
+}>;
+
+export type KnowledgeDocumentListOptions = Readonly<{
+  cursor?: string;
+  pageSize?: number;
+}>;
+
+type KnowledgeDocumentCursor = Readonly<{
+  id: string;
+  title: string;
+  updatedAt: string;
+  version: typeof KNOWLEDGE_DOCUMENT_CURSOR_VERSION;
+  workspaceId: string;
 }>;
 
 type WorkspaceAccess = Readonly<{
@@ -87,6 +105,86 @@ function createSlug(title: string): string {
 
 function getSearchTerms(value: string): string[] {
   return (value.normalize('NFKC').match(/[\p{L}\p{N}]+/gu) ?? []).slice(0, 16);
+}
+
+function getKnowledgeDocumentPageSize(value: number | undefined): number {
+  const pageSize = value ?? KNOWLEDGE_DOCUMENT_DEFAULT_PAGE_SIZE;
+
+  if (
+    !Number.isSafeInteger(pageSize) ||
+    pageSize < 1 ||
+    pageSize > KNOWLEDGE_DOCUMENT_MAX_PAGE_SIZE
+  ) {
+    throw new KnowledgeValidationError(
+      `Knowledge document page size must be between 1 and ${KNOWLEDGE_DOCUMENT_MAX_PAGE_SIZE}.`,
+    );
+  }
+
+  return pageSize;
+}
+
+function encodeKnowledgeDocumentCursor(
+  workspaceId: string,
+  document: { id: string; title: string; updatedAt: Date },
+): string {
+  const cursor: KnowledgeDocumentCursor = {
+    id: document.id,
+    title: document.title,
+    updatedAt: document.updatedAt.toISOString(),
+    version: KNOWLEDGE_DOCUMENT_CURSOR_VERSION,
+    workspaceId,
+  };
+
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function decodeKnowledgeDocumentCursor(
+  encodedCursor: string | undefined,
+  workspaceId: string,
+): { id: string; title: string; updatedAt: Date } | null {
+  if (encodedCursor === undefined) return null;
+
+  try {
+    if (
+      encodedCursor.length < 1 ||
+      encodedCursor.length > KNOWLEDGE_DOCUMENT_CURSOR_MAX_LENGTH ||
+      !/^[A-Za-z0-9_-]+$/u.test(encodedCursor)
+    ) {
+      throw new Error('Invalid cursor encoding.');
+    }
+
+    const decodedBytes = Buffer.from(encodedCursor, 'base64url');
+    if (decodedBytes.toString('base64url') !== encodedCursor) {
+      throw new Error('Non-canonical cursor encoding.');
+    }
+    const decoded = decodedBytes.toString('utf8');
+    const value: unknown = JSON.parse(decoded);
+
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Invalid cursor payload.');
+    }
+
+    const cursor = value as Partial<KnowledgeDocumentCursor>;
+    const updatedAt =
+      typeof cursor.updatedAt === 'string' ? new Date(cursor.updatedAt) : new Date(Number.NaN);
+    if (
+      cursor.version !== KNOWLEDGE_DOCUMENT_CURSOR_VERSION ||
+      cursor.workspaceId !== workspaceId ||
+      typeof cursor.id !== 'string' ||
+      !UUID_PATTERN.test(cursor.id) ||
+      typeof cursor.title !== 'string' ||
+      cursor.title.length < 1 ||
+      cursor.title.length > 200 ||
+      Number.isNaN(updatedAt.valueOf()) ||
+      updatedAt.toISOString() !== cursor.updatedAt
+    ) {
+      throw new Error('Invalid cursor values.');
+    }
+
+    return { id: cursor.id, title: cursor.title, updatedAt };
+  } catch {
+    throw new KnowledgeValidationError('The Knowledge document cursor is invalid.');
+  }
 }
 
 export async function requireKnowledgeWorkspaceAccess(
@@ -201,11 +299,26 @@ export async function listKnowledgeDocuments(
   prisma: PrismaClient,
   actorUserId: string,
   workspaceId: string,
+  options: KnowledgeDocumentListOptions = {},
 ) {
   await requireKnowledgeWorkspaceAccess(prisma, actorUserId, workspaceId, false);
+  const pageSize = getKnowledgeDocumentPageSize(options.pageSize);
+  const cursor = decodeKnowledgeDocumentCursor(options.cursor, workspaceId);
 
-  return prisma.knowledgeDocument.findMany({
-    where: { status: KnowledgeDocumentStatus.ACTIVE, workspaceId },
+  const documents = await prisma.knowledgeDocument.findMany({
+    where: {
+      status: KnowledgeDocumentStatus.ACTIVE,
+      workspaceId,
+      ...(cursor
+        ? {
+            OR: [
+              { updatedAt: { lt: cursor.updatedAt } },
+              { title: { gt: cursor.title }, updatedAt: cursor.updatedAt },
+              { id: { gt: cursor.id }, title: cursor.title, updatedAt: cursor.updatedAt },
+            ],
+          }
+        : {}),
+    },
     select: {
       author: { select: { displayName: true, email: true, id: true } },
       createdAt: true,
@@ -216,8 +329,19 @@ export async function listKnowledgeDocuments(
       version: true,
     },
     orderBy: [{ updatedAt: 'desc' }, { title: 'asc' }, { id: 'asc' }],
-    take: KNOWLEDGE_DOCUMENT_LIST_LIMIT,
+    take: pageSize + 1,
   });
+
+  const hasNextPage = documents.length > pageSize;
+  const pageDocuments = hasNextPage ? documents.slice(0, pageSize) : documents;
+  const lastDocument = pageDocuments.at(-1);
+
+  return {
+    documents: pageDocuments,
+    hasNextPage,
+    nextCursor:
+      hasNextPage && lastDocument ? encodeKnowledgeDocumentCursor(workspaceId, lastDocument) : null,
+  };
 }
 
 /** Searches active documents only, using PostgreSQL full-text search within one effective workspace. */

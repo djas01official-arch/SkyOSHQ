@@ -1,6 +1,9 @@
 import Link from 'next/link';
 
-import { listKnowledgeDocuments } from '../../../../database/knowledge/knowledge-documents';
+import {
+  KnowledgeValidationError,
+  listKnowledgeDocuments,
+} from '../../../../database/knowledge/knowledge-documents';
 import {
   KNOWLEDGE_SEARCH_QUERY_MAX_CHARACTERS,
   KnowledgeSearchError,
@@ -53,7 +56,11 @@ function modeLabel(mode: KnowledgeSearchMode): string {
 }
 
 type KnowledgePageProps = Readonly<{
-  searchParams: Promise<{ mode?: string | string[]; q?: string | string[] }>;
+  searchParams: Promise<{
+    cursor?: string | string[];
+    mode?: string | string[];
+    q?: string | string[];
+  }>;
 }>;
 
 export default async function KnowledgePage({ searchParams }: KnowledgePageProps) {
@@ -85,8 +92,30 @@ export default async function KnowledgePage({ searchParams }: KnowledgePageProps
       searchError = error.message;
     }
   }
-  const documents = query ? [] : await listKnowledgeDocuments(prisma, user.id, workspace.id);
+  let documentPage: Awaited<ReturnType<typeof listKnowledgeDocuments>> | null = null;
+  let paginationError = false;
+  if (!query) {
+    try {
+      if (
+        resolvedSearchParams.cursor !== undefined &&
+        typeof resolvedSearchParams.cursor !== 'string'
+      ) {
+        throw new KnowledgeValidationError('The Knowledge document cursor is invalid.');
+      }
+      documentPage = await listKnowledgeDocuments(prisma, user.id, workspace.id, {
+        cursor: resolvedSearchParams.cursor,
+      });
+    } catch (error) {
+      if (!(error instanceof KnowledgeValidationError)) throw error;
+      paginationError = true;
+    }
+  }
+  const documents = documentPage?.documents ?? [];
   const canWrite = hasWorkspaceCapability(workspace.role, 'knowledge.write');
+  const nextPageParameters = new URLSearchParams();
+  if (isKnowledgeSearchMode(requestedMode)) nextPageParameters.set('mode', requestedMode);
+  if (documentPage?.nextCursor) nextPageParameters.set('cursor', documentPage.nextCursor);
+  const nextPageHref = `/knowledge?${nextPageParameters.toString()}`;
 
   return (
     <div className="mx-auto max-w-5xl">
@@ -199,33 +228,55 @@ export default async function KnowledgePage({ searchParams }: KnowledgePageProps
             title="No matching processed knowledge"
           />
         </Card>
+      ) : paginationError ? (
+        <Card className="grid min-h-72 place-items-center">
+          <EmptyState
+            action={
+              <Link className={buttonClassName({ variant: 'secondary' })} href="/knowledge">
+                Return to first page
+              </Link>
+            }
+            description="This page link is invalid or no longer usable. Start again from the newest documents."
+            icon="book"
+            title="Knowledge page unavailable"
+          />
+        </Card>
       ) : documents.length ? (
-        <div className="grid gap-3">
-          {documents.map((document) => (
-            <Link href={`/knowledge/${document.slug}`} key={document.id}>
-              <Card className="transition-colors hover:border-accent/50 hover:bg-surface-raised">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <h2 className="truncate text-base font-semibold text-foreground">
-                      {document.title}
-                    </h2>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {getAuthorName(document)} · Updated{' '}
-                      {document.updatedAt.toLocaleDateString(undefined, {
-                        day: 'numeric',
-                        month: 'short',
-                        year: 'numeric',
-                      })}
-                    </p>
+        <div>
+          <div className="grid gap-3">
+            {documents.map((document) => (
+              <Link href={`/knowledge/${document.slug}`} key={document.id}>
+                <Card className="transition-colors hover:border-accent/50 hover:bg-surface-raised">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <h2 className="truncate text-base font-semibold text-foreground">
+                        {document.title}
+                      </h2>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {getAuthorName(document)} · Updated{' '}
+                        {document.updatedAt.toLocaleDateString(undefined, {
+                          day: 'numeric',
+                          month: 'short',
+                          year: 'numeric',
+                        })}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-3">
+                      <StatusIndicator tone="success">Active</StatusIndicator>
+                      <Badge tone="accent">v{document.version}</Badge>
+                    </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-3">
-                    <StatusIndicator tone="success">Active</StatusIndicator>
-                    <Badge tone="accent">v{document.version}</Badge>
-                  </div>
-                </div>
-              </Card>
-            </Link>
-          ))}
+                </Card>
+              </Link>
+            ))}
+          </div>
+          {documentPage?.nextCursor ? (
+            <div className="mt-6 flex justify-end border-t border-border pt-5">
+              <Link className={buttonClassName({ variant: 'secondary' })} href={nextPageHref}>
+                Next page
+              </Link>
+            </div>
+          ) : null}
         </div>
       ) : (
         <Card className="grid min-h-72 place-items-center">

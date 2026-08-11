@@ -10,6 +10,8 @@ import { AuditAction } from '../audit/audit-event';
 import {
   KnowledgeAuthorizationError,
   KnowledgeConflictError,
+  KNOWLEDGE_DOCUMENT_DEFAULT_PAGE_SIZE,
+  KNOWLEDGE_DOCUMENT_MAX_PAGE_SIZE,
   KnowledgeNotFoundError,
   KnowledgeValidationError,
   archiveKnowledgeDocument,
@@ -130,6 +132,40 @@ async function addWorkspaceUser(
   });
 }
 
+async function createKnowledgeDocumentFixture(
+  workspaceId: string,
+  authorUserId: string,
+  title: string,
+  updatedAt: Date,
+  status: KnowledgeDocumentStatus = KnowledgeDocumentStatus.ACTIVE,
+) {
+  return prisma.$transaction(async (transaction) => {
+    const document = await transaction.knowledgeDocument.create({
+      data: {
+        archivedAt: status === KnowledgeDocumentStatus.ARCHIVED ? updatedAt : null,
+        authorUserId,
+        content: `# ${title}`,
+        slug: `pagination-${randomUUID()}`,
+        status,
+        title,
+        updatedAt,
+        workspaceId,
+      },
+    });
+    await transaction.knowledgeDocumentVersion.create({
+      data: {
+        authorUserId,
+        documentId: document.id,
+        markdownContent: document.content,
+        title: document.title,
+        versionNumber: document.version,
+      },
+    });
+
+    return document;
+  });
+}
+
 async function resetTestDatabase(): Promise<void> {
   await prisma.$executeRawUnsafe(
     'TRUNCATE TABLE "audit_events", "knowledge_documents", "workspace_memberships", "organization_memberships", "workspaces", "organizations", "users" CASCADE;',
@@ -156,7 +192,10 @@ test('knowledge documents remain isolated to their workspace', async () => {
     title: 'Workspace one',
   });
 
-  assert.equal((await listKnowledgeDocuments(prisma, ownerId, secondWorkspaceId)).length, 0);
+  assert.equal(
+    (await listKnowledgeDocuments(prisma, ownerId, secondWorkspaceId)).documents.length,
+    0,
+  );
   await assert.rejects(
     getKnowledgeDocument(prisma, ownerId, secondWorkspaceId, document.slug),
     KnowledgeNotFoundError,
@@ -169,6 +208,143 @@ test('knowledge documents remain isolated to their workspace', async () => {
   );
   assert.equal(
     (await searchKnowledgeDocuments(prisma, ownerId, secondWorkspaceId, 'confidential')).length,
+    0,
+  );
+});
+
+test('Knowledge cursor pagination traverses stable timestamp ties without duplicates or gaps', async () => {
+  const ownerId = await createUser();
+  const organizationId = await createOrganization(ownerId);
+  const workspaceId = await createWorkspace(organizationId, ownerId);
+  const tiedAt = new Date('2026-08-11T12:00:00.000Z');
+
+  for (const title of ['Gamma', 'Alpha', 'Beta', 'Alpha', 'Delta', 'Beta', 'Epsilon']) {
+    await createKnowledgeDocumentFixture(workspaceId, ownerId, title, tiedAt);
+  }
+  const archived = await createKnowledgeDocumentFixture(
+    workspaceId,
+    ownerId,
+    'Archived between active rows',
+    tiedAt,
+    KnowledgeDocumentStatus.ARCHIVED,
+  );
+  const expected = await prisma.knowledgeDocument.findMany({
+    orderBy: [{ updatedAt: 'desc' }, { title: 'asc' }, { id: 'asc' }],
+    select: { id: true },
+    where: { status: KnowledgeDocumentStatus.ACTIVE, workspaceId },
+  });
+
+  const firstPage = await listKnowledgeDocuments(prisma, ownerId, workspaceId, { pageSize: 3 });
+  assert.equal(firstPage.documents.length, 3);
+  assert.equal(firstPage.hasNextPage, true);
+  assert.ok(firstPage.nextCursor);
+
+  const secondPage = await listKnowledgeDocuments(prisma, ownerId, workspaceId, {
+    cursor: firstPage.nextCursor,
+    pageSize: 3,
+  });
+  assert.equal(secondPage.documents.length, 3);
+  assert.equal(secondPage.hasNextPage, true);
+  assert.ok(secondPage.nextCursor);
+
+  const finalPage = await listKnowledgeDocuments(prisma, ownerId, workspaceId, {
+    cursor: secondPage.nextCursor,
+    pageSize: 3,
+  });
+  assert.equal(finalPage.documents.length, 1);
+  assert.equal(finalPage.hasNextPage, false);
+  assert.equal(finalPage.nextCursor, null);
+
+  const traversedIds = [
+    ...firstPage.documents,
+    ...secondPage.documents,
+    ...finalPage.documents,
+  ].map(({ id }) => id);
+  assert.deepEqual(
+    traversedIds,
+    expected.map(({ id }) => id),
+  );
+  assert.equal(new Set(traversedIds).size, traversedIds.length);
+  assert.equal(traversedIds.includes(archived.id), false);
+});
+
+test('Knowledge pagination applies safe defaults and rejects oversized or malformed requests', async () => {
+  const ownerId = await createUser();
+  const organizationId = await createOrganization(ownerId);
+  const workspaceId = await createWorkspace(organizationId, ownerId);
+  const emptyWorkspaceId = await createWorkspace(organizationId, ownerId);
+  const createdAt = new Date('2026-08-11T13:00:00.000Z');
+
+  for (let index = 0; index < KNOWLEDGE_DOCUMENT_DEFAULT_PAGE_SIZE + 1; index += 1) {
+    await createKnowledgeDocumentFixture(
+      workspaceId,
+      ownerId,
+      `Default page ${index.toString().padStart(2, '0')}`,
+      createdAt,
+    );
+  }
+
+  const defaultPage = await listKnowledgeDocuments(prisma, ownerId, workspaceId);
+  assert.equal(defaultPage.documents.length, KNOWLEDGE_DOCUMENT_DEFAULT_PAGE_SIZE);
+  assert.equal(defaultPage.hasNextPage, true);
+  assert.ok(defaultPage.nextCursor);
+
+  const maximumPage = await listKnowledgeDocuments(prisma, ownerId, workspaceId, {
+    pageSize: KNOWLEDGE_DOCUMENT_MAX_PAGE_SIZE,
+  });
+  assert.equal(maximumPage.documents.length, KNOWLEDGE_DOCUMENT_DEFAULT_PAGE_SIZE + 1);
+  assert.equal(maximumPage.hasNextPage, false);
+  assert.equal(maximumPage.nextCursor, null);
+
+  const emptyPage = await listKnowledgeDocuments(prisma, ownerId, emptyWorkspaceId);
+  assert.deepEqual(emptyPage, { documents: [], hasNextPage: false, nextCursor: null });
+
+  await assert.rejects(
+    listKnowledgeDocuments(prisma, ownerId, workspaceId, {
+      pageSize: KNOWLEDGE_DOCUMENT_MAX_PAGE_SIZE + 1,
+    }),
+    KnowledgeValidationError,
+  );
+  for (const cursor of ['', 'not-a-base64url-cursor!', Buffer.from('{}').toString('base64url')]) {
+    await assert.rejects(
+      listKnowledgeDocuments(prisma, ownerId, workspaceId, { cursor }),
+      KnowledgeValidationError,
+    );
+  }
+});
+
+test('Knowledge cursors are bound to the authorized workspace and never grant tenant access', async () => {
+  const firstOwnerId = await createUser();
+  const secondOwnerId = await createUser();
+  const firstOrganizationId = await createOrganization(firstOwnerId);
+  const secondOrganizationId = await createOrganization(secondOwnerId);
+  const firstWorkspaceId = await createWorkspace(firstOrganizationId, firstOwnerId);
+  const siblingWorkspaceId = await createWorkspace(firstOrganizationId, firstOwnerId);
+  await createWorkspace(secondOrganizationId, secondOwnerId);
+  const createdAt = new Date('2026-08-11T14:00:00.000Z');
+  await createKnowledgeDocumentFixture(firstWorkspaceId, firstOwnerId, 'First', createdAt);
+  await createKnowledgeDocumentFixture(firstWorkspaceId, firstOwnerId, 'Second', createdAt);
+  const firstPage = await listKnowledgeDocuments(prisma, firstOwnerId, firstWorkspaceId, {
+    pageSize: 1,
+  });
+  assert.ok(firstPage.nextCursor);
+
+  await assert.rejects(
+    listKnowledgeDocuments(prisma, firstOwnerId, siblingWorkspaceId, {
+      cursor: firstPage.nextCursor,
+      pageSize: 1,
+    }),
+    KnowledgeValidationError,
+  );
+  await assert.rejects(
+    listKnowledgeDocuments(prisma, secondOwnerId, firstWorkspaceId, {
+      cursor: firstPage.nextCursor,
+      pageSize: 1,
+    }),
+    KnowledgeAuthorizationError,
+  );
+  assert.equal(
+    (await listKnowledgeDocuments(prisma, firstOwnerId, siblingWorkspaceId)).documents.length,
     0,
   );
 });
@@ -220,7 +396,7 @@ test('workspace roles enforce the application-owned Knowledge permission matrix'
     title: 'Access model',
   });
 
-  assert.equal((await listKnowledgeDocuments(prisma, viewerId, workspaceId)).length, 1);
+  assert.equal((await listKnowledgeDocuments(prisma, viewerId, workspaceId)).documents.length, 1);
   assert.equal((await searchKnowledgeDocuments(prisma, viewerId, workspaceId, 'access')).length, 1);
   assert.equal(
     (await getKnowledgeDocument(prisma, viewerId, workspaceId, document.slug)).id,
@@ -305,6 +481,10 @@ test('effective parent and workspace membership state gates all Knowledge access
       getKnowledgeDocument(prisma, actorId, workspaceId, document.slug),
       KnowledgeAuthorizationError,
     );
+    await assert.rejects(
+      listKnowledgeDocuments(prisma, actorId, workspaceId, { pageSize: 1 }),
+      KnowledgeAuthorizationError,
+    );
   }
 
   await prisma.workspace.update({
@@ -386,7 +566,7 @@ test('archived documents leave normal lists and restore with a new version and a
   );
   assert.equal(archived.status, KnowledgeDocumentStatus.ARCHIVED);
   assert.equal(archived.version, 2);
-  assert.equal((await listKnowledgeDocuments(prisma, ownerId, workspaceId)).length, 0);
+  assert.equal((await listKnowledgeDocuments(prisma, ownerId, workspaceId)).documents.length, 0);
   assert.equal(
     (await searchKnowledgeDocuments(prisma, ownerId, workspaceId, 'lifecycle')).length,
     0,
@@ -405,7 +585,7 @@ test('archived documents leave normal lists and restore with a new version and a
   );
   assert.equal(restored.status, KnowledgeDocumentStatus.ACTIVE);
   assert.equal(restored.version, 3);
-  assert.equal((await listKnowledgeDocuments(prisma, ownerId, workspaceId)).length, 1);
+  assert.equal((await listKnowledgeDocuments(prisma, ownerId, workspaceId)).documents.length, 1);
 
   const actions = new Set(
     (

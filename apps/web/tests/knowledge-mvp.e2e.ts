@@ -11,6 +11,10 @@ import {
   WorkspaceRole,
   WorkspaceStatus,
 } from '../../../database/generated/client/client';
+import {
+  createKnowledgeDocument,
+  listKnowledgeDocuments,
+} from '../../../database/knowledge/knowledge-documents';
 import { submitServerActionForm, type ServerActionCookieJar } from './server-action-form';
 
 type TestIdentity = {
@@ -409,6 +413,45 @@ export async function runKnowledgeMvpE2eScenario(
         }),
         0,
       );
+
+      const paginationTitles: string[] = [];
+      for (let index = 0; index < 25; index += 1) {
+        const title = `Pagination document ${suffix} ${index.toString().padStart(2, '0')}`;
+        paginationTitles.push(title);
+        await createKnowledgeDocument(harness.prisma, owner.id, workspaceId, {
+          content: `# ${title}`,
+          title,
+        });
+      }
+
+      const firstDocumentPage = await listKnowledgeDocuments(harness.prisma, owner.id, workspaceId);
+      assert.equal(firstDocumentPage.documents.length, 25);
+      assert.equal(firstDocumentPage.hasNextPage, true);
+      assert.ok(firstDocumentPage.nextCursor);
+      const firstPageHtml = await loadHtml(ownerJar, '/knowledge');
+      assert.ok(firstPageHtml.includes('Next page'));
+      assert.ok(firstPageHtml.includes(firstDocumentPage.nextCursor));
+      for (const title of paginationTitles) assert.ok(firstPageHtml.includes(title));
+      assert.equal(firstPageHtml.includes(updatedTitle), false);
+
+      const secondDocumentPage = await listKnowledgeDocuments(
+        harness.prisma,
+        owner.id,
+        workspaceId,
+        { cursor: firstDocumentPage.nextCursor },
+      );
+      assert.deepEqual(
+        secondDocumentPage.documents.map(({ id }) => id),
+        [document.id],
+      );
+      assert.equal(secondDocumentPage.hasNextPage, false);
+      assert.equal(secondDocumentPage.nextCursor, null);
+      const secondPageHtml = await loadHtml(
+        ownerJar,
+        `/knowledge?cursor=${encodeURIComponent(firstDocumentPage.nextCursor)}`,
+      );
+      assert.ok(secondPageHtml.includes(updatedTitle));
+      assert.equal(secondPageHtml.includes('Next page'), false);
     },
   );
 }
