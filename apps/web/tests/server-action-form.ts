@@ -9,6 +9,59 @@ export type ServerActionCookieJar = {
   request(path: string, init?: RequestInit): Promise<HttpResult>;
 };
 
+const NEXT_APP_ROUTER_NOT_FOUND_DIGEST = 'NEXT_HTTP_ERROR_FALLBACK;404';
+
+export async function assertAppRouterNotFound(
+  response: Response,
+  requestPath: string,
+  forbiddenHtml: readonly string[] = [],
+): Promise<string> {
+  const responseUrl = new URL(response.url);
+  const expectedRequestUrl = new URL(requestPath, responseUrl.origin);
+  assert.equal(responseUrl.origin, expectedRequestUrl.origin);
+  assert.equal(responseUrl.pathname, expectedRequestUrl.pathname);
+  assert.equal(responseUrl.search, expectedRequestUrl.search);
+  assert.equal(expectedRequestUrl.hash, '');
+  assert.match(
+    response.headers.get('content-type') ?? '',
+    /^text\/html(?:;|$)/iu,
+    'An App Router not-found response must be HTML.',
+  );
+  assert.ok(
+    response.status === 404 || response.status === 200,
+    `An App Router not-found response must use status 404 or a streamed status 200; received ${response.status}.`,
+  );
+
+  const html = await response.text();
+  assert.doesNotMatch(
+    html,
+    /<meta(?=[^>]*\bid="__next-page-redirect")[^>]*>/u,
+    'An App Router not-found response must not be a redirect.',
+  );
+
+  if (response.status === 200) {
+    assert.ok(
+      html.includes(NEXT_APP_ROUTER_NOT_FOUND_DIGEST),
+      'A streamed App Router not-found response must contain the Next.js 404 digest.',
+    );
+    assert.match(
+      html,
+      /<meta(?=[^>]*\bname=(?:"robots"|'robots'))(?=[^>]*\bcontent=(?:"noindex"|'noindex'))[^>]*>/iu,
+      'A streamed App Router not-found response must contain Next.js noindex metadata.',
+    );
+  }
+
+  for (const forbiddenValue of forbiddenHtml) {
+    assert.equal(
+      html.includes(forbiddenValue),
+      false,
+      `App Router not-found response exposed protected content: ${forbiddenValue}`,
+    );
+  }
+
+  return html;
+}
+
 export async function assertStreamedRedirectTo(
   response: Response,
   requestPath: string,

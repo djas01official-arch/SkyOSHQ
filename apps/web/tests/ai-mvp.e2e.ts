@@ -24,6 +24,7 @@ import {
   paragraphWindowStrategyV1,
 } from '../../../services/knowledge-chunking/chunking-strategy';
 import {
+  assertAppRouterNotFound,
   assertStreamedRedirectTo,
   submitServerActionForm,
   type ServerActionCookieJar,
@@ -150,6 +151,16 @@ async function createChunkedKnowledge(
   return { chunkSet, document };
 }
 
+async function readAiPersistence(prisma: PrismaClient) {
+  return prisma.$transaction([
+    prisma.aiConversation.findMany({ orderBy: { id: 'asc' } }),
+    prisma.aiMessage.findMany({ orderBy: { id: 'asc' } }),
+    prisma.aiRun.findMany({ orderBy: { id: 'asc' } }),
+    prisma.aiRetrievalSnapshot.findMany({ orderBy: { id: 'asc' } }),
+    prisma.aiRunCitation.findMany({ orderBy: { id: 'asc' } }),
+  ]);
+}
+
 export async function runAiMvpE2eScenario(
   context: TestContext,
   harness: AiE2eHarness,
@@ -170,7 +181,7 @@ export async function runAiMvpE2eScenario(
       allowedMarker,
       `Allowed AI source ${suffix}`,
     );
-    await createChunkedKnowledge(
+    const forbiddenSource = await createChunkedKnowledge(
       harness.prisma,
       owner.id,
       workspaceBId,
@@ -181,6 +192,7 @@ export async function runAiMvpE2eScenario(
       harness.prisma,
       owner.id,
       workspaceBId,
+      `Private workspace B conversation ${suffix}`,
     );
 
     const ownerJar = harness.createJar();
@@ -236,7 +248,25 @@ export async function runAiMvpE2eScenario(
       ),
     );
 
-    assert.equal((await ownerJar.request(`/ai/${workspaceBConversation.id}`)).response.status, 404);
+    const crossWorkspaceConversationPath = `/ai/${workspaceBConversation.id}`;
+    const persistenceBeforeDeniedRead = await readAiPersistence(harness.prisma);
+    const deniedConversationResponse = (await ownerJar.request(crossWorkspaceConversationPath))
+      .response;
+    const deniedConversationHtml = await assertAppRouterNotFound(
+      deniedConversationResponse,
+      crossWorkspaceConversationPath,
+      [
+        workspaceBConversation.title,
+        forbiddenMarker,
+        forbiddenSource.document.slug,
+        allowedMarker,
+        'Grounded response',
+        'data-ai-message-form="message"',
+        'Ask the first grounded question.',
+      ],
+    );
+    assert.match(deniedConversationHtml, /This view does not exist\./u);
+    assert.deepEqual(await readAiPersistence(harness.prisma), persistenceBeforeDeniedRead);
     const beforeForgedSubmit = await harness.prisma.aiMessage.count();
     const forgedResponse = await submitServerActionForm(
       ownerJar,
