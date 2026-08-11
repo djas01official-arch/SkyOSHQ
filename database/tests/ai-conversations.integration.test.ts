@@ -538,6 +538,20 @@ test('ineffective memberships, organization-only administration, and archives de
   );
 });
 
+test('AI authorization preserves unexpected access lookup failures', async () => {
+  const unexpectedFailure = new Error('Simulated workspace access lookup failure.');
+  const failingPrisma = {
+    workspaceMembership: {
+      findFirst: () => Promise.reject(unexpectedFailure),
+    },
+  } as unknown as PrismaClient;
+
+  await assert.rejects(
+    createAiConversation(failingPrisma, randomUUID(), randomUUID()),
+    (error) => error === unexpectedFailure,
+  );
+});
+
 test('per-user workspace throttling rejects the next request without adding a message', async () => {
   const f = await fixture();
   const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);

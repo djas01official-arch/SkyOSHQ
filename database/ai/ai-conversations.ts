@@ -11,7 +11,10 @@ import {
   retrieveKnowledgeContext,
   type KnowledgeRetrievalDependencies,
 } from './knowledge-retrieval';
-import { requireKnowledgeWorkspaceAccess } from '../knowledge/knowledge-documents';
+import {
+  KnowledgeAuthorizationError,
+  requireKnowledgeWorkspaceAccess,
+} from '../knowledge/knowledge-documents';
 import { workspaceRoleGrantsPermission } from '../policy/authorization-policy';
 import {
   LanguageModelProviderError,
@@ -48,7 +51,18 @@ async function requireAiAccess(
   actorUserId: string,
   workspaceId: string,
 ): Promise<void> {
-  const access = await requireKnowledgeWorkspaceAccess(prisma, actorUserId, workspaceId, false);
+  let access: Awaited<ReturnType<typeof requireKnowledgeWorkspaceAccess>>;
+  try {
+    access = await requireKnowledgeWorkspaceAccess(prisma, actorUserId, workspaceId, false);
+  } catch (error) {
+    if (error instanceof KnowledgeAuthorizationError) {
+      throw new AiConversationAuthorizationError(
+        'AI access requires effective permissions in the selected workspace.',
+        'ai_forbidden',
+      );
+    }
+    throw error;
+  }
   if (!workspaceRoleGrantsPermission(access.role, 'ai.use')) {
     throw new AiConversationAuthorizationError(
       'ai.use requires an effective non-viewer workspace membership.',
