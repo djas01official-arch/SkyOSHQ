@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { TestContext } from 'node:test';
 
 import { AuditAction } from '../../../database/audit/audit-event';
+import { createWorkspaceForOrganization } from '../../../database/context/workspace-creation';
 import {
   MembershipStatus,
   OrganizationRole,
@@ -10,6 +11,7 @@ import {
   type PrismaClient,
   TaskPriority,
   TaskStatus,
+  UserStatus,
   WorkspaceRole,
   WorkspaceStatus,
 } from '../../../database/generated/client/client';
@@ -59,32 +61,20 @@ async function createWorkspaceFixture(
       userId: ownerUserId,
     },
   });
-  const workspace = await prisma.workspace.create({
-    data: {
-      createdByUserId: ownerUserId,
-      name: `Tasks Workspace ${suffix}`,
-      organizationId: organization.id,
-      slug: `tasks-workspace-${suffix}`,
-      status: WorkspaceStatus.ACTIVE,
-    },
-  });
-  await prisma.workspaceMembership.create({
-    data: {
-      activatedAt: new Date(),
-      role: WorkspaceRole.OWNER,
-      status: MembershipStatus.ACTIVE,
-      userId: ownerUserId,
-      workspaceId: workspace.id,
-    },
-  });
-  const forgedWorkspace = await prisma.workspace.create({
-    data: {
-      name: `Unselected Tasks Workspace ${suffix}`,
-      organizationId: organization.id,
-      slug: `unselected-tasks-workspace-${suffix}`,
-      status: WorkspaceStatus.ACTIVE,
-    },
-  });
+  const workspace = await createWorkspaceForOrganization(
+    prisma,
+    ownerUserId,
+    organization.id,
+    `Tasks Workspace ${suffix}`,
+    `tasks-workspace-${suffix}`,
+  );
+  const forgedWorkspace = await createWorkspaceForOrganization(
+    prisma,
+    ownerUserId,
+    organization.id,
+    `Unselected Tasks Workspace ${suffix}`,
+    `unselected-tasks-workspace-${suffix}`,
+  );
 
   return {
     forgedWorkspaceId: forgedWorkspace.id,
@@ -396,6 +386,29 @@ export async function runTasksMvpE2eScenario(
       );
 
       const crossWorkspaceViewer = await harness.createIdentity('tasks-cross-workspace-viewer');
+      const crossWorkspaceFixture = await harness.prisma.workspace.findUniqueOrThrow({
+        where: { id: forgedWorkspaceId },
+      });
+      assert.equal(crossWorkspaceFixture.status, WorkspaceStatus.ACTIVE);
+      assert.equal(crossWorkspaceFixture.archivedAt, null);
+      assert.equal(
+        await harness.prisma.workspaceMembership.count({
+          where: {
+            role: WorkspaceRole.OWNER,
+            status: MembershipStatus.ACTIVE,
+            user: {
+              deletedAt: null,
+              organizationMemberships: {
+                some: { organizationId, status: MembershipStatus.ACTIVE },
+              },
+              status: UserStatus.ACTIVE,
+            },
+            workspaceId: forgedWorkspaceId,
+          },
+        }),
+        1,
+        'The active cross-workspace fixture must have an effective owner before adding a viewer.',
+      );
       await addViewer(harness.prisma, crossWorkspaceViewer, organizationId, forgedWorkspaceId);
       const crossWorkspaceViewerJar = harness.createJar();
       harness.assertRedirectsTo(
