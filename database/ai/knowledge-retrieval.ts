@@ -28,6 +28,8 @@ const DEFAULT_PER_SOURCE_CHARACTER_BUDGET = 2_500;
 const MAX_PER_SOURCE_CHARACTER_BUDGET = 8_000;
 const DEFAULT_NEIGHBOR_RADIUS = 1;
 const MAX_NEIGHBOR_RADIUS = 2;
+export const KNOWLEDGE_ACTION_MAX_SOURCE_CHARACTERS = 8_000;
+const KNOWLEDGE_ACTION_EXCERPT_CHARACTERS = 3_000;
 
 type Transaction = Prisma.TransactionClient;
 
@@ -36,7 +38,7 @@ export type KnowledgeRetrievalCitation = Readonly<{
   characterEnd: number | null;
   characterStart: number | null;
   chunkOrdinal: number;
-  chunkSetId: string;
+  chunkSetId: string | null;
   displayedExcerptChecksum: string;
   documentSlug: string;
   documentVersion: number | null;
@@ -205,14 +207,120 @@ async function loadCurrentChunks(
 
 function citationId(
   workspaceId: string,
-  chunkSetId: string,
+  sourceKey: string,
   ordinal: number,
   excerptChecksum: string,
 ): string {
   return `cite_${createHash('sha256')
-    .update(`${workspaceId}\0${chunkSetId}\0${ordinal}\0${excerptChecksum}`, 'utf8')
+    .update(`${workspaceId}\0${sourceKey}\0${ordinal}\0${excerptChecksum}`, 'utf8')
     .digest('hex')
     .slice(0, 24)}`;
+}
+
+/**
+ * Loads one immutable Markdown version directly, without workspace search. This
+ * path is used only by document-launched AI actions and never broadens scope to
+ * neighboring documents or attachments.
+ */
+export async function retrieveKnowledgeDocumentVersionContext(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+  documentVersionId: string,
+): Promise<KnowledgeRetrievalResult> {
+  const source = await prisma.$transaction(
+    async (transaction) => {
+      const access = await requireKnowledgeWorkspaceAccess(
+        transaction,
+        actorUserId,
+        workspaceId,
+        false,
+      );
+      if (!workspaceRoleGrantsPermission(access.role, 'ai.use')) {
+        throw new KnowledgeRetrievalAuthorizationError(
+          'ai.use requires an effective non-viewer workspace membership.',
+        );
+      }
+      const version = await transaction.knowledgeDocumentVersion.findFirst({
+        where: {
+          id: documentVersionId,
+          document: {
+            status: KnowledgeDocumentStatus.ACTIVE,
+            workspaceId,
+          },
+        },
+        include: { document: true },
+      });
+      if (!version) {
+        throw new KnowledgeRetrievalAuthorizationError(
+          'The Knowledge source is unavailable in the selected workspace.',
+        );
+      }
+      await requireKnowledgeWorkspaceAccess(transaction, actorUserId, workspaceId, false);
+      return version;
+    },
+    { isolationLevel: 'RepeatableRead', timeout: 5_000 },
+  );
+
+  if (source.markdownContent.length > KNOWLEDGE_ACTION_MAX_SOURCE_CHARACTERS) {
+    throw new KnowledgeRetrievalValidationError(
+      `This document version exceeds the ${KNOWLEDGE_ACTION_MAX_SOURCE_CHARACTERS.toLocaleString('en-US')}-character AI action limit.`,
+      'document_action_source_too_large',
+    );
+  }
+
+  const items: RetrievedKnowledgeChunk[] = [];
+  for (
+    let characterStart = 0, ordinal = 0;
+    characterStart < source.markdownContent.length;
+    characterStart += KNOWLEDGE_ACTION_EXCERPT_CHARACTERS, ordinal += 1
+  ) {
+    const text = source.markdownContent.slice(
+      characterStart,
+      characterStart + KNOWLEDGE_ACTION_EXCERPT_CHARACTERS,
+    );
+    const checksum = createHash('sha256').update(text, 'utf8').digest('hex');
+    items.push({
+      citation: {
+        attachmentId: null,
+        characterEnd: characterStart + text.length,
+        characterStart,
+        chunkOrdinal: ordinal,
+        chunkSetId: null,
+        displayedExcerptChecksum: checksum,
+        documentSlug: source.document.slug,
+        documentVersion: source.versionNumber,
+        extractionVersion: null,
+        filename: null,
+        id: citationId(workspaceId, `document-version:${source.id}`, ordinal, checksum),
+        sourceId: source.documentId,
+        sourceType: 'document',
+        workspaceId,
+      },
+      isNeighbor: false,
+      score: {
+        final: 1,
+        keywordRank: null,
+        keywordScore: null,
+        semanticRank: null,
+        semanticScore: null,
+      },
+      text,
+    });
+  }
+
+  return {
+    context: packageUntrustedContext(items),
+    items,
+    limits: {
+      candidateCount: 1,
+      characterCount: source.markdownContent.length,
+      maxResults: items.length,
+      neighborRadius: 0,
+      perSourceCharacterBudget: KNOWLEDGE_ACTION_MAX_SOURCE_CHARACTERS,
+      totalCharacterBudget: KNOWLEDGE_ACTION_MAX_SOURCE_CHARACTERS,
+    },
+  };
 }
 
 function buildCitation(

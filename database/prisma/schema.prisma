@@ -123,6 +123,13 @@ enum AiRunStatus {
   FAILED
 }
 
+enum AiKnowledgeActionType {
+  SUMMARIZE
+  EXTRACT_ACTION_ITEMS
+  IDENTIFY_RISKS
+  EXTRACT_KEY_DECISIONS
+}
+
 enum TaskStatus {
   TODO
   IN_PROGRESS
@@ -348,6 +355,7 @@ model KnowledgeDocumentVersion {
   author          User                   @relation("KnowledgeDocumentVersionAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   chunkingJobs    KnowledgeChunkingJob[] @relation("KnowledgeChunkingJobDocumentVersion")
   chunkSets       KnowledgeChunkSet[]    @relation("KnowledgeChunkSetDocumentVersion")
+  aiRuns          AiRun[]                @relation("AiRunKnowledgeDocumentVersion")
 
   @@unique([documentId, versionNumber])
   @@index([documentId, createdAt])
@@ -720,6 +728,8 @@ model AiRun {
   workspaceId       String              @db.Uuid
   requestedByUserId String              @db.Uuid
   userMessageId     String              @db.Uuid
+  knowledgeActionType       AiKnowledgeActionType?
+  knowledgeDocumentVersionId String?                 @db.Uuid
   providerKey       String
   modelKey          String
   modelVersion      String
@@ -743,6 +753,7 @@ model AiRun {
   userMessage       AiMessage           @relation("AiRunUserMessage", fields: [userMessageId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   assistantMessage  AiMessage?          @relation("AiRunAssistantMessage")
   retrievalSnapshot AiRetrievalSnapshot?
+  knowledgeDocumentVersion KnowledgeDocumentVersion? @relation("AiRunKnowledgeDocumentVersion", fields: [knowledgeDocumentVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([id, workspaceId])
   @@unique([userMessageId], map: "ai_runs_active_user_message_key", where: raw("(status = 'PROCESSING'::\"AiRunStatus\")"))
@@ -750,6 +761,7 @@ model AiRun {
   @@index([workspaceId, status, createdAt])
   @@index([requestedByUserId, createdAt])
   @@index([userMessageId, createdAt])
+  @@index([knowledgeDocumentVersionId, createdAt])
   @@map("ai_runs")
 }
 
@@ -783,7 +795,7 @@ model AiRunCitation {
   attachmentId             String?                  @db.Uuid
   filename                 String?
   extractionVersion        Int?
-  chunkSetId               String                   @db.Uuid
+  chunkSetId               String?                  @db.Uuid
   chunkOrdinal             Int
   characterStart           Int?
   characterEnd             Int?
@@ -791,7 +803,7 @@ model AiRunCitation {
   displayedExcerptChecksum String                   @db.Char(64)
   createdAt                DateTime                 @default(now()) @db.Timestamptz(6)
   snapshot                 AiRetrievalSnapshot      @relation(fields: [snapshotId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  chunkSet                  KnowledgeChunkSet        @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunkSet                  KnowledgeChunkSet?       @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([snapshotId, citationId])
   @@unique([snapshotId, chunkSetId, chunkOrdinal])

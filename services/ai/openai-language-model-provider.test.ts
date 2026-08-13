@@ -226,6 +226,90 @@ test('the adapter maps a bounded stateless request through the real SDK transpor
   assert.equal(result.attemptCount, 1);
 });
 
+test('knowledge summaries use a strict action schema and canonical readable output', async () => {
+  const transport = fakeFetch(() =>
+    jsonResponse(
+      responseBody({
+        keyPoints: [{ citationIds: ['cite_allowed'], point: 'Bounded context is supported.' }],
+        summary: 'SkyOS uses bounded Knowledge context.',
+        summaryCitationIds: ['cite_allowed'],
+      }),
+    ),
+  );
+  const result = await provider(transport.fetch).generate({
+    ...baseRequest,
+    responseFormat: 'knowledge_summary',
+  });
+  const body = JSON.parse(await transport.calls[0]!.text()) as {
+    text: { format: { name: string; schema: { required: string[] } } };
+  };
+
+  assert.equal(body.text.format.name, 'skyos_knowledge_summary');
+  assert.deepEqual(body.text.format.schema.required, [
+    'summary',
+    'summaryCitationIds',
+    'keyPoints',
+  ]);
+  assert.equal(
+    result.text,
+    'Summary\nSkyOS uses bounded Knowledge context.\n\nKey points\n- Bounded context is supported.',
+  );
+  assert.deepEqual(result.citationIds, ['cite_allowed']);
+});
+
+test('knowledge action schemas preserve explicit optional fields and safe no-result behavior', async () => {
+  const cases = [
+    {
+      expected: 'Action items\n1. Review the runbook.',
+      format: 'knowledge_action_items' as const,
+      result: {
+        items: [
+          {
+            citationIds: ['cite_allowed'],
+            dueDate: null,
+            owner: null,
+            task: 'Review the runbook.',
+          },
+        ],
+      },
+    },
+    {
+      expected: 'No risks are explicitly supported by this document.',
+      format: 'knowledge_risks' as const,
+      result: { items: [] },
+    },
+    {
+      expected: 'Key decisions\n1. Adopt bounded context.',
+      format: 'knowledge_key_decisions' as const,
+      result: {
+        items: [
+          {
+            citationIds: ['cite_allowed'],
+            decision: 'Adopt bounded context.',
+            rationale: null,
+          },
+        ],
+      },
+    },
+  ];
+
+  for (const scenario of cases) {
+    const transport = fakeFetch(() => jsonResponse(responseBody(scenario.result)));
+    const result = await provider(transport.fetch).generate({
+      ...baseRequest,
+      responseFormat: scenario.format,
+    });
+    assert.equal(result.text, scenario.expected);
+    assert.equal(result.text.includes('Owner:'), false);
+    assert.equal(result.text.includes('Due date:'), false);
+    assert.equal(result.text.includes('Rationale:'), false);
+    assert.deepEqual(
+      result.citationIds,
+      scenario.format === 'knowledge_risks' ? [] : ['cite_allowed'],
+    );
+  }
+});
+
 test('success normalization supports Unicode, empty context, no citations, and candidate IDs', async () => {
   const candidates = Array.from({ length: openAiProviderLimits.maxCitationIds }, (_, index) =>
     index === 0 ? 'cite_fabricated' : `cite_${index}`,

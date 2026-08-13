@@ -5,6 +5,7 @@ import { after, beforeEach, test } from 'node:test';
 import { PrismaPg } from '@prisma/adapter-pg';
 
 import {
+  AiKnowledgeActionType,
   AiConversationStatus,
   AiMessageRole,
   AiRunStatus,
@@ -23,8 +24,10 @@ import {
   AiConversationValidationError,
   createAiConversation,
   getAiConversation,
+  listKnowledgeDocumentAiActions,
   listAiConversations,
   retryAiRun,
+  runKnowledgeDocumentAiAction,
   setAiConversationArchived,
   submitAiMessage,
   type AiConversationDependencies,
@@ -38,7 +41,7 @@ import {
   executeKnowledgeChunkingJob,
   requestKnowledgeDocumentChunking,
 } from '../knowledge/knowledge-chunking';
-import { createKnowledgeDocument } from '../knowledge/knowledge-documents';
+import { createKnowledgeDocument, updateKnowledgeDocument } from '../knowledge/knowledge-documents';
 import {
   executeKnowledgeEmbeddingJob,
   requestKnowledgeChunkSetEmbedding,
@@ -289,6 +292,156 @@ test('a grounded response persists immutable messages, snapshot, and exact citat
     prisma.aiMessage.update({ where: { id: assistant.id }, data: { content: 'changed' } }),
   );
   await assert.rejects(prisma.aiRunCitation.delete({ where: { id: snapshot.citations[0]!.id } }));
+});
+
+test('Knowledge AI actions use only one immutable version and persist direct citations and usage', async () => {
+  const f = await fixture();
+  const other = await fixture();
+  const document = await createKnowledgeDocument(prisma, f.ownerId, f.workspaceId, {
+    content: 'Original decision: adopt ORANGE with no stated owner or due date.',
+    title: 'Action source',
+  });
+  await updateKnowledgeDocument(prisma, f.ownerId, f.workspaceId, document.slug, 1, {
+    content: 'Current version contains BLUE only.',
+    title: 'Action source',
+  });
+  await createKnowledgeDocument(prisma, other.ownerId, other.workspaceId, {
+    content: 'Cross-workspace secret PURPLE.',
+    title: 'Other source',
+  });
+  let captured: LanguageModelRequest | undefined;
+  const provider: LanguageModelProvider = {
+    ...fakeModel,
+    generate: async (request) => {
+      captured = request;
+      return {
+        cachedInputTokens: 3,
+        citationIds: [request.citations[0]!.citationId, 'cite_fabricated'],
+        inputTokens: 80,
+        outputTokens: 20,
+        text: 'Summary\nThe document explicitly adopts ORANGE.',
+        totalTokens: 100,
+      };
+    },
+  };
+
+  const result = await runKnowledgeDocumentAiAction(
+    prisma,
+    dependencies(provider),
+    f.ownerId,
+    f.workspaceId,
+    document.slug,
+    1,
+    AiKnowledgeActionType.SUMMARIZE,
+  );
+
+  assert.equal(result.run.status, AiRunStatus.SUCCEEDED);
+  assert.equal(result.run.knowledgeActionType, AiKnowledgeActionType.SUMMARIZE);
+  assert.ok(result.run.knowledgeDocumentVersionId);
+  assert.equal(result.run.inputTokens, 80);
+  assert.equal(result.run.cachedInputTokens, 3);
+  assert.equal(result.run.outputTokens, 20);
+  assert.equal(result.run.totalTokens, 100);
+  assert.equal(captured?.responseFormat, 'knowledge_summary');
+  assert.match(captured?.context ?? '', /ORANGE/u);
+  assert.doesNotMatch(captured?.context ?? '', /BLUE|PURPLE/u);
+  assert.equal(captured?.history.length, 0);
+  const citation = await prisma.aiRunCitation.findFirstOrThrow({
+    where: { snapshot: { runId: result.run.id } },
+  });
+  assert.equal(citation.chunkSetId, null);
+  assert.equal(citation.documentSlug, document.slug);
+  assert.equal(citation.documentVersion, 1);
+  assert.equal(citation.sourceId, document.id);
+  assert.deepEqual(result.run.referencedCitationIds, [citation.citationId]);
+  const listed = await listKnowledgeDocumentAiActions(
+    prisma,
+    f.ownerId,
+    f.workspaceId,
+    document.slug,
+    1,
+  );
+  assert.equal(listed[0]?.id, result.run.id);
+  assert.equal(
+    listed[0]?.assistantMessage?.content,
+    'Summary\nThe document explicitly adopts ORANGE.',
+  );
+});
+
+test('Knowledge AI actions enforce permissions, tenancy, and exact-source retry', async () => {
+  const f = await fixture();
+  const member = await add(f, WorkspaceRole.MEMBER);
+  const viewer = await add(f, WorkspaceRole.VIEWER);
+  const other = await fixture();
+  const document = await createKnowledgeDocument(prisma, f.ownerId, f.workspaceId, {
+    content: 'Risk: deployment may be delayed.',
+    title: 'Scoped risk',
+  });
+  const failing: LanguageModelProvider = {
+    ...fakeModel,
+    generate: async () => {
+      throw new LanguageModelProviderError('private provider failure', 'provider_timeout', true);
+    },
+  };
+  const failed = await runKnowledgeDocumentAiAction(
+    prisma,
+    dependencies(failing),
+    member,
+    f.workspaceId,
+    document.slug,
+    1,
+    AiKnowledgeActionType.IDENTIFY_RISKS,
+  );
+  assert.equal(failed.run.status, AiRunStatus.FAILED);
+
+  let retriedRequest: LanguageModelRequest | undefined;
+  const retryProvider: LanguageModelProvider = {
+    ...fakeModel,
+    generate: async (request) => {
+      retriedRequest = request;
+      return {
+        citationIds: request.citations.map((citation) => citation.citationId),
+        text: 'Risks\n1. Deployment may be delayed.',
+      };
+    },
+  };
+  const retried = await retryAiRun(
+    prisma,
+    dependencies(retryProvider),
+    member,
+    f.workspaceId,
+    failed.run.id,
+  );
+  assert.equal(retried.status, AiRunStatus.SUCCEEDED);
+  assert.equal(retried.knowledgeActionType, AiKnowledgeActionType.IDENTIFY_RISKS);
+  assert.equal(retried.knowledgeDocumentVersionId, failed.run.knowledgeDocumentVersionId);
+  assert.equal(retriedRequest?.responseFormat, 'knowledge_risks');
+  assert.match(retriedRequest?.context ?? '', /deployment may be delayed/u);
+
+  await assert.rejects(
+    runKnowledgeDocumentAiAction(
+      prisma,
+      dependencies(),
+      viewer,
+      f.workspaceId,
+      document.slug,
+      1,
+      AiKnowledgeActionType.SUMMARIZE,
+    ),
+    AiConversationAuthorizationError,
+  );
+  await assert.rejects(
+    runKnowledgeDocumentAiAction(
+      prisma,
+      dependencies(),
+      other.ownerId,
+      other.workspaceId,
+      document.slug,
+      1,
+      AiKnowledgeActionType.SUMMARIZE,
+    ),
+    AiConversationNotFoundError,
+  );
 });
 
 test('successful runs persist tenancy-scoped provider usage and estimated cost', async () => {

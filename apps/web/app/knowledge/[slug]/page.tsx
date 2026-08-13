@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
+import { listKnowledgeDocumentAiActions } from '../../../../../database/ai/ai-conversations';
 import {
   KnowledgeNotFoundError,
   getKnowledgeDocument,
@@ -37,6 +38,7 @@ import { KnowledgeAttachmentUpload } from '@/components/knowledge/knowledge-atta
 import { KnowledgeChunkingControl } from '@/components/knowledge/knowledge-chunking-control';
 import { KnowledgeEmbeddingControl } from '@/components/knowledge/knowledge-embedding-control';
 import { KnowledgeDocumentLifecycle } from '@/components/knowledge/knowledge-document-lifecycle';
+import { KnowledgeAiActions } from '@/components/knowledge/knowledge-ai-actions';
 import { MarkdownDocument } from '@/components/knowledge/markdown-document';
 import { Card } from '@/components/ui/card';
 import { requireCurrentUser } from '@/lib/auth/current-user';
@@ -171,14 +173,20 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
     chunking.document?.chunkSet?.id,
     ...Object.values(chunking.attachments).map((summary) => summary?.chunkSet?.id),
   ].filter((id): id is string => Boolean(id));
-  const embeddings = await getKnowledgeEmbeddingOverview(
-    prisma,
-    user.id,
-    workspace.id,
-    chunkSetIds,
-  );
-
   const isArchived = document.status === KnowledgeDocumentStatus.ARCHIVED;
+  const canUseAi = hasWorkspaceCapability(workspace.role, 'ai.use');
+  const [embeddings, aiActions] = await Promise.all([
+    getKnowledgeEmbeddingOverview(prisma, user.id, workspace.id, chunkSetIds),
+    canUseAi && !isArchived
+      ? listKnowledgeDocumentAiActions(
+          prisma,
+          user.id,
+          workspace.id,
+          document.slug,
+          document.version,
+        )
+      : Promise.resolve([]),
+  ]);
   const author = document.author.displayName ?? document.author.email ?? 'Unknown author';
   const activeAttachments = attachments.filter(
     (attachment) => attachment.status === KnowledgeAttachmentStatus.ACTIVE,
@@ -237,6 +245,15 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
         <p className="mt-6 rounded-control bg-accent-soft px-3 py-2 text-sm text-accent">
           This document is archived and excluded from the normal knowledge list.
         </p>
+      ) : null}
+      {canUseAi && !isArchived ? (
+        <KnowledgeAiActions
+          documentTitle={document.title}
+          runs={aiActions}
+          slug={document.slug}
+          version={document.version}
+          view="document"
+        />
       ) : null}
       <Card className="mt-6">
         <div className="mb-5 flex flex-col justify-between gap-3 border-b border-border pb-4 sm:flex-row sm:items-center">

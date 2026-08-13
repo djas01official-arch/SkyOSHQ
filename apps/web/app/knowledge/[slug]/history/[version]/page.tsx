@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
+import { listKnowledgeDocumentAiActions } from '../../../../../../../database/ai/ai-conversations';
 import {
   KnowledgeNotFoundError,
   getKnowledgeDocumentVersion,
@@ -8,6 +9,7 @@ import {
 import { KnowledgeDocumentStatus } from '../../../../../../../database/generated/client/client';
 
 import { restoreKnowledgeDocumentVersionAction } from '@/app/knowledge/actions';
+import { KnowledgeAiActions } from '@/components/knowledge/knowledge-ai-actions';
 import { KnowledgeVersionRestore } from '@/components/knowledge/knowledge-version-restore';
 import { MarkdownDocument } from '@/components/knowledge/markdown-document';
 import { Card } from '@/components/ui/card';
@@ -54,6 +56,18 @@ export default async function KnowledgeVersionPage({ params }: KnowledgeVersionP
     document.status === KnowledgeDocumentStatus.ACTIVE &&
     document.version !== version.versionNumber &&
     hasWorkspaceCapability(workspace.role, 'knowledge.write');
+  const canUseAi =
+    document.status === KnowledgeDocumentStatus.ACTIVE &&
+    hasWorkspaceCapability(workspace.role, 'ai.use');
+  const aiActions = canUseAi
+    ? await listKnowledgeDocumentAiActions(
+        prisma,
+        user.id,
+        workspace.id,
+        document.slug,
+        version.versionNumber,
+      )
+    : [];
 
   return (
     <div className="mx-auto max-w-4xl">
@@ -84,6 +98,16 @@ export default async function KnowledgeVersionPage({ params }: KnowledgeVersionP
           />
         ) : null}
       </div>
+
+      {canUseAi ? (
+        <KnowledgeAiActions
+          documentTitle={version.title}
+          runs={aiActions}
+          slug={document.slug}
+          version={version.versionNumber}
+          view="version"
+        />
+      ) : null}
 
       <Card className="mt-6">
         <MarkdownDocument content={version.markdownContent} />

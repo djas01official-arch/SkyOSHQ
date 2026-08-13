@@ -19,10 +19,18 @@ export type LanguageModelHistoryMessage = Readonly<{
   role: 'assistant' | 'user';
 }>;
 
+export type LanguageModelResponseFormat =
+  | 'grounded_answer'
+  | 'knowledge_summary'
+  | 'knowledge_action_items'
+  | 'knowledge_risks'
+  | 'knowledge_key_decisions';
+
 export type LanguageModelRequest = Readonly<{
   context: string;
   citations: readonly LanguageModelCitationInput[];
   history: readonly LanguageModelHistoryMessage[];
+  responseFormat?: LanguageModelResponseFormat;
   userMessage: string;
 }>;
 

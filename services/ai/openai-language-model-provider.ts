@@ -6,6 +6,11 @@ import {
   type LanguageModelRequest,
   type LanguageModelResponse,
 } from './language-model-provider';
+import {
+  KnowledgeActionResponseError,
+  knowledgeActionResponseSchema,
+  parseKnowledgeActionResponse,
+} from './knowledge-action-response';
 
 const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const OPENAI_PROVIDER_KEY = 'openai';
@@ -146,7 +151,10 @@ function hasRefusal(response: { output?: unknown }): boolean {
   });
 }
 
-function parseStructuredOutput(outputText: string): { answer: string; citationIds: string[] } {
+function parseStructuredOutput(
+  outputText: string,
+  format: NonNullable<LanguageModelRequest['responseFormat']>,
+): { answer: string; citationIds: string[] } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(outputText);
@@ -155,6 +163,20 @@ function parseStructuredOutput(outputText: string): { answer: string; citationId
       'The language model returned an invalid structured response.',
       'provider_output_invalid',
     );
+  }
+  if (format !== 'grounded_answer') {
+    try {
+      const result = parseKnowledgeActionResponse(parsed, format);
+      return { answer: result.text, citationIds: result.citationIds };
+    } catch (error) {
+      if (error instanceof KnowledgeActionResponseError) {
+        throw new LanguageModelProviderError(
+          'The language model returned an invalid structured response.',
+          'provider_output_invalid',
+        );
+      }
+      throw error;
+    }
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new LanguageModelProviderError(
@@ -359,6 +381,8 @@ export class OpenAILanguageModelProvider implements LanguageModelProvider {
     options: Readonly<{ signal?: AbortSignal }> = {},
   ): Promise<LanguageModelResponse> {
     validateInput(request);
+    const responseFormat = request.responseFormat ?? 'grounded_answer';
+    const actionSchema = knowledgeActionResponseSchema(responseFormat);
     const startedAt = this.#clock.now();
     const deadlineAt = startedAt + this.timeoutMs;
     const controller = new AbortController();
@@ -404,8 +428,8 @@ export class OpenAILanguageModelProvider implements LanguageModelProvider {
               store: false,
               text: {
                 format: {
-                  name: 'skyos_grounded_answer',
-                  schema: RESPONSE_SCHEMA,
+                  name: `skyos_${responseFormat}`,
+                  schema: actionSchema ?? RESPONSE_SCHEMA,
                   strict: true,
                   type: 'json_schema',
                 },
@@ -431,7 +455,7 @@ export class OpenAILanguageModelProvider implements LanguageModelProvider {
               'provider_model_mismatch',
             );
           }
-          const output = parseStructuredOutput(response.output_text);
+          const output = parseStructuredOutput(response.output_text, responseFormat);
           const inputTokens = safeInteger(response.usage?.input_tokens);
           const reportedCachedInputTokens = safeInteger(
             response.usage?.input_tokens_details?.cached_tokens,

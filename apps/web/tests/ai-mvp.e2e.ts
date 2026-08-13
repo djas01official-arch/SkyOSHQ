@@ -5,6 +5,7 @@ import type { TestContext } from 'node:test';
 import { createAiConversation } from '../../../database/ai/ai-conversations';
 import { createWorkspaceForOrganization } from '../../../database/context/workspace-creation';
 import {
+  AiKnowledgeActionType,
   AiMessageRole,
   AiRunStatus,
   MembershipStatus,
@@ -253,6 +254,57 @@ export async function runAiMvpE2eScenario(
     assert.match(usagePage, /Estimated cost this month/u);
     assert.ok(usagePage.includes(`data-ai-usage-run="${groundedRun.id}"`));
     assert.match(usagePage, /Auth E2E ai-owner/u);
+
+    const knowledgePath = `/knowledge/${allowedSource.document.slug}`;
+    const knowledgePage = await loadHtml(ownerJar, knowledgePath);
+    for (const action of [
+      'SUMMARIZE',
+      'EXTRACT_ACTION_ITEMS',
+      'IDENTIFY_RISKS',
+      'EXTRACT_KEY_DECISIONS',
+    ]) {
+      assert.ok(knowledgePage.includes(`data-knowledge-ai-action="${action}"`));
+    }
+    const actionResponse = await submitServerActionForm(
+      ownerJar,
+      harness.baseUrl,
+      knowledgePath,
+      knowledgePage,
+      { markerName: 'data-knowledge-ai-action', markerValue: 'SUMMARIZE' },
+    );
+    const actionRedirect = harness.getRedirectUrl(actionResponse);
+    assert.equal(actionRedirect.pathname, knowledgePath);
+    assert.equal(actionRedirect.hash, '#ai-actions');
+    const actionRun = await harness.prisma.aiRun.findFirstOrThrow({
+      where: {
+        knowledgeActionType: AiKnowledgeActionType.SUMMARIZE,
+        requestedByUserId: owner.id,
+        workspaceId: workspaceAId,
+      },
+      include: { retrievalSnapshot: { include: { citations: true } } },
+      orderBy: { createdAt: 'desc' },
+    });
+    assert.equal(actionRun.status, AiRunStatus.SUCCEEDED);
+    assert.ok(actionRun.inputTokens);
+    assert.ok(actionRun.outputTokens);
+    assert.ok(actionRun.retrievalSnapshot?.citations.length);
+    assert.ok(
+      actionRun.retrievalSnapshot?.citations.every(
+        (citation) =>
+          citation.chunkSetId === null &&
+          citation.documentSlug === allowedSource.document.slug &&
+          citation.documentVersion === allowedSource.document.version,
+      ),
+    );
+    const actionPage = await loadHtml(ownerJar, knowledgePath);
+    assert.ok(actionPage.includes(`data-knowledge-ai-run="${actionRun.id}"`));
+    assert.match(actionPage, /Grounded response/u);
+    assert.ok(
+      actionPage.includes(
+        `href="/knowledge/${allowedSource.document.slug}/history/${allowedSource.document.version}"`,
+      ),
+    );
+    assert.equal(actionPage.includes(forbiddenMarker), false);
 
     const crossWorkspaceConversationPath = `/ai/${workspaceBConversation.id}`;
     const persistenceBeforeDeniedRead = await readAiPersistence(harness.prisma);
