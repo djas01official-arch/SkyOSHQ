@@ -45,6 +45,7 @@ pnpm build        # Run build tasks in all workspaces that define one
 pnpm dev          # Run development tasks in all workspaces that define one
 pnpm db:generate  # Generate the ignored Prisma Client from the committed schema
 pnpm test:domain  # Test the application-owned role and permission policy
+pnpm test:ai:provider # Test local/OpenAI provider mapping entirely offline
 pnpm test:e2e     # Test authentication, tenancy, Knowledge, Tasks, and AI through real HTTP
 pnpm test:auth:e2e # Compatibility alias for the same black-box application suite
 ```
@@ -412,7 +413,15 @@ Authorized non-viewer workspace users can inspect selected chunks, citations, sc
 
 ## AI conversation foundation
 
-The `/ai` workspace provides owner-scoped conversations backed by the grounded retrieval boundary. `AI_PROVIDER=local` selects a deterministic, network-free adapter only in development and tests; CI requires no external credentials or paid requests. Production resolves to a safe unavailable provider until a reviewed real adapter is installed, so an accepted message produces a durable failed run rather than an invented answer or a leaked configuration error.
+The `/ai` workspace provides owner-scoped conversations backed by the grounded retrieval boundary. `AI_PROVIDER=local` selects the deterministic, network-free adapter only in development and tests. Production can select the server-only OpenAI Responses adapter with explicit configuration:
+
+```sh
+AI_PROVIDER=openai
+AI_MODEL=gpt-5.6-terra
+OPENAI_API_KEY=<server-secret>
+```
+
+`OPENAI_API_KEY` must come from the production secret manager and must never use a `NEXT_PUBLIC_` prefix. Blank values, documented placeholders, unknown providers, and every model other than the explicitly approved `gpt-5.6-terra` fail closed. Production never falls back to the deterministic provider, while non-production OpenAI execution requires a deliberately injected offline transport so automated tests cannot contact the real API. CI continues to use `AI_PROVIDER=local` and requires no OpenAI credential or paid request.
 
 - User and assistant messages, AI runs, exact retrieval snapshots, and citation rows are append-only. Database constraints and triggers enforce workspace/source consistency, legal run transitions, excerpt checksums, and snapshot citation counts.
 - Message acceptance updates conversation recency/title and creates the processing run in one database transaction. The external provider call occurs afterward and cannot be database-atomic; success commits the assistant message, exact retrieval snapshot, citations, and terminal run state together, while failure records only a safe failed-run state.
@@ -420,10 +429,12 @@ The `/ai` workspace provides owner-scoped conversations backed by the grounded r
 - A failed generation retains its user message. Retry creates a new run for that same immutable message and cannot create two concurrent runs for it.
 - Conversations are visible only to their owner in the effective workspace, require `ai.use`, and support archive/restore. Viewers are denied. Message length, provider input/output/time, and ten requests per user/workspace minute are bounded.
 - Each model request includes at most the newest 12 complete prior messages and at most 8,000 prior-message characters, ordered chronologically. The current user message remains separate, and retrieved Knowledge remains bounded untrusted reference context.
+- OpenAI calls use the Responses API with `store: false`, a strict `{ answer, citationIds }` JSON Schema, a 1,200-token output cap, no tools or hosted retrieval, and no provider-hosted conversation state. SkyOS disables SDK retries and owns at most two transient retries within one 45-second aggregate deadline.
+- The SDK does not expose an independent connection-only timeout through the selected `fetch` abstraction, so SkyOS does not misuse its request timeout as a five-second connection budget. The shared 45-second abort deadline is the hard bound across request execution, response consumption, retries, and backoff.
 - When retrieval returns nothing, the provider stores an explicit no-grounded-context response with no citations. Retrieved content remains untrusted JSON data and cannot change the provider boundary.
 - The UI includes conversation list/open/new, composer, pending/failure/retry states, archive/restore, assistant messages, and links for validated citations. Streaming is intentionally deferred.
 
-No external language-model adapter is installed. `AI_PROVIDER` cannot be selected by browser input, the deterministic provider is rejected in production runtime, and provider credentials, hidden prompts, raw vectors, and full upstream payloads are not stored.
+`AI_PROVIDER` and `AI_MODEL` are trusted server configuration and cannot be selected by browser input. Provider credentials, hidden prompts, raw vectors, and full upstream payloads are not stored. Run `pnpm test:ai:provider` to exercise the real SDK serialization, response parsing, error mapping, retries, and cancellation against injected in-memory HTTP responses; the command makes zero network requests.
 
 ## Repository structure
 

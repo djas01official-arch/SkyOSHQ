@@ -1,3 +1,5 @@
+import { OpenAILanguageModelProvider } from './openai-language-model-provider';
+
 export type LanguageModelProviderDescriptor = Readonly<{
   maxInputCharacters: number;
   maxOutputCharacters: number;
@@ -25,10 +27,15 @@ export type LanguageModelRequest = Readonly<{
 }>;
 
 export type LanguageModelResponse = Readonly<{
+  attemptCount?: number;
   citationIds: readonly string[];
+  durationMs?: number;
   inputTokens?: number;
+  modelKey?: string;
   outputTokens?: number;
+  providerRequestId?: string;
   text: string;
+  totalTokens?: number;
 }>;
 
 export interface LanguageModelProvider extends LanguageModelProviderDescriptor {
@@ -39,13 +46,28 @@ export interface LanguageModelProvider extends LanguageModelProviderDescriptor {
 }
 
 export class LanguageModelProviderError extends Error {
+  readonly attempts?: number;
   readonly code: string;
+  readonly providerRequestId?: string;
   readonly retryable: boolean;
+  readonly status?: number;
 
-  constructor(message: string, code: string, retryable = false) {
+  constructor(
+    message: string,
+    code: string,
+    retryable = false,
+    metadata: Readonly<{
+      attempts?: number;
+      providerRequestId?: string;
+      status?: number;
+    }> = {},
+  ) {
     super(message);
+    this.attempts = metadata.attempts;
     this.code = code;
+    this.providerRequestId = metadata.providerRequestId;
     this.retryable = retryable;
+    this.status = metadata.status;
   }
 }
 
@@ -139,11 +161,16 @@ class UnavailableLanguageModelProvider implements LanguageModelProvider {
   readonly maxInputCharacters = 20_000;
   readonly maxOutputCharacters = 2_000;
   readonly timeoutMs = 1;
+  readonly #code: string;
+
+  constructor(code = 'provider_not_configured') {
+    this.#code = code;
+  }
 
   async generate(): Promise<never> {
     throw new LanguageModelProviderError(
       'No production language-model provider is configured.',
-      'provider_not_configured',
+      this.#code,
     );
   }
 }
@@ -165,12 +192,16 @@ export function createDefaultLanguageModelProviderRegistry(
   options: Readonly<{
     configuredProvider?: string;
     deterministicFailureMessage?: string;
+    model?: string;
+    openAiApiKey?: string;
+    openAiFetch?: typeof globalThis.fetch;
     runtime?: string;
   }> = {},
 ): LanguageModelProviderRegistry {
   const configuredProvider = options.configuredProvider ?? process.env.AI_PROVIDER;
   const runtime = options.runtime ?? process.env.NODE_ENV;
-  const key = configuredProvider?.trim().toLowerCase();
+  const key =
+    configuredProvider === undefined ? undefined : configuredProvider.trim().toLowerCase();
 
   if ((key === undefined || key === 'local') && runtime !== 'production') {
     return new LanguageModelProviderRegistry(
@@ -180,5 +211,46 @@ export function createDefaultLanguageModelProviderRegistry(
     );
   }
 
-  return new LanguageModelProviderRegistry(new UnavailableLanguageModelProvider());
+  if (key === 'openai') {
+    const model = (options.model ?? process.env.AI_MODEL)?.trim();
+    const apiKey = (options.openAiApiKey ?? process.env.OPENAI_API_KEY)?.trim();
+    if (!model || !apiKey) {
+      return new LanguageModelProviderRegistry(
+        new UnavailableLanguageModelProvider('provider_configuration_invalid'),
+      );
+    }
+    if (runtime !== 'production' && !options.openAiFetch) {
+      return new LanguageModelProviderRegistry(
+        new UnavailableLanguageModelProvider('provider_network_disabled'),
+      );
+    }
+    try {
+      return new LanguageModelProviderRegistry(
+        new OpenAILanguageModelProvider({
+          apiKey,
+          fetch: options.openAiFetch,
+          model,
+          runtime,
+        }),
+      );
+    } catch (error) {
+      if (
+        error instanceof LanguageModelProviderError &&
+        error.code === 'provider_configuration_invalid'
+      ) {
+        return new LanguageModelProviderRegistry(
+          new UnavailableLanguageModelProvider('provider_configuration_invalid'),
+        );
+      }
+      throw error;
+    }
+  }
+
+  return new LanguageModelProviderRegistry(
+    new UnavailableLanguageModelProvider(
+      key === 'local' || key === undefined
+        ? 'provider_not_configured'
+        : 'provider_configuration_invalid',
+    ),
+  );
 }
