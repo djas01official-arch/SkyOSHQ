@@ -9,7 +9,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { Icon } from '@/components/ui/icon';
 import { PageHeader } from '@/components/ui/page-header';
 import { requireCurrentUser } from '@/lib/auth/current-user';
-import { requireWorkspaceCapability } from '@/lib/organization-context';
+import { hasWorkspaceCapability, requireWorkspaceCapability } from '@/lib/organization-context';
 import { prisma } from '@/lib/prisma';
 
 export default async function AiPage() {
@@ -38,10 +38,15 @@ export default async function AiPage() {
         eyebrow="Workspace AI"
         title="AI"
       />
-      <div className="mb-5 flex justify-end">
+      <div className="mb-5 flex flex-wrap justify-end gap-4">
         <Link className="text-sm font-medium text-accent hover:underline" href="/ai/retrieval">
           Open retrieval inspector
         </Link>
+        {hasWorkspaceCapability(workspace.role, 'workspace.members.read') ? (
+          <Link className="text-sm font-medium text-accent hover:underline" href="/ai/usage">
+            Open usage and cost
+          </Link>
+        ) : null}
       </div>
       <div className="grid gap-3">
         {active.map((conversation) => (

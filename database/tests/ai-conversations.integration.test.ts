@@ -30,6 +30,11 @@ import {
   type AiConversationDependencies,
 } from '../ai/ai-conversations';
 import {
+  AiUsageAuthorizationError,
+  getAiUsageDashboard,
+  getUtcAiUsageBoundaries,
+} from '../ai/ai-usage';
+import {
   executeKnowledgeChunkingJob,
   requestKnowledgeDocumentChunking,
 } from '../knowledge/knowledge-chunking';
@@ -192,6 +197,61 @@ async function knowledge(f: Awaited<ReturnType<typeof fixture>>, content: string
   return { document, set };
 }
 
+type UsageRunInput = Readonly<{
+  cacheWriteInputTokens?: number | null;
+  cachedInputTokens?: number | null;
+  createdAt: Date;
+  estimatedCostUsd?: string | null;
+  inputTokens?: number | null;
+  modelKey?: string;
+  outputTokens?: number | null;
+  status?: AiRunStatus;
+  totalTokens?: number | null;
+}>;
+
+async function createUsageRun(f: Awaited<ReturnType<typeof fixture>>, input: UsageRunInput) {
+  const conversation = await createAiConversation(
+    prisma,
+    f.ownerId,
+    f.workspaceId,
+    `Usage fixture ${randomUUID()}`,
+  );
+  const message = await prisma.aiMessage.create({
+    data: {
+      authorUserId: f.ownerId,
+      content: `Usage request ${randomUUID()}`,
+      conversationId: conversation.id,
+      createdAt: input.createdAt,
+      role: AiMessageRole.USER,
+      workspaceId: f.workspaceId,
+    },
+  });
+  const status = input.status ?? AiRunStatus.SUCCEEDED;
+  return prisma.aiRun.create({
+    data: {
+      cacheWriteInputTokens: status === AiRunStatus.SUCCEEDED ? input.cacheWriteInputTokens : null,
+      cachedInputTokens: status === AiRunStatus.SUCCEEDED ? input.cachedInputTokens : null,
+      completedAt: input.createdAt,
+      conversationId: conversation.id,
+      createdAt: input.createdAt,
+      durationMs: 1,
+      estimatedCostUsd: status === AiRunStatus.SUCCEEDED ? input.estimatedCostUsd : null,
+      failureCode: status === AiRunStatus.FAILED ? 'usage_dashboard_test_failure' : null,
+      failureMessage: status === AiRunStatus.FAILED ? 'Safe test failure.' : null,
+      inputTokens: status === AiRunStatus.SUCCEEDED ? input.inputTokens : null,
+      modelKey: input.modelKey ?? 'gpt-5.6-terra',
+      modelVersion: 'usage-dashboard-test-v1',
+      outputTokens: status === AiRunStatus.SUCCEEDED ? input.outputTokens : null,
+      providerKey: 'openai',
+      requestedByUserId: f.ownerId,
+      status,
+      totalTokens: status === AiRunStatus.SUCCEEDED ? input.totalTokens : null,
+      userMessageId: message.id,
+      workspaceId: f.workspaceId,
+    },
+  });
+}
+
 beforeEach(reset);
 after(async () => {
   try {
@@ -297,6 +357,136 @@ test('successful runs preserve unknown usage and cost as null', async () => {
   assert.equal(run.outputTokens, null);
   assert.equal(run.totalTokens, null);
   assert.equal(run.estimatedCostUsd, null);
+});
+
+test('AI usage boundaries are UTC and use inclusive starts with exclusive ends', () => {
+  assert.deepEqual(getUtcAiUsageBoundaries(new Date('2026-08-31T23:59:59.999Z')), {
+    monthEnd: new Date('2026-09-01T00:00:00.000Z'),
+    monthStart: new Date('2026-08-01T00:00:00.000Z'),
+    todayEnd: new Date('2026-09-01T00:00:00.000Z'),
+    todayStart: new Date('2026-08-31T00:00:00.000Z'),
+  });
+  assert.throws(() => getUtcAiUsageBoundaries(new Date(Number.NaN)));
+});
+
+test('AI usage aggregates successful workspace runs and preserves unknown telemetry', async () => {
+  const f = await fixture();
+  const other = await fixture();
+  await prisma.user.update({ where: { id: f.ownerId }, data: { displayName: 'Operations Owner' } });
+  const now = new Date('2026-08-13T12:00:00.000Z');
+
+  await createUsageRun(f, {
+    cacheWriteInputTokens: 20,
+    cachedInputTokens: 40,
+    createdAt: new Date('2026-08-01T00:00:00.000Z'),
+    estimatedCostUsd: '2',
+    inputTokens: 200,
+    outputTokens: 50,
+    totalTokens: 250,
+  });
+  await createUsageRun(f, {
+    cacheWriteInputTokens: 5,
+    cachedInputTokens: 10,
+    createdAt: new Date('2026-08-12T23:59:59.999Z'),
+    estimatedCostUsd: '0.75',
+    inputTokens: 75,
+    outputTokens: 25,
+    totalTokens: 100,
+  });
+  await createUsageRun(f, {
+    cacheWriteInputTokens: 10,
+    cachedInputTokens: 20,
+    createdAt: new Date('2026-08-13T00:00:00.000Z'),
+    estimatedCostUsd: '1.25',
+    inputTokens: 100,
+    outputTokens: 50,
+    totalTokens: 150,
+  });
+  const unknownCostRun = await createUsageRun(f, {
+    createdAt: new Date('2026-08-13T00:00:00.001Z'),
+    inputTokens: 10,
+    outputTokens: 5,
+    totalTokens: 15,
+  });
+  const failedRun = await createUsageRun(f, {
+    createdAt: new Date('2026-08-13T01:00:00.000Z'),
+    status: AiRunStatus.FAILED,
+  });
+  await createUsageRun(f, {
+    cacheWriteInputTokens: 9,
+    cachedInputTokens: 9,
+    createdAt: new Date('2026-07-31T23:59:59.999Z'),
+    estimatedCostUsd: '9',
+    inputTokens: 90,
+    outputTokens: 9,
+    totalTokens: 99,
+  });
+  await createUsageRun(f, {
+    cacheWriteInputTokens: 11,
+    cachedInputTokens: 11,
+    createdAt: new Date('2026-09-01T00:00:00.000Z'),
+    estimatedCostUsd: '11',
+    inputTokens: 110,
+    outputTokens: 11,
+    totalTokens: 121,
+  });
+  const otherWorkspaceRun = await createUsageRun(other, {
+    cacheWriteInputTokens: 99,
+    cachedInputTokens: 99,
+    createdAt: new Date('2026-08-13T02:00:00.000Z'),
+    estimatedCostUsd: '99',
+    inputTokens: 990,
+    modelKey: 'cross-workspace-model',
+    outputTokens: 99,
+    totalTokens: 1_089,
+  });
+
+  const result = await getAiUsageDashboard(prisma, f.ownerId, f.workspaceId, now);
+
+  assert.equal(result.workspaceId, f.workspaceId);
+  assert.equal(result.timeZone, 'UTC');
+  assert.deepEqual(result.summary, {
+    cacheWriteInputTokensMonth: 35,
+    cachedInputTokensMonth: 70,
+    estimatedCostMonthUsd: '4',
+    estimatedCostTodayUsd: '1.25',
+    incompleteUsageRunsMonth: 1,
+    inputTokensMonth: 385,
+    outputTokensMonth: 130,
+    successfulRunsMonth: 4,
+    successfulRunsToday: 2,
+    totalTokensMonth: 515,
+    unknownCostRunsMonth: 1,
+    unknownCostRunsToday: 1,
+  });
+  assert.ok(result.recentRuns.some((run) => run.id === unknownCostRun.id));
+  assert.ok(result.recentRuns.some((run) => run.id === failedRun.id && run.status === 'FAILED'));
+  assert.ok(result.recentRuns.every((run) => run.id !== otherWorkspaceRun.id));
+  assert.ok(result.recentRuns.every((run) => run.requestingUser.label === 'Operations Owner'));
+  assert.equal(result.recentRuns.find((run) => run.id === failedRun.id)?.estimatedCostUsd, null);
+});
+
+test('AI usage requires effective workspace administration permissions', async () => {
+  const f = await fixture();
+  const admin = await add(f, WorkspaceRole.ADMIN);
+  const member = await add(f, WorkspaceRole.MEMBER);
+  const viewer = await add(f, WorkspaceRole.VIEWER);
+  const other = await fixture();
+
+  await getAiUsageDashboard(prisma, f.ownerId, f.workspaceId);
+  await getAiUsageDashboard(prisma, admin, f.workspaceId);
+  await assert.rejects(
+    getAiUsageDashboard(prisma, member, f.workspaceId),
+    AiUsageAuthorizationError,
+  );
+  await assert.rejects(
+    getAiUsageDashboard(prisma, viewer, f.workspaceId),
+    AiUsageAuthorizationError,
+  );
+  await assert.rejects(
+    getAiUsageDashboard(prisma, other.ownerId, f.workspaceId),
+    AiUsageAuthorizationError,
+  );
 });
 
 test('long-context cached usage is retained without an unsupported cost estimate', async () => {

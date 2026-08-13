@@ -200,6 +200,7 @@ export async function runAiMvpE2eScenario(
     const aiPage = await loadHtml(ownerJar, '/ai');
     assert.match(aiPage, /No active conversations/u);
     assert.ok(aiPage.includes('data-ai-conversation-form="create"'));
+    assert.ok(aiPage.includes('href="/ai/usage"'));
     const createResponse = await submitServerActionForm(ownerJar, harness.baseUrl, '/ai', aiPage, {
       markerName: 'data-ai-conversation-form',
       markerValue: 'create',
@@ -247,6 +248,11 @@ export async function runAiMvpE2eScenario(
         groundedRun.retrievalSnapshot?.citations[0]?.citationId ?? '',
       ),
     );
+    const usagePage = await loadHtml(ownerJar, '/ai/usage');
+    assert.match(usagePage, /AI usage and cost/u);
+    assert.match(usagePage, /Estimated cost this month/u);
+    assert.ok(usagePage.includes(`data-ai-usage-run="${groundedRun.id}"`));
+    assert.match(usagePage, /Auth E2E ai-owner/u);
 
     const crossWorkspaceConversationPath = `/ai/${workspaceBConversation.id}`;
     const persistenceBeforeDeniedRead = await readAiPersistence(harness.prisma);
@@ -322,6 +328,24 @@ export async function runAiMvpE2eScenario(
     const failedPage = await loadHtml(ownerJar, conversationUrl.pathname);
     assert.ok(failedPage.includes(failedRun.failureMessage));
     assert.match(failedPage, /Retry/u);
+
+    const member = await harness.createIdentity('ai-member');
+    await addWorkspaceMember(
+      harness.prisma,
+      member,
+      organizationId,
+      workspaceAId,
+      WorkspaceRole.MEMBER,
+    );
+    const memberJar = harness.createJar();
+    harness.assertRedirectsTo(await harness.login(memberJar, member), '/ai');
+    assert.equal((await memberJar.request('/ai')).response.status, 200);
+    await assertStreamedRedirectTo(
+      (await memberJar.request('/ai/usage')).response,
+      '/ai/usage',
+      '/dashboard',
+      `data-ai-usage-run="${groundedRun.id}"`,
+    );
 
     const viewer = await harness.createIdentity('ai-viewer');
     await addWorkspaceMember(
