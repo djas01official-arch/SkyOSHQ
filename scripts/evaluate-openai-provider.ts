@@ -39,7 +39,7 @@ async function main(): Promise<void> {
     `Model ${provider.modelKey}; ${groundedAnswerEvaluationCorpus.length} sequential synthetic cases; no database access.`,
   );
   console.log(
-    `Pricing snapshot verified ${OPENAI_EVALUATION_PRICING.verifiedOn}: $${OPENAI_EVALUATION_PRICING.inputUsdPerMillionTokens}/1M input and $${OPENAI_EVALUATION_PRICING.outputUsdPerMillionTokens}/1M output tokens.`,
+    `Pricing snapshot verified ${OPENAI_EVALUATION_PRICING.verifiedOn}: $${OPENAI_EVALUATION_PRICING.inputUsdPerMillionTokens}/1M input, $${OPENAI_EVALUATION_PRICING.cachedInputUsdPerMillionTokens}/1M cached input, and $${OPENAI_EVALUATION_PRICING.outputUsdPerMillionTokens}/1M output tokens. Cached-input pricing is not used because the evaluator does not receive cached-token usage.`,
   );
   console.log(
     `Conservative planning ceiling including all three possible adapter attempts: ${dollars(maximumPlanningCost)}. Actual cost depends on provider usage and retry outcomes.`,

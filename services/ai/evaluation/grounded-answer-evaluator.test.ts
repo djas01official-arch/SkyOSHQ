@@ -199,7 +199,7 @@ test('offline evaluation aggregates usage, cost, citations, latency, and human-r
   );
   assert.deepEqual(report.latency, { maxMs: 40, medianMs: 20, minMs: 20, p95Ms: 40 });
   assert.deepEqual(report.usage, {
-    approximateCostUsd: 0.00066,
+    approximateCostUsd: 0.000825,
     inputTokens: 150,
     missingUsageCases: 0,
     outputTokens: 30,
@@ -293,9 +293,9 @@ test('serialized reports redact configured secret values and omit raw evaluation
 });
 
 test('cost and latency helpers remain deterministic', () => {
-  assert.equal(calculateTokenCost(3_000, 600), 0.0132);
+  assert.equal(calculateTokenCost(3_000, 600), 0.0165);
   assert.ok(
-    Math.abs(calculateConservativeEvaluationCost(12, 20_000, 1_200, 3) - 1.9584) <
+    Math.abs(calculateConservativeEvaluationCost(12, 20_000, 1_200, 3) - 2.448) <
       Number.EPSILON * 10,
   );
   assert.deepEqual(summarizeLatency([50, 10, 30, 20]), {

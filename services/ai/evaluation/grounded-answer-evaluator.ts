@@ -18,9 +18,10 @@ export const EVALUATION_SYSTEMIC_FAILURE_LIMIT = 3;
 export const EVALUATION_ANSWER_PREVIEW_CHARACTERS = 160;
 
 export const OPENAI_EVALUATION_PRICING = {
-  inputUsdPerMillionTokens: 2,
+  cachedInputUsdPerMillionTokens: 0.25,
+  inputUsdPerMillionTokens: 2.5,
   model: OPENAI_APPROVED_MODEL,
-  outputUsdPerMillionTokens: 12,
+  outputUsdPerMillionTokens: 15,
   source: 'https://developers.openai.com/api/docs/models/gpt-5.6-terra',
   verifiedOn: '2026-08-13',
 } as const;
