@@ -46,6 +46,7 @@ pnpm dev          # Run development tasks in all workspaces that define one
 pnpm db:generate  # Generate the ignored Prisma Client from the committed schema
 pnpm test:domain  # Test the application-owned role and permission policy
 pnpm test:ai:provider # Test local/OpenAI provider mapping entirely offline
+pnpm test:ai:eval # Test the grounded-answer evaluation harness entirely offline
 pnpm test:e2e     # Test authentication, tenancy, Knowledge, Tasks, and AI through real HTTP
 pnpm test:auth:e2e # Compatibility alias for the same black-box application suite
 ```
@@ -435,6 +436,18 @@ OPENAI_API_KEY=<server-secret>
 - The UI includes conversation list/open/new, composer, pending/failure/retry states, archive/restore, assistant messages, and links for validated citations. Streaming is intentionally deferred.
 
 `AI_PROVIDER` and `AI_MODEL` are trusted server configuration and cannot be selected by browser input. Provider credentials, hidden prompts, raw vectors, and full upstream payloads are not stored. Run `pnpm test:ai:provider` to exercise the real SDK serialization, response parsing, error mapping, retries, and cancellation against injected in-memory HTTP responses; the command makes zero network requests.
+
+### OpenAI staging evaluation
+
+SkyOS includes a bounded 12-case synthetic grounded-answer corpus and an operator-only live evaluator. Normal development, CI, database tests, E2E, checks, and builds never invoke it. The evaluator runs sequentially through the production OpenAI adapter, refuses CI environments, requires the approved model plus an explicit spend acknowledgement, reports deterministic structural/citation/security checks, and leaves groundedness and usefulness for human review.
+
+Before any credentialed run, complete the [staging evaluation and data-control checklist](./docs/ai/openai-staging-evaluation.md). Inject the key from a staging secret manager, never from a committed file, and then run:
+
+```sh
+AI_PROVIDER=openai AI_MODEL=gpt-5.6-terra SKYOS_ALLOW_LIVE_AI_EVAL=1 pnpm ai:eval:openai
+```
+
+This command assumes `OPENAI_API_KEY` was already injected into the shell by the staging secret manager. PowerShell operators should set the same four server-side environment variables for the current process, run `pnpm ai:eval:openai`, and remove them afterward. The command displays a conservative pre-run planning estimate and current pricing verification date. It writes a sanitized, ignored local report under `artifacts/ai-eval/`; reports contain full synthetic-case answers for manual review, so operators must still treat them as provider output and apply local retention policy. Passing hard checks means only that the candidate may proceed to broader staging after the documented human review—it never enables production automatically.
 
 ## Repository structure
 

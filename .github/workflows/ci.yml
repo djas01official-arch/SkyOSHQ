@@ -88,6 +88,9 @@ jobs:
       - name: Run domain policy tests
         run: pnpm test:domain
 
+      - name: Run offline AI evaluation-harness tests
+        run: pnpm test:ai:eval
+
       - name: Run monorepo quality checks
         run: pnpm check
 

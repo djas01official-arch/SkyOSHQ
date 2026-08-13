@@ -9,7 +9,7 @@ import {
 
 const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const OPENAI_PROVIDER_KEY = 'openai';
-const OPENAI_APPROVED_MODEL = 'gpt-5.6-terra';
+export const OPENAI_APPROVED_MODEL = 'gpt-5.6-terra';
 const OPENAI_MODEL_POLICY_VERSION = 'responses-json-schema-v1';
 const MAX_INPUT_CHARACTERS = 20_000;
 const MAX_OUTPUT_CHARACTERS = 2_000;
@@ -22,6 +22,11 @@ const BACKOFF_BASE_MS = 250;
 const BACKOFF_MAX_MS = 2_000;
 const PLACEHOLDER_API_KEY_PATTERN =
   /(?:^<.*>$|change[-_ ]?me|example|replace[-_ ]?with|your[-_ ]?key)/iu;
+
+export function isValidOpenAiApiKey(value: string): boolean {
+  const apiKey = value.trim();
+  return apiKey.length > 0 && !PLACEHOLDER_API_KEY_PATTERN.test(apiKey);
+}
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -303,11 +308,7 @@ export class OpenAILanguageModelProvider implements LanguageModelProvider {
 
   constructor(options: OpenAILanguageModelProviderOptions) {
     const apiKey = options.apiKey.trim();
-    if (
-      options.model !== OPENAI_APPROVED_MODEL ||
-      !apiKey ||
-      PLACEHOLDER_API_KEY_PATTERN.test(apiKey)
-    ) {
+    if (options.model !== OPENAI_APPROVED_MODEL || !isValidOpenAiApiKey(apiKey)) {
       throw new LanguageModelProviderError(
         'OpenAI provider configuration is invalid.',
         'provider_configuration_invalid',

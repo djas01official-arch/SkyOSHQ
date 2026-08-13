@@ -12,6 +12,7 @@ database/generated/
 .workers/
 parser-output/
 **/parser-output/
+artifacts/ai-eval/
 *.log
 *.tmp
 tmp/
