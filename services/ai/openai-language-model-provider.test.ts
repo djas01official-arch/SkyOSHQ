@@ -103,9 +103,21 @@ function jsonResponse(body: unknown, status = 200, headers: HeadersInit = {}): R
   });
 }
 
-function apiError(status: number, message = 'sensitive upstream details'): Response {
+function apiError(
+  status: number,
+  message = 'sensitive upstream details',
+  errorOverrides: Readonly<{ code?: string | null; type?: string }> = {},
+): Response {
   return jsonResponse(
-    { error: { code: null, message, param: null, type: 'provider_error' } },
+    {
+      error: {
+        code: null,
+        message,
+        param: null,
+        type: 'provider_error',
+        ...errorOverrides,
+      },
+    },
     status,
     { 'x-request-id': `req_error_${status}` },
   );
@@ -316,6 +328,38 @@ test('HTTP and connection failures normalize without leaking provider bodies or 
   assert.equal(error.retryable, true);
   assert.equal(error.message.includes(TEST_API_KEY), false);
   assert.equal(connection.calls.length, 3);
+});
+
+test('429 rate limits remain retryable while quota exhaustion fails without retrying', async () => {
+  const rateLimit = fakeFetch(() =>
+    apiError(429, `rate limit ${TEST_API_KEY}`, {
+      code: 'rate_limit_exceeded',
+      type: 'rate_limit_error',
+    }),
+  );
+  const rateLimitError = await providerError(
+    provider(rateLimit.fetch).generate(baseRequest),
+    'provider_rate_limited',
+  );
+  assert.equal(rateLimitError.retryable, true);
+  assert.equal(rateLimit.calls.length, 3);
+  assert.equal(rateLimitError.message.includes(TEST_API_KEY), false);
+
+  for (const errorIdentity of [
+    { code: null, type: 'insufficient_quota' },
+    { code: 'credit_balance_exhausted', type: 'provider_error' },
+  ]) {
+    const quota = fakeFetch(() => apiError(429, `quota ${TEST_API_KEY}`, errorIdentity));
+    const quotaError = await providerError(
+      provider(quota.fetch).generate(baseRequest),
+      'provider_quota_exhausted',
+    );
+    assert.equal(quotaError.retryable, false);
+    assert.equal(quotaError.status, 429);
+    assert.equal(quotaError.providerRequestId, 'req_error_429');
+    assert.equal(quotaError.message.includes(TEST_API_KEY), false);
+    assert.equal(quota.calls.length, 1);
+  }
 });
 
 test('SkyOS alone retries transient errors with deterministic bounded backoff', async () => {

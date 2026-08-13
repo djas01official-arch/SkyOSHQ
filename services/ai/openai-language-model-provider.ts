@@ -20,6 +20,11 @@ const MAX_AUTOMATIC_RETRIES = 2;
 const AGGREGATE_TIMEOUT_MS = 45_000;
 const BACKOFF_BASE_MS = 250;
 const BACKOFF_MAX_MS = 2_000;
+const OPENAI_QUOTA_ERROR_CODES = new Set([
+  'credit_balance_exhausted',
+  'organization_spend_limit_exceeded',
+  'project_spend_limit_exceeded',
+]);
 const PLACEHOLDER_API_KEY_PATTERN =
   /(?:^<.*>$|change[-_ ]?me|example|replace[-_ ]?with|your[-_ ]?key)/iu;
 
@@ -180,7 +185,17 @@ function errorStatus(error: unknown): number | undefined {
   return undefined;
 }
 
-function retryableStatus(status: number | undefined): boolean {
+function isQuotaExhaustion(error: unknown): boolean {
+  return (
+    error instanceof OpenAI.APIError &&
+    (error.type === 'insufficient_quota' ||
+      (typeof error.code === 'string' && OPENAI_QUOTA_ERROR_CODES.has(error.code)))
+  );
+}
+
+function isRetryableProviderError(error: unknown): boolean {
+  const status = errorStatus(error);
+  if (status === 429 && isQuotaExhaustion(error)) return false;
   return (
     status === 408 || status === 409 || status === 429 || (status !== undefined && status >= 500)
   );
@@ -270,6 +285,14 @@ function normalizedProviderError(
         metadata,
       );
     case 429:
+      if (isQuotaExhaustion(error)) {
+        return new LanguageModelProviderError(
+          'The language model provider quota is exhausted.',
+          'provider_quota_exhausted',
+          false,
+          metadata,
+        );
+      }
       return new LanguageModelProviderError(
         'The language model provider is rate limited.',
         'provider_rate_limited',
@@ -434,7 +457,7 @@ export class OpenAILanguageModelProvider implements LanguageModelProvider {
         } catch (error) {
           if (
             attempts > MAX_AUTOMATIC_RETRIES ||
-            (!isConnectionError(error) && !retryableStatus(errorStatus(error)))
+            (!isConnectionError(error) && !isRetryableProviderError(error))
           ) {
             throw normalizedProviderError(
               error,
