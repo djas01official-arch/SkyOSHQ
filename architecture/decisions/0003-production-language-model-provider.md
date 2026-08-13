@@ -333,7 +333,9 @@ The adapter must return the existing `LanguageModelProviderResponse`:
 
 - `text`: validated nonblank assistant text within the character limit;
 - `citationIds`: parsed candidate IDs only;
-- `inputTokens` and `outputTokens`: bounded nonnegative usage when present.
+- `inputTokens`, `cacheWriteInputTokens`, `cachedInputTokens`, `outputTokens`, and
+  `totalTokens`: bounded nonnegative usage when present; cache-write plus cached
+  input is a subset of input and total is input plus output.
 
 The registry descriptor supplies `providerKey=openai`, the configured model ID, and
 the approved adapter/model policy version. Total tokens are derived from input plus
@@ -343,12 +345,20 @@ Provider request ID, actual returned model, response status/incomplete reason, a
 normalized finish/refusal code must be captured for observability without leaking
 the OpenAI response object.
 
-The current persistence model already stores provider/model/version, input/output
-tokens, duration, and safe failure details. Persisting provider request ID or finish
-reason would require a small optional telemetry/schema extension in the adapter
-implementation task; it must not change authorization, message, citation, or retry
-semantics. Until then, request ID may be emitted to restricted structured logs and
-total tokens may be derived. Raw provider responses are never persisted.
+The persistence model stores provider/model/version,
+input/cache-write/cached-input/output/total tokens, fixed-precision estimated cost
+when exact model pricing is configured, bounded provider request ID, duration, and
+safe failure details. The extension does not change authorization, message,
+citation, or retry semantics. Unknown usage or pricing remains null, and raw
+provider responses are never persisted.
+
+The central pricing catalog treats more than 272,000 input tokens as long context:
+the full request uses 2x uncached-input and 1.5x output pricing, while exactly
+272,000 input tokens remains standard. The official model documentation does not
+state whether those multipliers also apply to cached reads or cache writes. Until
+OpenAI documents that billing rule, SkyOS preserves their usage but stores no cost
+estimate for a long-context request containing either category rather than
+inventing a price.
 
 ## Citation implications
 
@@ -395,7 +405,9 @@ First-pass cost controls are:
 - an initial provider `max_output_tokens` cap of 1,200 while preserving the existing
   2,000-character SkyOS response limit;
 - the existing per-user rate limit plus workspace-level operational monitoring;
-- persisted input/output usage when supplied and derived total usage;
+- persisted input/cache-write/cached-input/output usage when supplied, derived total
+  usage, and fixed-precision estimated cost from one dated application-owned pricing
+  catalog;
 - provider-dashboard budget alerts at 50%, 80%, and 100% of a business-approved
   monthly budget; and
 - an immediate global kill path by resolving production to the existing unavailable

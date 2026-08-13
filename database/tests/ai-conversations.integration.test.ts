@@ -231,6 +231,110 @@ test('a grounded response persists immutable messages, snapshot, and exact citat
   await assert.rejects(prisma.aiRunCitation.delete({ where: { id: snapshot.citations[0]!.id } }));
 });
 
+test('successful runs persist tenancy-scoped provider usage and estimated cost', async () => {
+  const f = await fixture();
+  const provider: LanguageModelProvider = {
+    ...fakeModel,
+    modelKey: 'gpt-5.6-terra',
+    modelVersion: 'responses-json-schema-v1',
+    providerKey: 'openai',
+    generate: async () => ({
+      cacheWriteInputTokens: 10,
+      cachedInputTokens: 20,
+      citationIds: [],
+      inputTokens: 100,
+      modelKey: 'gpt-5.6-terra',
+      outputTokens: 50,
+      providerRequestId: 'req_usage_test',
+      text: 'Usage telemetry response.',
+      totalTokens: 150,
+    }),
+  };
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+  const run = await submitAiMessage(
+    prisma,
+    dependencies(provider),
+    f.ownerId,
+    f.workspaceId,
+    conversation.id,
+    'record usage telemetry',
+  );
+
+  assert.equal(run.status, AiRunStatus.SUCCEEDED);
+  assert.equal(run.providerKey, 'openai');
+  assert.equal(run.modelKey, 'gpt-5.6-terra');
+  assert.equal(run.workspaceId, f.workspaceId);
+  assert.equal(run.requestedByUserId, f.ownerId);
+  assert.equal(run.inputTokens, 100);
+  assert.equal(run.cacheWriteInputTokens, 10);
+  assert.equal(run.cachedInputTokens, 20);
+  assert.equal(run.outputTokens, 50);
+  assert.equal(run.totalTokens, 150);
+  assert.equal(run.providerRequestId, 'req_usage_test');
+  assert.equal(run.estimatedCostUsd?.toString(), '0.00096125');
+});
+
+test('successful runs preserve unknown usage and cost as null', async () => {
+  const f = await fixture();
+  const provider: LanguageModelProvider = {
+    ...fakeModel,
+    generate: async () => ({ citationIds: [], text: 'No usage metadata response.' }),
+  };
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+  const run = await submitAiMessage(
+    prisma,
+    dependencies(provider),
+    f.ownerId,
+    f.workspaceId,
+    conversation.id,
+    'provider omitted usage metadata',
+  );
+
+  assert.equal(run.status, AiRunStatus.SUCCEEDED);
+  assert.equal(run.inputTokens, null);
+  assert.equal(run.cacheWriteInputTokens, null);
+  assert.equal(run.cachedInputTokens, null);
+  assert.equal(run.outputTokens, null);
+  assert.equal(run.totalTokens, null);
+  assert.equal(run.estimatedCostUsd, null);
+});
+
+test('long-context cached usage is retained without an unsupported cost estimate', async () => {
+  const f = await fixture();
+  const provider: LanguageModelProvider = {
+    ...fakeModel,
+    modelKey: 'gpt-5.6-terra',
+    providerKey: 'openai',
+    generate: async () => ({
+      cacheWriteInputTokens: 10,
+      cachedInputTokens: 20,
+      citationIds: [],
+      inputTokens: 272_001,
+      modelKey: 'gpt-5.6-terra',
+      outputTokens: 1_000,
+      text: 'Long-context cached usage response.',
+      totalTokens: 273_001,
+    }),
+  };
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+  const run = await submitAiMessage(
+    prisma,
+    dependencies(provider),
+    f.ownerId,
+    f.workspaceId,
+    conversation.id,
+    'retain unsupported long-context cached pricing',
+  );
+
+  assert.equal(run.status, AiRunStatus.SUCCEEDED);
+  assert.equal(run.inputTokens, 272_001);
+  assert.equal(run.cacheWriteInputTokens, 10);
+  assert.equal(run.cachedInputTokens, 20);
+  assert.equal(run.outputTokens, 1_000);
+  assert.equal(run.totalTokens, 273_001);
+  assert.equal(run.estimatedCostUsd, null);
+});
+
 test('fabricated provider citation ids are rejected while permitted ids remain', async () => {
   const f = await fixture();
   await knowledge(f, 'citation allowlist canary');
@@ -282,7 +386,9 @@ test('provider failure retains one user message and retry creates a new successf
   const failing: LanguageModelProvider = {
     ...fakeModel,
     generate: async () => {
-      throw new LanguageModelProviderError('secret upstream', 'provider_timeout', true);
+      throw new LanguageModelProviderError('secret upstream', 'provider_timeout', true, {
+        providerRequestId: 'req_failed_test',
+      });
     },
   };
   const failed = await submitAiMessage(
@@ -295,6 +401,13 @@ test('provider failure retains one user message and retry creates a new successf
   );
   assert.equal(failed.status, AiRunStatus.FAILED);
   assert.equal(failed.failureMessage, 'The AI provider could not complete this request.');
+  assert.equal(failed.providerRequestId, 'req_failed_test');
+  assert.equal(failed.inputTokens, null);
+  assert.equal(failed.cacheWriteInputTokens, null);
+  assert.equal(failed.cachedInputTokens, null);
+  assert.equal(failed.outputTokens, null);
+  assert.equal(failed.totalTokens, null);
+  assert.equal(failed.estimatedCostUsd, null);
   const retried = await retryAiRun(prisma, dependencies(), f.ownerId, f.workspaceId, failed.id);
   assert.equal(retried.status, AiRunStatus.SUCCEEDED);
   assert.equal(retried.userMessageId, failed.userMessageId);

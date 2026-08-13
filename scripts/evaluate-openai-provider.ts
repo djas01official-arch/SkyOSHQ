@@ -39,7 +39,7 @@ async function main(): Promise<void> {
     `Model ${provider.modelKey}; ${groundedAnswerEvaluationCorpus.length} sequential synthetic cases; no database access.`,
   );
   console.log(
-    `Pricing snapshot verified ${OPENAI_EVALUATION_PRICING.verifiedOn}: $${OPENAI_EVALUATION_PRICING.inputUsdPerMillionTokens}/1M input, $${OPENAI_EVALUATION_PRICING.cachedInputUsdPerMillionTokens}/1M cached input, and $${OPENAI_EVALUATION_PRICING.outputUsdPerMillionTokens}/1M output tokens. Cached-input pricing is not used because the evaluator does not receive cached-token usage.`,
+    `Pricing snapshot verified ${OPENAI_EVALUATION_PRICING.verifiedOn}: $${OPENAI_EVALUATION_PRICING.inputUsdPerMillionTokens}/1M input, $${OPENAI_EVALUATION_PRICING.cacheWriteInputUsdPerMillionTokens}/1M cache-write input, $${OPENAI_EVALUATION_PRICING.cachedInputUsdPerMillionTokens}/1M cached input, and $${OPENAI_EVALUATION_PRICING.outputUsdPerMillionTokens}/1M output tokens.`,
   );
   console.log(
     `Conservative planning ceiling including all three possible adapter attempts: ${dollars(maximumPlanningCost)}. Actual cost depends on provider usage and retry outcomes.`,
@@ -81,7 +81,7 @@ async function main(): Promise<void> {
     `Latency staging observation: min=${report.latency.minMs}ms median=${report.latency.medianMs}ms p95=${report.latency.p95Ms}ms max=${report.latency.maxMs}ms.`,
   );
   console.log(
-    `Usage: input=${report.usage.inputTokens}, output=${report.usage.outputTokens}, total=${report.usage.totalTokens}, approximate cost=${dollars(report.usage.approximateCostUsd)}.`,
+    `Usage: input=${report.usage.inputTokens}, cache-write=${report.usage.cacheWriteInputTokens}, cached=${report.usage.cachedInputTokens}, output=${report.usage.outputTokens}, total=${report.usage.totalTokens}, approximate cost=${dollars(report.usage.approximateCostUsd)}.`,
   );
   console.log(`Sanitized local report: ${reportPath}`);
   console.log(

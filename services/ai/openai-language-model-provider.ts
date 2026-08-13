@@ -433,6 +433,19 @@ export class OpenAILanguageModelProvider implements LanguageModelProvider {
           }
           const output = parseStructuredOutput(response.output_text);
           const inputTokens = safeInteger(response.usage?.input_tokens);
+          const reportedCachedInputTokens = safeInteger(
+            response.usage?.input_tokens_details?.cached_tokens,
+          );
+          const reportedCacheWriteInputTokens = safeInteger(
+            response.usage?.input_tokens_details?.cache_write_tokens,
+          );
+          const inputBreakdownIsValid =
+            inputTokens !== undefined &&
+            (reportedCachedInputTokens ?? 0) + (reportedCacheWriteInputTokens ?? 0) <= inputTokens;
+          const cachedInputTokens = inputBreakdownIsValid ? reportedCachedInputTokens : undefined;
+          const cacheWriteInputTokens = inputBreakdownIsValid
+            ? reportedCacheWriteInputTokens
+            : undefined;
           const outputTokens = safeInteger(response.usage?.output_tokens);
           const providerTotal = safeInteger(response.usage?.total_tokens);
           const derivedTotal =
@@ -441,6 +454,8 @@ export class OpenAILanguageModelProvider implements LanguageModelProvider {
               : undefined;
           return {
             attemptCount: attempts,
+            cacheWriteInputTokens,
+            cachedInputTokens,
             citationIds: output.citationIds,
             durationMs: Math.max(0, this.#clock.now() - startedAt),
             inputTokens,

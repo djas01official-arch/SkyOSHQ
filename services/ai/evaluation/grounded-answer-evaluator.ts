@@ -12,18 +12,18 @@ import {
   OpenAILanguageModelProvider,
   openAiProviderLimits,
 } from '../openai-language-model-provider';
+import {
+  calculateLanguageModelCostUsd,
+  OPENAI_GPT_5_6_TERRA_PRICING,
+} from '../language-model-pricing';
 
 export const EVALUATION_CORPUS_MAX_CASES = 20;
 export const EVALUATION_SYSTEMIC_FAILURE_LIMIT = 3;
 export const EVALUATION_ANSWER_PREVIEW_CHARACTERS = 160;
 
 export const OPENAI_EVALUATION_PRICING = {
-  cachedInputUsdPerMillionTokens: 0.25,
-  inputUsdPerMillionTokens: 2.5,
+  ...OPENAI_GPT_5_6_TERRA_PRICING,
   model: OPENAI_APPROVED_MODEL,
-  outputUsdPerMillionTokens: 15,
-  source: 'https://developers.openai.com/api/docs/models/gpt-5.6-terra',
-  verifiedOn: '2026-08-13',
 } as const;
 
 export type GroundedEvaluationCategory =
@@ -64,6 +64,8 @@ export type EvaluationCaseResult = Readonly<{
   answerPreview?: string;
   approximateCostUsd?: number;
   attemptCount?: number;
+  cacheWriteInputTokens?: number;
+  cachedInputTokens?: number;
   candidateCitationIds: readonly string[];
   category: GroundedEvaluationCategory;
   errorCode?: string;
@@ -107,6 +109,8 @@ export type EvaluationReport = Readonly<{
   stoppedEarly: boolean;
   usage: Readonly<{
     approximateCostUsd?: number;
+    cacheWriteInputTokens: number;
+    cachedInputTokens: number;
     inputTokens: number;
     missingUsageCases: number;
     outputTokens: number;
@@ -248,12 +252,32 @@ export function calculateTokenCost(
   inputTokens: number,
   outputTokens: number,
   pricing = OPENAI_EVALUATION_PRICING,
+  inputBreakdown: Readonly<{
+    cacheWriteInputTokens?: number;
+    cachedInputTokens?: number;
+  }> = {},
 ): number {
-  return (
-    (inputTokens * pricing.inputUsdPerMillionTokens +
-      outputTokens * pricing.outputUsdPerMillionTokens) /
-    1_000_000
+  const cost = estimateTokenCost(inputTokens, outputTokens, pricing, inputBreakdown);
+  if (cost === undefined) {
+    throw new GroundedEvaluationConfigurationError('Evaluation usage is invalid or unpriced.');
+  }
+  return cost;
+}
+
+function estimateTokenCost(
+  inputTokens: number,
+  outputTokens: number,
+  pricing: typeof OPENAI_EVALUATION_PRICING,
+  inputBreakdown: Readonly<{
+    cacheWriteInputTokens?: number;
+    cachedInputTokens?: number;
+  }> = {},
+): number | undefined {
+  const cost = calculateLanguageModelCostUsd(
+    { inputTokens, outputTokens, ...inputBreakdown },
+    pricing,
   );
+  return cost === undefined ? undefined : Number(cost);
 }
 
 export function calculateConservativeEvaluationCost(
@@ -287,6 +311,7 @@ function evaluateResponse(
   response: LanguageModelResponse,
   latencyMs: number,
   redactedValues: readonly string[],
+  pricing: typeof OPENAI_EVALUATION_PRICING,
 ): EvaluationCaseResult {
   const candidateCitationIds = Array.isArray(response.citationIds)
     ? response.citationIds.filter((value): value is string => typeof value === 'string')
@@ -343,9 +368,14 @@ function evaluateResponse(
     answerForHumanReview: safeAnswer,
     answerPreview: safeAnswer.slice(0, EVALUATION_ANSWER_PREVIEW_CHARACTERS),
     approximateCostUsd: usagePresent
-      ? calculateTokenCost(Number(response.inputTokens), Number(response.outputTokens))
+      ? estimateTokenCost(Number(response.inputTokens), Number(response.outputTokens), pricing, {
+          cacheWriteInputTokens: response.cacheWriteInputTokens,
+          cachedInputTokens: response.cachedInputTokens,
+        })
       : undefined,
     attemptCount: response.attemptCount,
+    cacheWriteInputTokens: response.cacheWriteInputTokens,
+    cachedInputTokens: response.cachedInputTokens,
     candidateCitationIds,
     category: item.category,
     hardChecks,
@@ -406,7 +436,14 @@ export async function runGroundedAnswerEvaluation(
     try {
       const response = await provider.generate(item.request);
       const latencyMs = response.durationMs ?? Math.max(0, now() - startedAt);
-      result = evaluateResponse(item, provider, response, latencyMs, options.redactedValues ?? []);
+      result = evaluateResponse(
+        item,
+        provider,
+        response,
+        latencyMs,
+        options.redactedValues ?? [],
+        options.pricing ?? OPENAI_EVALUATION_PRICING,
+      );
     } catch (error) {
       result = failedResult(item, error, Math.max(0, now() - startedAt));
     }
@@ -422,6 +459,11 @@ export async function runGroundedAnswerEvaluation(
   }
 
   const inputTokens = cases.reduce((sum, item) => sum + (item.inputTokens ?? 0), 0);
+  const cachedInputTokens = cases.reduce((sum, item) => sum + (item.cachedInputTokens ?? 0), 0);
+  const cacheWriteInputTokens = cases.reduce(
+    (sum, item) => sum + (item.cacheWriteInputTokens ?? 0),
+    0,
+  );
   const outputTokens = cases.reduce((sum, item) => sum + (item.outputTokens ?? 0), 0);
   const missingUsageCases = cases.filter(
     (item) => item.inputTokens === undefined || item.outputTokens === undefined,
@@ -444,7 +486,16 @@ export async function runGroundedAnswerEvaluation(
     stoppedEarly,
     usage: {
       approximateCostUsd:
-        missingUsageCases === 0 ? calculateTokenCost(inputTokens, outputTokens) : undefined,
+        missingUsageCases === 0
+          ? estimateTokenCost(
+              inputTokens,
+              outputTokens,
+              options.pricing ?? OPENAI_EVALUATION_PRICING,
+              { cacheWriteInputTokens, cachedInputTokens },
+            )
+          : undefined,
+      cacheWriteInputTokens,
+      cachedInputTokens,
       inputTokens,
       missingUsageCases,
       outputTokens,

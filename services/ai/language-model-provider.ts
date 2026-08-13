@@ -28,6 +28,8 @@ export type LanguageModelRequest = Readonly<{
 
 export type LanguageModelResponse = Readonly<{
   attemptCount?: number;
+  cacheWriteInputTokens?: number;
+  cachedInputTokens?: number;
   citationIds: readonly string[];
   durationMs?: number;
   inputTokens?: number;

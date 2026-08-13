@@ -724,8 +724,13 @@ model AiRun {
   modelKey          String
   modelVersion      String
   status            AiRunStatus         @default(PROCESSING)
-  inputTokens       Int?
-  outputTokens      Int?
+  inputTokens           Int?
+  cacheWriteInputTokens Int?
+  cachedInputTokens     Int?
+  outputTokens          Int?
+  totalTokens           Int?
+  providerRequestId     String?
+  estimatedCostUsd      Decimal?            @db.Decimal(20, 12)
   referencedCitationIds String[]           @default([])
   durationMs        Int?
   failureCode       String?

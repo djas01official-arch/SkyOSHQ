@@ -91,7 +91,13 @@ function responseBody(
     ],
     output_text: JSON.stringify(result),
     status: 'completed',
-    usage: { input_tokens: 123, output_tokens: 45, total_tokens: 168 },
+    usage: {
+      input_tokens: 123,
+      input_tokens_details: { cache_write_tokens: 7, cached_tokens: 23 },
+      output_tokens: 45,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: 168,
+    },
     ...overrides,
   };
 }
@@ -210,6 +216,8 @@ test('the adapter maps a bounded stateless request through the real SDK transpor
 
   assert.deepEqual(result.citationIds, ['cite_allowed']);
   assert.equal(result.text, 'Grounded answer.');
+  assert.equal(result.cacheWriteInputTokens, 7);
+  assert.equal(result.cachedInputTokens, 23);
   assert.equal(result.inputTokens, 123);
   assert.equal(result.outputTokens, 45);
   assert.equal(result.totalTokens, 168);
@@ -247,6 +255,34 @@ test('success normalization supports Unicode, empty context, no citations, and c
       .citationIds,
     [],
   );
+});
+
+test('usage normalization preserves missing metadata and rejects inconsistent breakdowns', async () => {
+  const missingTransport = fakeFetch(() => jsonResponse(responseBody(undefined, { usage: null })));
+  const missing = await provider(missingTransport.fetch).generate(baseRequest);
+  assert.equal(missing.inputTokens, undefined);
+  assert.equal(missing.cacheWriteInputTokens, undefined);
+  assert.equal(missing.cachedInputTokens, undefined);
+  assert.equal(missing.outputTokens, undefined);
+  assert.equal(missing.totalTokens, undefined);
+
+  const inconsistentTransport = fakeFetch(() =>
+    jsonResponse(
+      responseBody(undefined, {
+        usage: {
+          input_tokens: 10,
+          input_tokens_details: { cache_write_tokens: 0, cached_tokens: 11 },
+          output_tokens: 2,
+          output_tokens_details: { reasoning_tokens: 0 },
+          total_tokens: 99,
+        },
+      }),
+    ),
+  );
+  const inconsistent = await provider(inconsistentTransport.fetch).generate(baseRequest);
+  assert.equal(inconsistent.cachedInputTokens, undefined);
+  assert.equal(inconsistent.cacheWriteInputTokens, undefined);
+  assert.equal(inconsistent.totalTokens, 12);
 });
 
 test('malformed, empty, excessive, mismatched, incomplete, and refused outputs fail safely', async () => {

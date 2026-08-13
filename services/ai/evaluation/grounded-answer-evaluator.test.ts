@@ -200,6 +200,8 @@ test('offline evaluation aggregates usage, cost, citations, latency, and human-r
   assert.deepEqual(report.latency, { maxMs: 40, medianMs: 20, minMs: 20, p95Ms: 40 });
   assert.deepEqual(report.usage, {
     approximateCostUsd: 0.000825,
+    cacheWriteInputTokens: 0,
+    cachedInputTokens: 0,
     inputTokens: 150,
     missingUsageCases: 0,
     outputTokens: 30,

@@ -22,6 +22,10 @@ import {
   type LanguageModelProviderRegistry,
   type LanguageModelResponse,
 } from '../../services/ai/language-model-provider';
+import {
+  estimateLanguageModelCostUsd,
+  normalizeLanguageModelUsage,
+} from '../../services/ai/language-model-pricing';
 
 const MAX_MESSAGE_CHARACTERS = 4_000;
 const MAX_HISTORY_CHARACTERS = 8_000;
@@ -255,9 +259,21 @@ async function generateWithTimeout(
   }
 }
 
-function safeFailure(error: unknown): { code: string; message: string } {
+function safeProviderRequestId(value: string | undefined): string | undefined {
+  return value && /^[A-Za-z0-9._:-]{1,200}$/u.test(value) ? value : undefined;
+}
+
+function safeFailure(error: unknown): {
+  code: string;
+  message: string;
+  providerRequestId?: string;
+} {
   if (error instanceof LanguageModelProviderError) {
-    return { code: error.code, message: 'The AI provider could not complete this request.' };
+    return {
+      code: error.code,
+      message: 'The AI provider could not complete this request.',
+      providerRequestId: safeProviderRequestId(error.providerRequestId),
+    };
   }
   if (error instanceof AiConversationError) return { code: error.code, message: error.message };
   return { code: 'generation_failed', message: 'The AI response could not be generated.' };
@@ -310,6 +326,12 @@ async function executeRun(
     const referencedCitationIds = [...new Set(response.citationIds)].filter((id) =>
       allowed.has(id),
     );
+    const usage = normalizeLanguageModelUsage(response);
+    const estimatedCostUsd = estimateLanguageModelCostUsd(
+      provider.providerKey,
+      provider.modelKey,
+      usage,
+    );
     const completedAt = new Date();
     await prisma.$transaction(async (transaction) => {
       const snapshot = await transaction.aiRetrievalSnapshot.create({
@@ -361,11 +383,16 @@ async function executeRun(
         where: { id: runId },
         data: {
           completedAt,
+          cacheWriteInputTokens: usage.cacheWriteInputTokens,
+          cachedInputTokens: usage.cachedInputTokens,
           durationMs: Date.now() - startedAt,
-          inputTokens: response.inputTokens,
-          outputTokens: response.outputTokens,
+          estimatedCostUsd,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          providerRequestId: safeProviderRequestId(response.providerRequestId),
           referencedCitationIds,
           status: AiRunStatus.SUCCEEDED,
+          totalTokens: usage.totalTokens,
         },
       });
       await transaction.aiConversation.update({
@@ -384,6 +411,7 @@ async function executeRun(
         durationMs: Date.now() - startedAt,
         failureCode: failure.code,
         failureMessage: failure.message,
+        providerRequestId: failure.providerRequestId,
         status: AiRunStatus.FAILED,
       },
     });
