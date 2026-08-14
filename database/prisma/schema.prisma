@@ -735,6 +735,7 @@ model AiRun {
   modelVersion      String
   status            AiRunStatus         @default(PROCESSING)
   inputTokens           Int?
+  cacheWrite1HourInputTokens Int?
   cacheWriteInputTokens Int?
   cachedInputTokens     Int?
   outputTokens          Int?

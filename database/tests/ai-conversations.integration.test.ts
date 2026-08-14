@@ -479,6 +479,7 @@ test('successful runs persist tenancy-scoped provider usage and estimated cost',
   assert.equal(run.workspaceId, f.workspaceId);
   assert.equal(run.requestedByUserId, f.ownerId);
   assert.equal(run.inputTokens, 100);
+  assert.equal(run.cacheWrite1HourInputTokens, null);
   assert.equal(run.cacheWriteInputTokens, 10);
   assert.equal(run.cachedInputTokens, 20);
   assert.equal(run.outputTokens, 50);
@@ -505,6 +506,7 @@ test('successful runs preserve unknown usage and cost as null', async () => {
 
   assert.equal(run.status, AiRunStatus.SUCCEEDED);
   assert.equal(run.inputTokens, null);
+  assert.equal(run.cacheWrite1HourInputTokens, null);
   assert.equal(run.cacheWriteInputTokens, null);
   assert.equal(run.cachedInputTokens, null);
   assert.equal(run.outputTokens, null);
@@ -678,14 +680,25 @@ test('long-context cached usage is retained without an unsupported cost estimate
   assert.equal(run.estimatedCostUsd, null);
 });
 
-test('fabricated provider citation ids are rejected while permitted ids remain', async () => {
+test('Anthropic runs preserve workspace scope, usage, and only permitted citation ids', async () => {
   const f = await fixture();
+  const other = await fixture();
   await knowledge(f, 'citation allowlist canary');
   const provider: LanguageModelProvider = {
     ...fakeModel,
+    modelKey: 'claude-sonnet-4-6',
+    modelVersion: 'messages-json-schema-v1',
+    providerKey: 'anthropic',
     generate: async (request) => ({
+      cacheWrite1HourInputTokens: 10,
+      cacheWriteInputTokens: 30,
+      cachedInputTokens: 40,
       citationIds: ['cite_fabricated', request.citations[0]!.citationId],
+      inferenceGeo: 'global',
+      inputTokens: 170,
+      outputTokens: 20,
       text: 'Validated citation response.',
+      totalTokens: 190,
     }),
   };
   const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
@@ -698,9 +711,23 @@ test('fabricated provider citation ids are rejected while permitted ids remain',
     'citation allowlist canary',
   );
   assert.equal(run.status, AiRunStatus.SUCCEEDED);
+  assert.equal(run.providerKey, 'anthropic');
+  assert.equal(run.workspaceId, f.workspaceId);
+  assert.equal(run.cacheWrite1HourInputTokens, 10);
+  assert.equal(run.cacheWriteInputTokens, 30);
+  assert.equal(run.cachedInputTokens, 40);
+  assert.equal(run.estimatedCostUsd?.toString(), '0.000747');
   assert.deepEqual(run.referencedCitationIds, [
-    (await prisma.aiRunCitation.findFirstOrThrow()).citationId,
+    (
+      await prisma.aiRunCitation.findFirstOrThrow({
+        where: { snapshot: { workspaceId: f.workspaceId } },
+      })
+    ).citationId,
   ]);
+  assert.equal(
+    await prisma.aiRun.count({ where: { id: run.id, workspaceId: other.workspaceId } }),
+    0,
+  );
 });
 
 test('no-context responses persist without invented citations', async () => {

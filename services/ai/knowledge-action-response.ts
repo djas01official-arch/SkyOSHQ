@@ -4,6 +4,20 @@ const MAX_CITATION_IDS = 20;
 const MAX_ITEMS = 12;
 const MAX_FIELD_CHARACTERS = 2_000;
 
+export const groundedAnswerResponseSchema = {
+  additionalProperties: false,
+  properties: {
+    answer: { maxLength: MAX_FIELD_CHARACTERS, minLength: 1, type: 'string' },
+    citationIds: {
+      items: { maxLength: 128, minLength: 1, type: 'string' },
+      maxItems: MAX_CITATION_IDS,
+      type: 'array',
+    },
+  },
+  required: ['answer', 'citationIds'],
+  type: 'object',
+} as const;
+
 const citationIdsSchema = {
   items: { maxLength: 128, minLength: 1, type: 'string' },
   maxItems: MAX_CITATION_IDS,

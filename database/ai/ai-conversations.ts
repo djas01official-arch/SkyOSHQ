@@ -336,7 +336,7 @@ async function executeRun(
   try {
     const run = await prisma.aiRun.findUniqueOrThrow({
       where: { id: runId },
-      select: { conversationId: true, userMessageId: true },
+      select: { conversationId: true, createdAt: true, userMessageId: true },
     });
     const history = await loadBoundedHistory(
       prisma,
@@ -386,6 +386,8 @@ async function executeRun(
       provider.providerKey,
       provider.modelKey,
       usage,
+      run.createdAt,
+      { inferenceGeo: response.inferenceGeo },
     );
     const completedAt = new Date();
     await prisma.$transaction(async (transaction) => {
@@ -438,6 +440,7 @@ async function executeRun(
         where: { id: runId },
         data: {
           completedAt,
+          cacheWrite1HourInputTokens: usage.cacheWrite1HourInputTokens,
           cacheWriteInputTokens: usage.cacheWriteInputTokens,
           cachedInputTokens: usage.cachedInputTokens,
           durationMs: Date.now() - startedAt,

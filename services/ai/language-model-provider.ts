@@ -1,4 +1,8 @@
 import { OpenAILanguageModelProvider } from './openai-language-model-provider';
+import {
+  ANTHROPIC_APPROVED_MODELS,
+  AnthropicLanguageModelProvider,
+} from './anthropic-language-model-provider';
 
 export type LanguageModelProviderDescriptor = Readonly<{
   maxInputCharacters: number;
@@ -36,10 +40,12 @@ export type LanguageModelRequest = Readonly<{
 
 export type LanguageModelResponse = Readonly<{
   attemptCount?: number;
+  cacheWrite1HourInputTokens?: number;
   cacheWriteInputTokens?: number;
   cachedInputTokens?: number;
   citationIds: readonly string[];
   durationMs?: number;
+  inferenceGeo?: 'global' | 'us';
   inputTokens?: number;
   modelKey?: string;
   outputTokens?: number;
@@ -58,6 +64,7 @@ export interface LanguageModelProvider extends LanguageModelProviderDescriptor {
 export class LanguageModelProviderError extends Error {
   readonly attempts?: number;
   readonly code: string;
+  readonly providerDiagnosticCode?: string;
   readonly providerRequestId?: string;
   readonly retryable: boolean;
   readonly status?: number;
@@ -68,6 +75,7 @@ export class LanguageModelProviderError extends Error {
     retryable = false,
     metadata: Readonly<{
       attempts?: number;
+      providerDiagnosticCode?: string;
       providerRequestId?: string;
       status?: number;
     }> = {},
@@ -75,6 +83,7 @@ export class LanguageModelProviderError extends Error {
     super(message);
     this.attempts = metadata.attempts;
     this.code = code;
+    this.providerDiagnosticCode = metadata.providerDiagnosticCode;
     this.providerRequestId = metadata.providerRequestId;
     this.retryable = retryable;
     this.status = metadata.status;
@@ -187,20 +196,58 @@ class UnavailableLanguageModelProvider implements LanguageModelProvider {
 
 export class LanguageModelProviderRegistry {
   readonly #current: LanguageModelProvider;
+  readonly #providers: ReadonlyMap<string, LanguageModelProvider>;
 
-  constructor(current: LanguageModelProvider) {
-    validateDescriptor(current);
+  constructor(current: LanguageModelProvider, peers: readonly LanguageModelProvider[] = []) {
+    const providers = new Map<string, LanguageModelProvider>();
+    for (const provider of [current, ...peers]) {
+      validateDescriptor(provider);
+      const key = LanguageModelProviderRegistry.key(provider);
+      if (providers.has(key)) {
+        throw new LanguageModelProviderError(
+          'Language model provider identities must be unique.',
+          'provider_configuration_invalid',
+        );
+      }
+      providers.set(key, provider);
+    }
     this.#current = current;
+    this.#providers = providers;
   }
 
   getCurrent(): LanguageModelProvider {
     return this.#current;
+  }
+
+  getVersion(providerKey: string, modelKey: string, modelVersion: string): LanguageModelProvider {
+    const provider = this.#providers.get(
+      LanguageModelProviderRegistry.key({ modelKey, modelVersion, providerKey }),
+    );
+    if (!provider) {
+      throw new LanguageModelProviderError(
+        'The requested language model provider version is not registered.',
+        'provider_not_configured',
+      );
+    }
+    return provider;
+  }
+
+  list(): readonly LanguageModelProvider[] {
+    return [...this.#providers.values()];
+  }
+
+  private static key(
+    provider: Pick<LanguageModelProviderDescriptor, 'modelKey' | 'modelVersion' | 'providerKey'>,
+  ): string {
+    return `${provider.providerKey}\0${provider.modelKey}\0${provider.modelVersion}`;
   }
 }
 
 export function createDefaultLanguageModelProviderRegistry(
   options: Readonly<{
     configuredProvider?: string;
+    anthropicApiKey?: string;
+    anthropicFetch?: typeof globalThis.fetch;
     deterministicFailureMessage?: string;
     model?: string;
     openAiApiKey?: string;
@@ -242,6 +289,52 @@ export function createDefaultLanguageModelProviderRegistry(
           model,
           runtime,
         }),
+      );
+    } catch (error) {
+      if (
+        error instanceof LanguageModelProviderError &&
+        error.code === 'provider_configuration_invalid'
+      ) {
+        return new LanguageModelProviderRegistry(
+          new UnavailableLanguageModelProvider('provider_configuration_invalid'),
+        );
+      }
+      throw error;
+    }
+  }
+
+  if (key === 'anthropic') {
+    const model = (options.model ?? process.env.AI_MODEL)?.trim();
+    const apiKey = (options.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY)?.trim();
+    if (!model || !apiKey) {
+      return new LanguageModelProviderRegistry(
+        new UnavailableLanguageModelProvider('provider_configuration_invalid'),
+      );
+    }
+    if (runtime !== 'production' && !options.anthropicFetch) {
+      return new LanguageModelProviderRegistry(
+        new UnavailableLanguageModelProvider('provider_network_disabled'),
+      );
+    }
+    try {
+      const approvedProviders = ANTHROPIC_APPROVED_MODELS.map(
+        (approvedModel) =>
+          new AnthropicLanguageModelProvider({
+            apiKey,
+            fetch: options.anthropicFetch,
+            model: approvedModel,
+            runtime,
+          }),
+      );
+      const current = approvedProviders.find((provider) => provider.modelKey === model);
+      if (!current) {
+        return new LanguageModelProviderRegistry(
+          new UnavailableLanguageModelProvider('provider_configuration_invalid'),
+        );
+      }
+      return new LanguageModelProviderRegistry(
+        current,
+        approvedProviders.filter((provider) => provider !== current),
       );
     } catch (error) {
       if (

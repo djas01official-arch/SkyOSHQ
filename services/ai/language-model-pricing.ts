@@ -3,6 +3,7 @@ const TOKENS_PER_MILLION = 1_000_000n;
 const MAX_TOKEN_COUNT = 2_147_483_647;
 
 export type LanguageModelPricing = Readonly<{
+  cacheWrite1HourInputUsdPerMillionTokens?: number;
   cacheWriteInputUsdPerMillionTokens: number;
   cachedInputUsdPerMillionTokens: number;
   inputUsdPerMillionTokens: number;
@@ -16,16 +17,24 @@ export type LanguageModelPricing = Readonly<{
   modelKey: string;
   outputUsdPerMillionTokens: number;
   providerKey: string;
+  supportedInferenceGeos?: readonly string[];
+  effectiveFrom?: string;
+  effectiveUntil?: string;
   source: string;
   verifiedOn: string;
 }>;
 
 export type LanguageModelUsage = Readonly<{
+  cacheWrite1HourInputTokens?: number;
   cacheWriteInputTokens?: number;
   cachedInputTokens?: number;
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+}>;
+
+export type LanguageModelPricingContext = Readonly<{
+  inferenceGeo?: string;
 }>;
 
 export const OPENAI_GPT_5_6_TERRA_PRICING: LanguageModelPricing = {
@@ -46,10 +55,59 @@ export const OPENAI_GPT_5_6_TERRA_PRICING: LanguageModelPricing = {
   verifiedOn: '2026-08-13',
 };
 
-const pricingCatalog = new Map([
+export const ANTHROPIC_CLAUDE_SONNET_4_6_PRICING: LanguageModelPricing = {
+  cacheWrite1HourInputUsdPerMillionTokens: 6,
+  cacheWriteInputUsdPerMillionTokens: 3.75,
+  cachedInputUsdPerMillionTokens: 0.3,
+  inputUsdPerMillionTokens: 3,
+  modelKey: 'claude-sonnet-4-6',
+  outputUsdPerMillionTokens: 15,
+  providerKey: 'anthropic',
+  source: 'https://platform.claude.com/docs/en/about-claude/pricing',
+  supportedInferenceGeos: ['global'],
+  verifiedOn: '2026-08-13',
+};
+
+export const ANTHROPIC_CLAUDE_SONNET_5_PROMOTIONAL_PRICING: LanguageModelPricing = {
+  cacheWrite1HourInputUsdPerMillionTokens: 4,
+  cacheWriteInputUsdPerMillionTokens: 2.5,
+  cachedInputUsdPerMillionTokens: 0.2,
+  effectiveUntil: '2026-09-01T00:00:00.000Z',
+  inputUsdPerMillionTokens: 2,
+  modelKey: 'claude-sonnet-5',
+  outputUsdPerMillionTokens: 10,
+  providerKey: 'anthropic',
+  source: 'https://platform.claude.com/docs/en/about-claude/pricing',
+  supportedInferenceGeos: ['global'],
+  verifiedOn: '2026-08-13',
+};
+
+export const ANTHROPIC_CLAUDE_SONNET_5_STANDARD_PRICING: LanguageModelPricing = {
+  cacheWrite1HourInputUsdPerMillionTokens: 6,
+  cacheWriteInputUsdPerMillionTokens: 3.75,
+  cachedInputUsdPerMillionTokens: 0.3,
+  effectiveFrom: '2026-09-01T00:00:00.000Z',
+  inputUsdPerMillionTokens: 3,
+  modelKey: 'claude-sonnet-5',
+  outputUsdPerMillionTokens: 15,
+  providerKey: 'anthropic',
+  source: 'https://platform.claude.com/docs/en/about-claude/pricing',
+  supportedInferenceGeos: ['global'],
+  verifiedOn: '2026-08-13',
+};
+
+const pricingCatalog = new Map<string, readonly LanguageModelPricing[]>([
   [
     `${OPENAI_GPT_5_6_TERRA_PRICING.providerKey}:${OPENAI_GPT_5_6_TERRA_PRICING.modelKey}`,
-    OPENAI_GPT_5_6_TERRA_PRICING,
+    [OPENAI_GPT_5_6_TERRA_PRICING],
+  ],
+  [
+    `${ANTHROPIC_CLAUDE_SONNET_4_6_PRICING.providerKey}:${ANTHROPIC_CLAUDE_SONNET_4_6_PRICING.modelKey}`,
+    [ANTHROPIC_CLAUDE_SONNET_4_6_PRICING],
+  ],
+  [
+    `${ANTHROPIC_CLAUDE_SONNET_5_PROMOTIONAL_PRICING.providerKey}:${ANTHROPIC_CLAUDE_SONNET_5_PROMOTIONAL_PRICING.modelKey}`,
+    [ANTHROPIC_CLAUDE_SONNET_5_PROMOTIONAL_PRICING, ANTHROPIC_CLAUDE_SONNET_5_STANDARD_PRICING],
   ],
 ]);
 
@@ -104,11 +162,18 @@ export function normalizeLanguageModelUsage(usage: LanguageModelUsage): Language
   const outputTokens = tokenCount(usage.outputTokens);
   const candidateCachedTokens = tokenCount(usage.cachedInputTokens);
   const candidateCacheWriteTokens = tokenCount(usage.cacheWriteInputTokens);
+  const candidateCacheWrite1HourTokens = tokenCount(usage.cacheWrite1HourInputTokens);
   const breakdownIsValid =
     inputTokens !== undefined &&
     (candidateCachedTokens ?? 0) + (candidateCacheWriteTokens ?? 0) <= inputTokens;
   const cachedInputTokens = breakdownIsValid ? candidateCachedTokens : undefined;
   const cacheWriteInputTokens = breakdownIsValid ? candidateCacheWriteTokens : undefined;
+  const cacheWrite1HourInputTokens =
+    breakdownIsValid &&
+    candidateCacheWrite1HourTokens !== undefined &&
+    candidateCacheWrite1HourTokens <= (cacheWriteInputTokens ?? 0)
+      ? candidateCacheWrite1HourTokens
+      : undefined;
   const derivedTotal =
     inputTokens !== undefined && outputTokens !== undefined
       ? tokenCount(inputTokens + outputTokens)
@@ -116,6 +181,7 @@ export function normalizeLanguageModelUsage(usage: LanguageModelUsage): Language
   const providerTotal = tokenCount(usage.totalTokens);
 
   return {
+    cacheWrite1HourInputTokens,
     cacheWriteInputTokens,
     cachedInputTokens,
     inputTokens,
@@ -130,8 +196,15 @@ export function normalizeLanguageModelUsage(usage: LanguageModelUsage): Language
 export function getLanguageModelPricing(
   providerKey: string,
   modelKey: string,
+  effectiveAt: Date,
 ): LanguageModelPricing | undefined {
-  return pricingCatalog.get(`${providerKey}:${modelKey}`);
+  const effectiveTimestamp = effectiveAt.getTime();
+  if (!Number.isFinite(effectiveTimestamp)) return undefined;
+  return pricingCatalog.get(`${providerKey}:${modelKey}`)?.find((pricing) => {
+    const from = pricing.effectiveFrom ? Date.parse(pricing.effectiveFrom) : -Infinity;
+    const until = pricing.effectiveUntil ? Date.parse(pricing.effectiveUntil) : Infinity;
+    return effectiveTimestamp >= from && effectiveTimestamp < until;
+  });
 }
 
 export function calculateLanguageModelCostUsd(
@@ -144,6 +217,7 @@ export function calculateLanguageModelCostUsd(
   }
   const cachedInputTokens = normalized.cachedInputTokens ?? 0;
   const cacheWriteInputTokens = normalized.cacheWriteInputTokens ?? 0;
+  const cacheWrite1HourInputTokens = normalized.cacheWrite1HourInputTokens;
   const uncachedInputTokens = normalized.inputTokens - cachedInputTokens - cacheWriteInputTokens;
   const longContext = pricing.longContext;
   const activeLongContext =
@@ -157,6 +231,15 @@ export function calculateLanguageModelCostUsd(
   ) {
     return undefined;
   }
+  if (
+    pricing.cacheWrite1HourInputUsdPerMillionTokens !== undefined &&
+    cacheWriteInputTokens > 0 &&
+    cacheWrite1HourInputTokens === undefined
+  ) {
+    return undefined;
+  }
+  const oneHourCacheWriteInputTokens = cacheWrite1HourInputTokens ?? 0;
+  const defaultCacheWriteInputTokens = cacheWriteInputTokens - oneHourCacheWriteInputTokens;
   const picoUsd =
     pricedTokenCost(
       uncachedInputTokens,
@@ -164,8 +247,13 @@ export function calculateLanguageModelCostUsd(
       activeLongContext?.inputMultiplier,
     ) +
     pricedTokenCost(
-      cacheWriteInputTokens,
+      defaultCacheWriteInputTokens,
       pricing.cacheWriteInputUsdPerMillionTokens,
+      activeLongContext?.cacheWriteInputMultiplier,
+    ) +
+    pricedTokenCost(
+      oneHourCacheWriteInputTokens,
+      pricing.cacheWrite1HourInputUsdPerMillionTokens ?? pricing.cacheWriteInputUsdPerMillionTokens,
       activeLongContext?.cacheWriteInputMultiplier,
     ) +
     pricedTokenCost(
@@ -185,7 +273,15 @@ export function estimateLanguageModelCostUsd(
   providerKey: string,
   modelKey: string,
   usage: LanguageModelUsage,
+  effectiveAt: Date,
+  context: LanguageModelPricingContext = {},
 ): string | undefined {
-  const pricing = getLanguageModelPricing(providerKey, modelKey);
+  const pricing = getLanguageModelPricing(providerKey, modelKey, effectiveAt);
+  if (
+    pricing?.supportedInferenceGeos !== undefined &&
+    !pricing.supportedInferenceGeos.includes(context.inferenceGeo ?? '')
+  ) {
+    return undefined;
+  }
   return pricing ? calculateLanguageModelCostUsd(usage, pricing) : undefined;
 }

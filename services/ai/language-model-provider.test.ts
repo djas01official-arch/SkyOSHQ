@@ -5,6 +5,7 @@ import {
   createDefaultLanguageModelProviderRegistry,
   DeterministicFakeLanguageModelProvider,
   LanguageModelProviderError,
+  LanguageModelProviderRegistry,
   type LanguageModelRequest,
 } from './language-model-provider';
 
@@ -41,7 +42,7 @@ test('production prohibits the deterministic local provider', async () => {
   );
 });
 
-test('production selects only explicitly configured OpenAI and never falls back', async () => {
+test('production selects only explicitly configured providers and never falls back', async () => {
   const configured = createDefaultLanguageModelProviderRegistry({
     configuredProvider: 'openai',
     model: 'gpt-5.6-terra',
@@ -50,6 +51,15 @@ test('production selects only explicitly configured OpenAI and never falls back'
   }).getCurrent();
   assert.equal(configured.providerKey, 'openai');
   assert.equal(configured.modelKey, 'gpt-5.6-terra');
+
+  const anthropic = createDefaultLanguageModelProviderRegistry({
+    anthropicApiKey: 'production-secret-shaped-value',
+    configuredProvider: 'anthropic',
+    model: 'claude-sonnet-5',
+    runtime: 'production',
+  }).getCurrent();
+  assert.equal(anthropic.providerKey, 'anthropic');
+  assert.equal(anthropic.modelKey, 'claude-sonnet-5');
 
   for (const options of [
     { configuredProvider: '', model: 'gpt-5.6-terra', openAiApiKey: 'valid-value' },
@@ -60,6 +70,16 @@ test('production selects only explicitly configured OpenAI and never falls back'
       configuredProvider: 'openai',
       model: 'gpt-5.6-terra',
       openAiApiKey: '<server-secret>',
+    },
+    {
+      anthropicApiKey: 'valid-value',
+      configuredProvider: 'anthropic',
+      model: 'claude-sonnet-4-5',
+    },
+    {
+      anthropicApiKey: '<server-secret>',
+      configuredProvider: 'anthropic',
+      model: 'claude-sonnet-4-6',
     },
   ]) {
     const unavailable = createDefaultLanguageModelProviderRegistry({
@@ -76,11 +96,65 @@ test('production selects only explicitly configured OpenAI and never falls back'
   }
 });
 
+test('Anthropic registry retains Sonnet 5 and 4.6 as separate approved versions', () => {
+  const registry = createDefaultLanguageModelProviderRegistry({
+    anthropicApiKey: 'production-secret-shaped-value',
+    configuredProvider: 'anthropic',
+    model: 'claude-sonnet-5',
+    runtime: 'production',
+  });
+  assert.equal(registry.getCurrent().modelKey, 'claude-sonnet-5');
+  assert.deepEqual(
+    registry.list().map((provider) => provider.modelKey),
+    ['claude-sonnet-5', 'claude-sonnet-4-6'],
+  );
+  assert.equal(
+    registry.getVersion('anthropic', 'claude-sonnet-4-6', 'messages-json-schema-v1').modelKey,
+    'claude-sonnet-4-6',
+  );
+});
+
+test('the registry can retain peer provider versions without changing the selected backend', () => {
+  const current = new DeterministicFakeLanguageModelProvider();
+  const peer = {
+    ...current,
+    generate: current.generate.bind(current),
+    modelKey: 'peer-model',
+    modelVersion: '1.0.0',
+    providerKey: 'peer',
+  };
+  const registry = new LanguageModelProviderRegistry(current, [peer]);
+
+  assert.equal(registry.getCurrent(), current);
+  assert.equal(registry.list().length, 2);
+  assert.equal(registry.getVersion('peer', 'peer-model', '1.0.0'), peer);
+  assert.throws(
+    () => registry.getVersion('missing', 'missing', '1.0.0'),
+    (error: unknown) =>
+      error instanceof LanguageModelProviderError && error.code === 'provider_not_configured',
+  );
+});
+
 test('non-production OpenAI selection requires an explicitly injected offline transport', async () => {
   const provider = createDefaultLanguageModelProviderRegistry({
     configuredProvider: 'openai',
     model: 'gpt-5.6-terra',
     openAiApiKey: 'offline-test-value',
+    runtime: 'test',
+  }).getCurrent();
+  assert.equal(provider.providerKey, 'unconfigured');
+  await assert.rejects(
+    provider.generate(request),
+    (error: unknown) =>
+      error instanceof LanguageModelProviderError && error.code === 'provider_network_disabled',
+  );
+});
+
+test('non-production Anthropic selection requires an explicitly injected offline transport', async () => {
+  const provider = createDefaultLanguageModelProviderRegistry({
+    anthropicApiKey: 'offline-test-value',
+    configuredProvider: 'anthropic',
+    model: 'claude-sonnet-4-6',
     runtime: 'test',
   }).getCurrent();
   assert.equal(provider.providerKey, 'unconfigured');
