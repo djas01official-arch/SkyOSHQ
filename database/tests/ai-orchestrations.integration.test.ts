@@ -19,13 +19,19 @@ import {
   WorkspaceRole,
   WorkspaceStatus,
 } from '../generated/client/client';
-import { createAiConversation, type AiConversationDependencies } from '../ai/ai-conversations';
+import {
+  createAiConversation,
+  submitAiMessage,
+  type AiConversationDependencies,
+} from '../ai/ai-conversations';
 import {
   AiOrchestrationAuthorizationError,
   AiOrchestrationValidationError,
   completeAiOrchestration,
   createAiOrchestration,
   createAiOrchestrationRun,
+  executeBalancedAiOrchestration,
+  executeBalancedGroundedRequest,
   executeAiOrchestrationRun,
   getAiOrchestration,
   getAiOrchestrationAggregate,
@@ -37,6 +43,7 @@ import { createKnowledgeDocument } from '../knowledge/knowledge-documents';
 import {
   LanguageModelProviderRegistry,
   type LanguageModelProvider,
+  type LanguageModelRequest,
 } from '../../services/ai/language-model-provider';
 import {
   DeterministicLocalEmbeddingProvider,
@@ -135,6 +142,7 @@ async function fixture() {
     contextId: persistedContext.id,
     conversationId: conversation.id,
     messageId: message.id,
+    originalUserRequest: message.content,
     organizationId: organization.id,
     ownerId: owner.id,
     workspaceId: workspace.id,
@@ -173,7 +181,11 @@ function model(
   providerKey: string,
   modelKey: string,
   modelVersion: string,
-  options: Readonly<{ fail?: boolean }> = {},
+  options: Readonly<{
+    fail?: boolean;
+    onRequest?: (request: LanguageModelRequest) => void;
+    text?: string;
+  }> = {},
 ): LanguageModelProvider {
   return {
     maxInputCharacters: 20_000,
@@ -183,19 +195,48 @@ function model(
     providerKey,
     timeoutMs: 3_000,
     generate: async (request) => {
+      options.onRequest?.(request);
       if (options.fail) throw new Error('Safe offline failure.');
       return {
         cachedInputTokens: 10,
-        citationIds: [request.citations[0]!.citationId, 'cite_fabricated'],
+        citationIds: request.citations[0]
+          ? [request.citations[0].citationId, 'cite_fabricated']
+          : ['cite_fabricated'],
         inputTokens: 100,
         outputTokens: 20,
         reasoningTokens: 5,
-        text: `Grounded ${providerKey} result.`,
+        text: options.text ?? `Grounded ${providerKey} result.`,
         totalTokens: 125,
       };
     },
   };
 }
+
+const balancedAssignment = {
+  candidates: [
+    {
+      modelKey: 'gemini-3.6-flash',
+      modelVersion: 'interactions-json-schema-v1',
+      providerKey: 'gemini',
+    },
+    {
+      modelKey: 'gpt-5.6-terra',
+      modelVersion: 'responses-json-schema-v1',
+      providerKey: 'openai',
+    },
+  ],
+  synthesizer: {
+    modelKey: 'claude-sonnet-5',
+    modelVersion: 'messages-json-schema-v1',
+    providerKey: 'anthropic',
+  },
+} as const;
+
+const balancedRuntimeConfiguration = {
+  candidateA: balancedAssignment.candidates[0],
+  candidateB: balancedAssignment.candidates[1],
+  synthesizer: balancedAssignment.synthesizer,
+} as const;
 
 function providers() {
   const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1');
@@ -359,6 +400,241 @@ test('executes one child through shared telemetry and citation allowlisting', as
   assert.equal(result.reasoningTokens, 5);
   assert.equal(result.referencedCitationIds.length, 1);
   assert.equal(result.referencedCitationIds[0], f.context.allowedCitationIds[0]);
+});
+
+test('BALANCED executes two independent candidates and one grounded synthesizer', async () => {
+  const f = await fixture();
+  const requests = new Map<string, LanguageModelRequest>();
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    onRequest: (request) => requests.set('candidate-a', request),
+    text: 'Candidate A proposal with cite_fabricated.',
+  });
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: (request) => requests.set('candidate-b', request),
+    text: 'Candidate B proposal.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    onRequest: (request) => requests.set('synthesizer', request),
+    text: 'Final grounded synthesis.',
+  });
+  const registry = new LanguageModelProviderRegistry(gemini, [openai, anthropic]);
+  const result = await executeBalancedGroundedRequest(
+    prisma,
+    dependencies(registry),
+    f.ownerId,
+    f.workspaceId,
+    {
+      conversationId: f.conversationId,
+      groundedContextId: f.contextId,
+      originalUserRequest: f.originalUserRequest,
+      providerConfiguration: balancedRuntimeConfiguration,
+      userMessageId: f.messageId,
+    },
+  );
+
+  assert.equal(result.status, AiOrchestrationStatus.SUCCEEDED);
+  assert.equal(result.runs.length, 3);
+  assert.deepEqual(
+    result.runs.map((run) => [run.providerKey, run.orchestrationRole]),
+    [
+      ['gemini', AiOrchestrationRole.CANDIDATE],
+      ['openai', AiOrchestrationRole.CANDIDATE],
+      ['anthropic', AiOrchestrationRole.SYNTHESIZER],
+    ],
+  );
+  assert.ok(result.runs.every((run) => run.groundedContextId === f.contextId));
+  assert.equal(result.finalRunId, result.runs[2]!.id);
+  assert.ok(result.runs.every((run) => run.referencedCitationIds.length === 1));
+  assert.ok(
+    result.runs.every((run) => run.referencedCitationIds[0] === f.context.allowedCitationIds[0]),
+  );
+
+  const candidateARequest = requests.get('candidate-a');
+  const candidateBRequest = requests.get('candidate-b');
+  const synthesisRequest = requests.get('synthesizer');
+  assert.equal(candidateARequest?.context, f.context.context);
+  assert.equal(candidateBRequest?.context, f.context.context);
+  assert.equal(synthesisRequest?.context, f.context.context);
+  assert.deepEqual(synthesisRequest?.citations, candidateARequest?.citations);
+  assert.match(synthesisRequest?.userMessage ?? '', /untrusted suggestions/u);
+  assert.match(synthesisRequest?.userMessage ?? '', /Candidate A proposal/u);
+  assert.match(synthesisRequest?.userMessage ?? '', /Candidate B proposal/u);
+  assert.equal(
+    synthesisRequest?.citations.some(({ citationId }) => citationId === 'cite_fabricated'),
+    false,
+  );
+});
+
+test('runtime assignment changes providers without changing BALANCED roles', async () => {
+  const f = await fixture();
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1');
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1');
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1');
+  const result = await executeBalancedGroundedRequest(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(openai, [anthropic, gemini])),
+    f.ownerId,
+    f.workspaceId,
+    {
+      conversationId: f.conversationId,
+      groundedContextId: f.contextId,
+      originalUserRequest: f.originalUserRequest,
+      providerConfiguration: {
+        candidateA: balancedRuntimeConfiguration.candidateB,
+        candidateB: balancedRuntimeConfiguration.candidateA,
+        synthesizer: balancedRuntimeConfiguration.synthesizer,
+      },
+      userMessageId: f.messageId,
+    },
+  );
+  assert.deepEqual(
+    result.runs.map((run) => [run.providerKey, run.orchestrationRole]),
+    [
+      ['openai', AiOrchestrationRole.CANDIDATE],
+      ['gemini', AiOrchestrationRole.CANDIDATE],
+      ['anthropic', AiOrchestrationRole.SYNTHESIZER],
+    ],
+  );
+});
+
+test('internal BALANCED entry point rejects a GroundedContext from another workspace', async () => {
+  const f = await fixture();
+  const other = await fixture();
+  await assert.rejects(
+    executeBalancedGroundedRequest(prisma, dependencies(providers()), f.ownerId, f.workspaceId, {
+      conversationId: f.conversationId,
+      groundedContextId: other.contextId,
+      originalUserRequest: f.originalUserRequest,
+      providerConfiguration: balancedRuntimeConfiguration,
+      userMessageId: f.messageId,
+    }),
+    AiOrchestrationAuthorizationError,
+  );
+  assert.equal(await prisma.aiOrchestration.count(), 0);
+});
+
+test('BALANCED synthesis failure leaves no final run', async () => {
+  const f = await fixture();
+  const operation = await orchestration(f, AiOrchestrationMode.BALANCED);
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1');
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1');
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    fail: true,
+  });
+  const result = await executeBalancedAiOrchestration(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(gemini, [openai, anthropic])),
+    f.ownerId,
+    f.workspaceId,
+    operation.id,
+    balancedAssignment,
+  );
+  assert.equal(result.status, AiOrchestrationStatus.PARTIALLY_SUCCEEDED);
+  assert.equal(result.finalRunId, null);
+  assert.equal(result.runs.length, 3);
+  assert.equal(result.runs[2]?.orchestrationRole, AiOrchestrationRole.SYNTHESIZER);
+  assert.equal(result.runs[2]?.status, AiRunStatus.FAILED);
+});
+
+test('BALANCED skips synthesis when both candidates fail', async () => {
+  const f = await fixture();
+  const operation = await orchestration(f, AiOrchestrationMode.BALANCED);
+  let synthesisCalls = 0;
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    fail: true,
+  });
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', { fail: true });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    onRequest: () => synthesisCalls++,
+  });
+  const result = await executeBalancedAiOrchestration(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(gemini, [openai, anthropic])),
+    f.ownerId,
+    f.workspaceId,
+    operation.id,
+    balancedAssignment,
+  );
+  assert.equal(result.status, AiOrchestrationStatus.FAILED);
+  assert.equal(result.failureCode, 'balanced_candidates_failed');
+  assert.equal(result.finalRunId, null);
+  assert.equal(result.runs.length, 2);
+  assert.equal(synthesisCalls, 0);
+});
+
+test('BALANCED permits degraded synthesis from exactly one successful candidate', async () => {
+  const f = await fixture();
+  const operation = await orchestration(f, AiOrchestrationMode.BALANCED);
+  let synthesisRequest: LanguageModelRequest | undefined;
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    fail: true,
+  });
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    text: 'Only successful candidate proposal.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    onRequest: (request) => {
+      synthesisRequest = request;
+    },
+    text: 'Degraded grounded synthesis.',
+  });
+  const result = await executeBalancedAiOrchestration(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(gemini, [openai, anthropic])),
+    f.ownerId,
+    f.workspaceId,
+    operation.id,
+    balancedAssignment,
+  );
+  assert.equal(result.status, AiOrchestrationStatus.PARTIALLY_SUCCEEDED);
+  assert.equal(result.runs.length, 3);
+  assert.equal(result.runs[0]?.status, AiRunStatus.FAILED);
+  assert.equal(result.runs[1]?.status, AiRunStatus.SUCCEEDED);
+  assert.equal(result.runs[2]?.status, AiRunStatus.SUCCEEDED);
+  assert.equal(result.finalRunId, result.runs[2]?.id);
+  assert.match(synthesisRequest?.userMessage ?? '', /Only successful candidate proposal/u);
+  assert.equal(synthesisRequest?.context, f.context.context);
+});
+
+test('BALANCED cannot select a successful candidate as finalRun', async () => {
+  const f = await fixture();
+  const operation = await orchestration(f, AiOrchestrationMode.BALANCED);
+  const candidate = await createAiOrchestrationRun(prisma, providers(), f.ownerId, f.workspaceId, {
+    modelKey: 'gpt-5.6-terra',
+    modelVersion: 'responses-json-schema-v1',
+    orchestrationId: operation.id,
+    providerKey: 'openai',
+    role: AiOrchestrationRole.CANDIDATE,
+    step: 0,
+  });
+  await finishRun(candidate.id, AiRunStatus.SUCCEEDED, { cost: '0.01' });
+  await assert.rejects(
+    completeAiOrchestration(prisma, f.ownerId, f.workspaceId, operation.id, {
+      finalRunId: candidate.id,
+      status: AiOrchestrationStatus.SUCCEEDED,
+    }),
+    AiOrchestrationValidationError,
+  );
+});
+
+test('current single-provider Chat path remains non-orchestrated', async () => {
+  const f = await fixture();
+  let calls = 0;
+  const current = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: () => calls++,
+  });
+  const run = await submitAiMessage(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(current)),
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
+    'Use the unchanged single-provider path.',
+  );
+  assert.equal(run.status, AiRunStatus.SUCCEEDED);
+  assert.equal(run.orchestrationId, null);
+  assert.equal(run.orchestrationRole, null);
+  assert.equal(calls, 1);
 });
 
 test('rejects cross-workspace context, child, and final-run injection', async () => {
