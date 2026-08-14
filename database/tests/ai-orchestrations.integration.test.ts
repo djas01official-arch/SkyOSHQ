@@ -6,6 +6,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 
 import {
   AiGroundedContextSourceType,
+  AiKnowledgeActionType,
   AiMessageRole,
   AiOrchestrationMode,
   AiOrchestrationRole,
@@ -21,6 +22,9 @@ import {
 } from '../generated/client/client';
 import {
   createAiConversation,
+  getAiConversation,
+  runKnowledgeDocumentAiAction,
+  submitAiChatMessage,
   submitAiMessage,
   type AiConversationDependencies,
 } from '../ai/ai-conversations';
@@ -141,6 +145,7 @@ async function fixture() {
     context,
     contextId: persistedContext.id,
     conversationId: conversation.id,
+    documentSlug: document.slug,
     messageId: message.id,
     originalUserRequest: message.content,
     organizationId: organization.id,
@@ -634,6 +639,140 @@ test('current single-provider Chat path remains non-orchestrated', async () => {
   assert.equal(run.status, AiRunStatus.SUCCEEDED);
   assert.equal(run.orchestrationId, null);
   assert.equal(run.orchestrationRole, null);
+  assert.equal(calls, 1);
+});
+
+test('Chat defaults to FAST and creates exactly one non-orchestrated provider run', async () => {
+  const f = await fixture();
+  let calls = 0;
+  const current = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: () => calls++,
+  });
+  const previousMode = process.env.AI_CHAT_MODE;
+  delete process.env.AI_CHAT_MODE;
+  try {
+    const result = await submitAiChatMessage(
+      prisma,
+      dependencies(new LanguageModelProviderRegistry(current)),
+      f.ownerId,
+      f.workspaceId,
+      f.conversationId,
+      'Use default Chat mode.',
+    );
+    assert.equal(result.mode, 'FAST');
+    assert.equal(result.responseRun.orchestrationId, null);
+    assert.equal(result.responseRun.status, AiRunStatus.SUCCEEDED);
+    assert.equal(calls, 1);
+    assert.equal(await prisma.aiRun.count(), 1);
+    assert.equal(await prisma.aiOrchestration.count(), 0);
+  } finally {
+    if (previousMode === undefined) delete process.env.AI_CHAT_MODE;
+    else process.env.AI_CHAT_MODE = previousMode;
+  }
+});
+
+test('explicit BALANCED Chat returns only the successful synthesizer response', async () => {
+  const f = await fixture();
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    text: 'Internal candidate A.',
+  });
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    text: 'Internal candidate B.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    text: 'Visible synthesized answer.',
+  });
+  const previousMode = process.env.AI_CHAT_MODE;
+  process.env.AI_CHAT_MODE = 'BALANCED';
+  try {
+    const result = await submitAiChatMessage(
+      prisma,
+      dependencies(new LanguageModelProviderRegistry(gemini, [openai, anthropic])),
+      f.ownerId,
+      f.workspaceId,
+      f.conversationId,
+      'Use explicit BALANCED Chat mode.',
+      { balancedProviderConfiguration: balancedRuntimeConfiguration },
+    );
+    assert.equal(result.mode, 'BALANCED');
+    assert.equal(result.failureCode, null);
+    assert.equal(result.responseRun?.orchestrationRole, AiOrchestrationRole.SYNTHESIZER);
+    assert.equal(result.responseRun?.status, AiRunStatus.SUCCEEDED);
+    const response = await prisma.aiMessage.findFirstOrThrow({
+      where: { generatedByRunId: result.responseRun?.id },
+    });
+    assert.equal(response.content, 'Visible synthesized answer.');
+    assert.equal(await prisma.aiRun.count(), 3);
+    const visible = await getAiConversation(prisma, f.ownerId, f.workspaceId, f.conversationId);
+    assert.equal(
+      visible.messages.some(({ content }) => content === 'Internal candidate A.'),
+      false,
+    );
+    assert.equal(
+      visible.messages.some(({ content }) => content === 'Internal candidate B.'),
+      false,
+    );
+    assert.equal(
+      visible.messages.some(({ content }) => content === response.content),
+      true,
+    );
+    assert.equal(visible.runs.length, 0);
+  } finally {
+    if (previousMode === undefined) delete process.env.AI_CHAT_MODE;
+    else process.env.AI_CHAT_MODE = previousMode;
+  }
+});
+
+test('BALANCED synthesis failure returns a safe failure without candidate fallback', async () => {
+  const f = await fixture();
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    text: 'Hidden candidate A.',
+  });
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    text: 'Hidden candidate B.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    fail: true,
+  });
+  const result = await submitAiChatMessage(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(gemini, [openai, anthropic])),
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
+    'Fail synthesis safely.',
+    { balancedProviderConfiguration: balancedRuntimeConfiguration, mode: 'BALANCED' },
+  );
+  assert.equal(result.mode, 'BALANCED');
+  assert.equal(result.responseRun, null);
+  assert.equal(result.failureCode, 'generation_failed');
+  const orchestration = await prisma.aiOrchestration.findFirstOrThrow();
+  assert.equal(orchestration.finalRunId, null);
+  const visible = await getAiConversation(prisma, f.ownerId, f.workspaceId, f.conversationId);
+  assert.equal(
+    visible.messages.some(({ content }) => content.startsWith('Hidden candidate')),
+    false,
+  );
+});
+
+test('Knowledge Actions remain single-provider when BALANCED Chat is available', async () => {
+  const f = await fixture();
+  let calls = 0;
+  const current = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: () => calls++,
+  });
+  const result = await runKnowledgeDocumentAiAction(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(current)),
+    f.ownerId,
+    f.workspaceId,
+    f.documentSlug,
+    1,
+    AiKnowledgeActionType.SUMMARIZE,
+  );
+  assert.equal(result.run.status, AiRunStatus.SUCCEEDED);
+  assert.equal(result.run.orchestrationId, null);
+  assert.equal(result.run.knowledgeActionType, AiKnowledgeActionType.SUMMARIZE);
   assert.equal(calls, 1);
 });
 

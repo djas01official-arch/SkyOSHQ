@@ -3,7 +3,9 @@ import {
   AiKnowledgeActionType,
   AiConversationStatus,
   AiMessageRole,
+  AiOrchestrationRole,
   AiRunStatus,
+  type AiRun,
   type PrismaClient,
 } from '../generated/client/client';
 import {
@@ -32,6 +34,7 @@ import {
   estimateLanguageModelCostUsd,
   normalizeLanguageModelUsage,
 } from '../../services/ai/language-model-pricing';
+import type { BalancedAiRuntimeConfiguration } from '../../services/ai/ai-orchestration-policy';
 
 const MAX_MESSAGE_CHARACTERS = 4_000;
 const MAX_HISTORY_CHARACTERS = 8_000;
@@ -84,6 +87,12 @@ export type AiConversationDependencies = Readonly<{
   providers: LanguageModelProviderRegistry;
   retrieval: KnowledgeRetrievalDependencies;
 }>;
+
+export type AiChatMode = 'FAST' | 'BALANCED';
+
+export type AiChatSubmissionResult =
+  | Readonly<{ mode: 'FAST'; responseRun: AiRun }>
+  | Readonly<{ failureCode: string | null; mode: 'BALANCED'; responseRun: AiRun | null }>;
 
 export class AiConversationError extends Error {
   readonly code: string;
@@ -181,9 +190,25 @@ async function loadBoundedHistory(
   const candidates = await prisma.aiMessage.findMany({
     where: {
       conversationId,
-      OR: [
-        { createdAt: { lt: currentMessage.createdAt } },
-        { createdAt: currentMessage.createdAt, id: { lt: currentMessage.id } },
+      AND: [
+        {
+          OR: [
+            { createdAt: { lt: currentMessage.createdAt } },
+            { createdAt: currentMessage.createdAt, id: { lt: currentMessage.id } },
+          ],
+        },
+        {
+          OR: [
+            { role: AiMessageRole.USER },
+            { generatedByRun: { orchestrationId: null } },
+            {
+              generatedByRun: {
+                orchestrationRole: AiOrchestrationRole.SYNTHESIZER,
+                status: AiRunStatus.SUCCEEDED,
+              },
+            },
+          ],
+        },
       ],
       workspaceId,
     },
@@ -253,14 +278,32 @@ export async function getAiConversation(
     where: { id: conversation.id },
     include: {
       messages: {
+        where: {
+          OR: [
+            { role: AiMessageRole.USER },
+            { generatedByRun: { orchestrationId: null } },
+            {
+              generatedByRun: {
+                orchestrationRole: AiOrchestrationRole.SYNTHESIZER,
+                status: AiRunStatus.SUCCEEDED,
+              },
+            },
+          ],
+        },
         include: {
           generatedByRun: {
-            include: { retrievalSnapshot: { include: { citations: true } } },
+            include: {
+              groundedContext: { include: { citations: true } },
+              retrievalSnapshot: { include: { citations: true } },
+            },
           },
         },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       },
-      runs: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] },
+      runs: {
+        where: { orchestrationId: null },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      },
     },
   });
 }
@@ -742,6 +785,143 @@ export async function submitAiMessage(
     });
   });
   return executeRun(prisma, dependencies, actorUserId, workspaceId, run.id, content);
+}
+
+function resolveAiChatMode(value: string | undefined): AiChatMode {
+  const mode = value?.trim().toUpperCase();
+  if (!mode || mode === 'FAST') return 'FAST';
+  if (mode === 'BALANCED') return 'BALANCED';
+  throw new AiConversationValidationError(
+    'The configured AI Chat mode is invalid.',
+    'chat_mode_invalid',
+  );
+}
+
+async function prepareBalancedChatRequest(
+  prisma: PrismaClient,
+  dependencies: AiConversationDependencies,
+  actorUserId: string,
+  workspaceId: string,
+  conversationId: string,
+  value: string,
+) {
+  const content = messageContent(value);
+  const conversation = await findOwnedConversation(
+    prisma,
+    actorUserId,
+    workspaceId,
+    conversationId,
+  );
+  await enforceRateLimit(prisma, actorUserId, workspaceId);
+  const retrieval = await retrieveKnowledgeContext(
+    prisma,
+    dependencies.retrieval,
+    actorUserId,
+    workspaceId,
+    content,
+  );
+  const groundedContext = createGroundedContext(workspaceId, retrieval, {
+    type: AiGroundedContextSourceType.WORKSPACE_RETRIEVAL,
+  });
+  const acceptedAt = new Date();
+  const message = await prisma.$transaction(async (transaction) => {
+    const created = await transaction.aiMessage.create({
+      data: {
+        authorUserId: actorUserId,
+        content,
+        conversationId,
+        role: AiMessageRole.USER,
+        workspaceId,
+      },
+    });
+    await transaction.aiConversation.update({
+      where: { id: conversation.id },
+      data: {
+        title: conversation.title === 'New conversation' ? titleFrom(content) : conversation.title,
+        updatedAt: acceptedAt,
+      },
+    });
+    return created;
+  });
+  const persistedContext = await persistGroundedContext(prisma, {
+    actorUserId,
+    context: groundedContext,
+    query: content,
+  });
+  return { content, groundedContextId: persistedContext.id, messageId: message.id };
+}
+
+export async function submitAiChatMessage(
+  prisma: PrismaClient,
+  dependencies: AiConversationDependencies,
+  actorUserId: string,
+  workspaceId: string,
+  conversationId: string,
+  value: string,
+  runtime: Readonly<{
+    balancedProviderConfiguration?: BalancedAiRuntimeConfiguration;
+    mode?: string;
+  }> = {},
+): Promise<AiChatSubmissionResult> {
+  const mode = resolveAiChatMode(runtime.mode ?? process.env.AI_CHAT_MODE);
+  if (mode === 'FAST') {
+    return {
+      mode,
+      responseRun: await submitAiMessage(
+        prisma,
+        dependencies,
+        actorUserId,
+        workspaceId,
+        conversationId,
+        value,
+      ),
+    };
+  }
+  const prepared = await prepareBalancedChatRequest(
+    prisma,
+    dependencies,
+    actorUserId,
+    workspaceId,
+    conversationId,
+    value,
+  );
+  const { executeBalancedGroundedRequest } = await import('./ai-orchestrations');
+  const orchestration = await executeBalancedGroundedRequest(
+    prisma,
+    dependencies,
+    actorUserId,
+    workspaceId,
+    {
+      conversationId,
+      groundedContextId: prepared.groundedContextId,
+      originalUserRequest: prepared.content,
+      ...(runtime.balancedProviderConfiguration
+        ? { providerConfiguration: runtime.balancedProviderConfiguration }
+        : {}),
+      userMessageId: prepared.messageId,
+    },
+  );
+  if (!orchestration.finalRunId) {
+    return {
+      failureCode: orchestration.failureCode ?? 'generation_failed',
+      mode,
+      responseRun: null,
+    };
+  }
+  const responseRun = await prisma.aiRun.findFirst({
+    where: {
+      id: orchestration.finalRunId,
+      orchestrationId: orchestration.id,
+      orchestrationRole: AiOrchestrationRole.SYNTHESIZER,
+      status: AiRunStatus.SUCCEEDED,
+      workspaceId,
+    },
+  });
+  return {
+    failureCode: responseRun ? null : 'generation_failed',
+    mode,
+    responseRun,
+  };
 }
 
 export async function retryAiRun(

@@ -10,7 +10,7 @@ import {
   createAiConversation,
   retryAiRun,
   setAiConversationArchived,
-  submitAiMessage,
+  submitAiChatMessage,
 } from '../../../../database/ai/ai-conversations';
 
 import { requireCurrentUser } from '@/lib/auth/current-user';
@@ -49,7 +49,7 @@ export async function submitMessageAction(
     return { error: 'The AI conversation is unavailable. Refresh and try again.' };
   }
   try {
-    await submitAiMessage(
+    const result = await submitAiChatMessage(
       prisma,
       aiConversationDependencies,
       user.id,
@@ -57,6 +57,9 @@ export async function submitMessageAction(
       conversationId,
       value(formData, 'message'),
     );
+    if (result.mode === 'BALANCED' && !result.responseRun) {
+      return { error: 'The AI response could not be generated.' };
+    }
   } catch (error) {
     if (
       error instanceof AiConversationValidationError ||

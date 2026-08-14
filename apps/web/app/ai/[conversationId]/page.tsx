@@ -55,9 +55,10 @@ export default async function ConversationPage({ params }: ConversationPageProps
       </div>
       <div className="mt-7 space-y-4">
         {conversation.messages.map((message) => {
-          const citations = message.generatedByRun?.retrievalSnapshot?.citations.filter(
-            (citation) =>
-              message.generatedByRun?.referencedCitationIds.includes(citation.citationId),
+          const snapshot =
+            message.generatedByRun?.groundedContext ?? message.generatedByRun?.retrievalSnapshot;
+          const citations = snapshot?.citations.filter((citation) =>
+            message.generatedByRun?.referencedCitationIds.includes(citation.citationId),
           );
           return (
             <Card
