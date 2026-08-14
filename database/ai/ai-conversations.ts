@@ -448,6 +448,7 @@ async function executeRun(
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
           providerRequestId: safeProviderRequestId(response.providerRequestId),
+          reasoningTokens: usage.reasoningTokens,
           referencedCitationIds,
           status: AiRunStatus.SUCCEEDED,
           totalTokens: usage.totalTokens,

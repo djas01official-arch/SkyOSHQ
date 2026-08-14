@@ -168,6 +168,17 @@ function uniqueCitationIds(groups: readonly string[][]): string[] {
   return [...new Set(groups.flat())];
 }
 
+export function parseGroundedAnswerResponse(value: unknown): {
+  answer: string;
+  citationIds: string[];
+} {
+  const result = object(value, ['answer', 'citationIds']);
+  return {
+    answer: text(result.answer),
+    citationIds: citationIds(result.citationIds),
+  };
+}
+
 export function parseKnowledgeActionResponse(
   value: unknown,
   format: Exclude<LanguageModelResponseFormat, 'grounded_answer'>,

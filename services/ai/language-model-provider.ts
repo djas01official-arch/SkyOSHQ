@@ -3,6 +3,11 @@ import {
   ANTHROPIC_APPROVED_MODELS,
   AnthropicLanguageModelProvider,
 } from './anthropic-language-model-provider';
+import {
+  GEMINI_APPROVED_MODELS,
+  GeminiLanguageModelProvider,
+  type GeminiInteractionClient,
+} from './gemini-language-model-provider';
 
 export type LanguageModelProviderDescriptor = Readonly<{
   maxInputCharacters: number;
@@ -50,6 +55,7 @@ export type LanguageModelResponse = Readonly<{
   modelKey?: string;
   outputTokens?: number;
   providerRequestId?: string;
+  reasoningTokens?: number;
   text: string;
   totalTokens?: number;
 }>;
@@ -249,6 +255,8 @@ export function createDefaultLanguageModelProviderRegistry(
     anthropicApiKey?: string;
     anthropicFetch?: typeof globalThis.fetch;
     deterministicFailureMessage?: string;
+    geminiApiKey?: string;
+    geminiInteractionClient?: GeminiInteractionClient;
     model?: string;
     openAiApiKey?: string;
     openAiFetch?: typeof globalThis.fetch;
@@ -322,6 +330,52 @@ export function createDefaultLanguageModelProviderRegistry(
           new AnthropicLanguageModelProvider({
             apiKey,
             fetch: options.anthropicFetch,
+            model: approvedModel,
+            runtime,
+          }),
+      );
+      const current = approvedProviders.find((provider) => provider.modelKey === model);
+      if (!current) {
+        return new LanguageModelProviderRegistry(
+          new UnavailableLanguageModelProvider('provider_configuration_invalid'),
+        );
+      }
+      return new LanguageModelProviderRegistry(
+        current,
+        approvedProviders.filter((provider) => provider !== current),
+      );
+    } catch (error) {
+      if (
+        error instanceof LanguageModelProviderError &&
+        error.code === 'provider_configuration_invalid'
+      ) {
+        return new LanguageModelProviderRegistry(
+          new UnavailableLanguageModelProvider('provider_configuration_invalid'),
+        );
+      }
+      throw error;
+    }
+  }
+
+  if (key === 'gemini') {
+    const model = (options.model ?? process.env.AI_MODEL)?.trim();
+    const apiKey = (options.geminiApiKey ?? process.env.GEMINI_API_KEY)?.trim();
+    if (!model || !apiKey) {
+      return new LanguageModelProviderRegistry(
+        new UnavailableLanguageModelProvider('provider_configuration_invalid'),
+      );
+    }
+    if (runtime !== 'production' && !options.geminiInteractionClient) {
+      return new LanguageModelProviderRegistry(
+        new UnavailableLanguageModelProvider('provider_network_disabled'),
+      );
+    }
+    try {
+      const approvedProviders = GEMINI_APPROVED_MODELS.map(
+        (approvedModel) =>
+          new GeminiLanguageModelProvider({
+            apiKey,
+            interactionClient: options.geminiInteractionClient,
             model: approvedModel,
             runtime,
           }),

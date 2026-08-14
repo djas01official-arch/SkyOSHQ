@@ -16,6 +16,7 @@ export type LanguageModelPricing = Readonly<{
   }>;
   modelKey: string;
   outputUsdPerMillionTokens: number;
+  reasoningUsdPerMillionTokens?: number;
   providerKey: string;
   supportedInferenceGeos?: readonly string[];
   effectiveFrom?: string;
@@ -30,6 +31,7 @@ export type LanguageModelUsage = Readonly<{
   cachedInputTokens?: number;
   inputTokens?: number;
   outputTokens?: number;
+  reasoningTokens?: number;
   totalTokens?: number;
 }>;
 
@@ -96,6 +98,19 @@ export const ANTHROPIC_CLAUDE_SONNET_5_STANDARD_PRICING: LanguageModelPricing = 
   verifiedOn: '2026-08-13',
 };
 
+export const GEMINI_3_6_FLASH_PRICING: LanguageModelPricing = {
+  cacheWriteInputUsdPerMillionTokens: 1.5,
+  cachedInputUsdPerMillionTokens: 0.15,
+  effectiveFrom: '2026-08-14T00:00:00.000Z',
+  inputUsdPerMillionTokens: 1.5,
+  modelKey: 'gemini-3.6-flash',
+  outputUsdPerMillionTokens: 7.5,
+  providerKey: 'gemini',
+  reasoningUsdPerMillionTokens: 7.5,
+  source: 'https://ai.google.dev/gemini-api/docs/pricing',
+  verifiedOn: '2026-08-14',
+};
+
 const pricingCatalog = new Map<string, readonly LanguageModelPricing[]>([
   [
     `${OPENAI_GPT_5_6_TERRA_PRICING.providerKey}:${OPENAI_GPT_5_6_TERRA_PRICING.modelKey}`,
@@ -108,6 +123,10 @@ const pricingCatalog = new Map<string, readonly LanguageModelPricing[]>([
   [
     `${ANTHROPIC_CLAUDE_SONNET_5_PROMOTIONAL_PRICING.providerKey}:${ANTHROPIC_CLAUDE_SONNET_5_PROMOTIONAL_PRICING.modelKey}`,
     [ANTHROPIC_CLAUDE_SONNET_5_PROMOTIONAL_PRICING, ANTHROPIC_CLAUDE_SONNET_5_STANDARD_PRICING],
+  ],
+  [
+    `${GEMINI_3_6_FLASH_PRICING.providerKey}:${GEMINI_3_6_FLASH_PRICING.modelKey}`,
+    [GEMINI_3_6_FLASH_PRICING],
   ],
 ]);
 
@@ -160,6 +179,7 @@ function pricedTokenCost(
 export function normalizeLanguageModelUsage(usage: LanguageModelUsage): LanguageModelUsage {
   const inputTokens = tokenCount(usage.inputTokens);
   const outputTokens = tokenCount(usage.outputTokens);
+  const reasoningTokens = tokenCount(usage.reasoningTokens);
   const candidateCachedTokens = tokenCount(usage.cachedInputTokens);
   const candidateCacheWriteTokens = tokenCount(usage.cacheWriteInputTokens);
   const candidateCacheWrite1HourTokens = tokenCount(usage.cacheWrite1HourInputTokens);
@@ -176,7 +196,7 @@ export function normalizeLanguageModelUsage(usage: LanguageModelUsage): Language
       : undefined;
   const derivedTotal =
     inputTokens !== undefined && outputTokens !== undefined
-      ? tokenCount(inputTokens + outputTokens)
+      ? tokenCount(inputTokens + outputTokens + (reasoningTokens ?? 0))
       : undefined;
   const providerTotal = tokenCount(usage.totalTokens);
 
@@ -186,6 +206,7 @@ export function normalizeLanguageModelUsage(usage: LanguageModelUsage): Language
     cachedInputTokens,
     inputTokens,
     outputTokens,
+    reasoningTokens,
     totalTokens:
       providerTotal !== undefined && (derivedTotal === undefined || providerTotal === derivedTotal)
         ? providerTotal
@@ -213,6 +234,9 @@ export function calculateLanguageModelCostUsd(
 ): string | undefined {
   const normalized = normalizeLanguageModelUsage(usage);
   if (normalized.inputTokens === undefined || normalized.outputTokens === undefined) {
+    return undefined;
+  }
+  if ((normalized.reasoningTokens ?? 0) > 0 && pricing.reasoningUsdPerMillionTokens === undefined) {
     return undefined;
   }
   const cachedInputTokens = normalized.cachedInputTokens ?? 0;
@@ -264,6 +288,11 @@ export function calculateLanguageModelCostUsd(
     pricedTokenCost(
       normalized.outputTokens,
       pricing.outputUsdPerMillionTokens,
+      activeLongContext?.outputMultiplier,
+    ) +
+    pricedTokenCost(
+      normalized.reasoningTokens ?? 0,
+      pricing.reasoningUsdPerMillionTokens ?? 0,
       activeLongContext?.outputMultiplier,
     );
   return formatPicoUsd(picoUsd);

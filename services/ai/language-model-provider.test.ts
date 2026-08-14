@@ -61,6 +61,15 @@ test('production selects only explicitly configured providers and never falls ba
   assert.equal(anthropic.providerKey, 'anthropic');
   assert.equal(anthropic.modelKey, 'claude-sonnet-5');
 
+  const gemini = createDefaultLanguageModelProviderRegistry({
+    configuredProvider: 'gemini',
+    geminiApiKey: 'production-secret-shaped-value',
+    model: 'gemini-3.6-flash',
+    runtime: 'production',
+  }).getCurrent();
+  assert.equal(gemini.providerKey, 'gemini');
+  assert.equal(gemini.modelKey, 'gemini-3.6-flash');
+
   for (const options of [
     { configuredProvider: '', model: 'gpt-5.6-terra', openAiApiKey: 'valid-value' },
     { configuredProvider: 'unknown', model: 'gpt-5.6-terra', openAiApiKey: 'valid-value' },
@@ -80,6 +89,16 @@ test('production selects only explicitly configured providers and never falls ba
       anthropicApiKey: '<server-secret>',
       configuredProvider: 'anthropic',
       model: 'claude-sonnet-4-6',
+    },
+    {
+      configuredProvider: 'gemini',
+      geminiApiKey: 'valid-value',
+      model: 'gemini-3.7-flash',
+    },
+    {
+      configuredProvider: 'gemini',
+      geminiApiKey: '<server-secret>',
+      model: 'gemini-3.6-flash',
     },
   ]) {
     const unavailable = createDefaultLanguageModelProviderRegistry({
@@ -155,6 +174,21 @@ test('non-production Anthropic selection requires an explicitly injected offline
     anthropicApiKey: 'offline-test-value',
     configuredProvider: 'anthropic',
     model: 'claude-sonnet-4-6',
+    runtime: 'test',
+  }).getCurrent();
+  assert.equal(provider.providerKey, 'unconfigured');
+  await assert.rejects(
+    provider.generate(request),
+    (error: unknown) =>
+      error instanceof LanguageModelProviderError && error.code === 'provider_network_disabled',
+  );
+});
+
+test('non-production Gemini selection requires an explicitly injected offline transport', async () => {
+  const provider = createDefaultLanguageModelProviderRegistry({
+    configuredProvider: 'gemini',
+    geminiApiKey: 'offline-test-value',
+    model: 'gemini-3.6-flash',
     runtime: 'test',
   }).getCurrent();
   assert.equal(provider.providerKey, 'unconfigured');

@@ -730,6 +730,57 @@ test('Anthropic runs preserve workspace scope, usage, and only permitted citatio
   );
 });
 
+test('Gemini runs preserve workspace scope, thought usage, and only permitted citation ids', async () => {
+  const f = await fixture();
+  const other = await fixture();
+  await knowledge(f, 'gemini citation allowlist canary');
+  const provider: LanguageModelProvider = {
+    ...fakeModel,
+    modelKey: 'gemini-3.6-flash',
+    modelVersion: 'interactions-json-schema-v1',
+    providerKey: 'gemini',
+    generate: async (request) => ({
+      cachedInputTokens: 40,
+      citationIds: ['cite_fabricated', request.citations[0]!.citationId],
+      inputTokens: 170,
+      outputTokens: 20,
+      providerRequestId: 'interaction_integration_test',
+      reasoningTokens: 10,
+      text: 'Validated Gemini citation response.',
+      totalTokens: 200,
+    }),
+  };
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+  const run = await submitAiMessage(
+    prisma,
+    dependencies(provider),
+    f.ownerId,
+    f.workspaceId,
+    conversation.id,
+    'gemini citation allowlist canary',
+  );
+  assert.equal(run.status, AiRunStatus.SUCCEEDED);
+  assert.equal(run.providerKey, 'gemini');
+  assert.equal(run.workspaceId, f.workspaceId);
+  assert.equal(run.cachedInputTokens, 40);
+  assert.equal(run.outputTokens, 20);
+  assert.equal(run.reasoningTokens, 10);
+  assert.equal(run.totalTokens, 200);
+  assert.equal(run.providerRequestId, 'interaction_integration_test');
+  assert.equal(run.estimatedCostUsd?.toString(), '0.000426');
+  assert.deepEqual(run.referencedCitationIds, [
+    (
+      await prisma.aiRunCitation.findFirstOrThrow({
+        where: { snapshot: { workspaceId: f.workspaceId } },
+      })
+    ).citationId,
+  ]);
+  assert.equal(
+    await prisma.aiRun.count({ where: { id: run.id, workspaceId: other.workspaceId } }),
+    0,
+  );
+});
+
 test('no-context responses persist without invented citations', async () => {
   const f = await fixture();
   const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
@@ -776,6 +827,7 @@ test('provider failure retains one user message and retry creates a new successf
   assert.equal(failed.cacheWriteInputTokens, null);
   assert.equal(failed.cachedInputTokens, null);
   assert.equal(failed.outputTokens, null);
+  assert.equal(failed.reasoningTokens, null);
   assert.equal(failed.totalTokens, null);
   assert.equal(failed.estimatedCostUsd, null);
   const retried = await retryAiRun(prisma, dependencies(), f.ownerId, f.workspaceId, failed.id);

@@ -739,6 +739,7 @@ model AiRun {
   cacheWriteInputTokens Int?
   cachedInputTokens     Int?
   outputTokens          Int?
+  reasoningTokens       Int?
   totalTokens           Int?
   providerRequestId     String?
   estimatedCostUsd      Decimal?            @db.Decimal(20, 12)

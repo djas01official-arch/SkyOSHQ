@@ -4,8 +4,10 @@ packages:
   - 'packages/*'
 
 allowBuilds:
+  '@google/genai': false
   '@prisma/engines': true
   argon2: true
   esbuild: true
   prisma: true
+  protobufjs: false
   sharp: false

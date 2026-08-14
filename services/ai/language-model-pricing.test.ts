@@ -7,6 +7,7 @@ import {
   ANTHROPIC_CLAUDE_SONNET_5_STANDARD_PRICING,
   calculateLanguageModelCostUsd,
   estimateLanguageModelCostUsd,
+  GEMINI_3_6_FLASH_PRICING,
   normalizeLanguageModelUsage,
   OPENAI_GPT_5_6_TERRA_PRICING,
 } from './language-model-pricing';
@@ -260,6 +261,36 @@ test('leaves Anthropic regional or unreported inference pricing unknown', () => 
   );
 });
 
+test('prices Gemini visible output and thought tokens exactly once', () => {
+  const effectiveAt = new Date('2026-08-14T12:00:00.000Z');
+  const usage = {
+    cachedInputTokens: 100,
+    inputTokens: 1_000,
+    outputTokens: 100,
+    reasoningTokens: 50,
+    totalTokens: 1_150,
+  };
+  assert.equal(
+    estimateLanguageModelCostUsd('gemini', 'gemini-3.6-flash', usage, effectiveAt),
+    '0.002490000000',
+  );
+  assert.equal(calculateLanguageModelCostUsd(usage, GEMINI_3_6_FLASH_PRICING), '0.002490000000');
+});
+
+test('Gemini pricing is dated and ambiguous reasoning pricing remains unknown', () => {
+  const usage = { inputTokens: 100, outputTokens: 20, reasoningTokens: 10 };
+  assert.equal(
+    estimateLanguageModelCostUsd(
+      'gemini',
+      'gemini-3.6-flash',
+      usage,
+      new Date('2026-08-13T23:59:59.999Z'),
+    ),
+    undefined,
+  );
+  assert.equal(calculateLanguageModelCostUsd(usage, OPENAI_GPT_5_6_TERRA_PRICING), undefined);
+});
+
 test('normalization derives consistent totals and rejects invalid cached counts', () => {
   assert.deepEqual(
     normalizeLanguageModelUsage({
@@ -275,6 +306,7 @@ test('normalization derives consistent totals and rejects invalid cached counts'
       cachedInputTokens: 25,
       inputTokens: 100,
       outputTokens: 20,
+      reasoningTokens: undefined,
       totalTokens: 120,
     },
   );
@@ -290,6 +322,7 @@ test('normalization derives consistent totals and rejects invalid cached counts'
       cachedInputTokens: undefined,
       inputTokens: 100,
       outputTokens: 20,
+      reasoningTokens: undefined,
       totalTokens: 120,
     },
   );
