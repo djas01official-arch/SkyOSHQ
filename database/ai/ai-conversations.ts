@@ -1,13 +1,16 @@
-import { createHash } from 'node:crypto';
-
 import {
+  AiGroundedContextSourceType,
   AiKnowledgeActionType,
   AiConversationStatus,
   AiMessageRole,
   AiRunStatus,
-  KnowledgeChunkSourceType,
   type PrismaClient,
 } from '../generated/client/client';
+import {
+  createGroundedContext,
+  loadGroundedContext,
+  persistGroundedContext,
+} from './grounded-context';
 import {
   retrieveKnowledgeContext,
   retrieveKnowledgeDocumentVersionContext,
@@ -94,7 +97,7 @@ export class AiConversationNotFoundError extends AiConversationError {}
 export class AiConversationValidationError extends AiConversationError {}
 export class AiConversationRateLimitError extends AiConversationError {}
 
-async function requireAiAccess(
+export async function requireAiAccess(
   prisma: PrismaClient,
   actorUserId: string,
   workspaceId: string,
@@ -323,53 +326,93 @@ function safeFailure(error: unknown): {
   return { code: 'generation_failed', message: 'The AI response could not be generated.' };
 }
 
-async function executeRun(
+async function failRun(prisma: PrismaClient, runId: string, startedAt: number, error: unknown) {
+  const failure = safeFailure(error);
+  return prisma.aiRun.update({
+    where: { id: runId },
+    data: {
+      completedAt: new Date(),
+      durationMs: Date.now() - startedAt,
+      failureCode: failure.code,
+      failureMessage: failure.message,
+      providerRequestId: failure.providerRequestId,
+      status: AiRunStatus.FAILED,
+    },
+  });
+}
+
+/**
+ * Executes exactly one provider against an already approved immutable context.
+ * Retrieval, provider credentials, and orchestration policy selection remain
+ * outside this boundary; telemetry, cost, citations, and terminal run state do not.
+ */
+export async function executeGroundedRun(
   prisma: PrismaClient,
   dependencies: AiConversationDependencies,
-  actorUserId: string,
-  workspaceId: string,
-  runId: string,
-  userMessage: string,
-  actionGrounding?: KnowledgeActionGrounding,
+  input: Readonly<{
+    actorUserId: string;
+    groundedContextId: string;
+    responseFormat: LanguageModelResponseFormat;
+    runId: string;
+    startedAt?: number;
+    userMessage: string;
+    workspaceId: string;
+  }>,
 ) {
-  const startedAt = Date.now();
+  const startedAt = input.startedAt ?? Date.now();
+  await requireAiAccess(prisma, input.actorUserId, input.workspaceId);
+  const run = await prisma.aiRun.findFirst({
+    where: {
+      id: input.runId,
+      requestedByUserId: input.actorUserId,
+      status: AiRunStatus.PROCESSING,
+      workspaceId: input.workspaceId,
+    },
+  });
+  if (!run || (run.groundedContextId && run.groundedContextId !== input.groundedContextId)) {
+    throw new AiConversationNotFoundError(
+      'The AI run was not found in this workspace.',
+      'run_not_found',
+    );
+  }
+  const groundedContext = await loadGroundedContext(
+    prisma,
+    input.workspaceId,
+    input.groundedContextId,
+  );
+  if (!groundedContext) {
+    throw new AiConversationAuthorizationError(
+      'GroundedContext does not belong to the selected workspace.',
+      'grounded_context_forbidden',
+    );
+  }
   try {
-    const run = await prisma.aiRun.findUniqueOrThrow({
-      where: { id: runId },
-      select: { conversationId: true, createdAt: true, userMessageId: true },
-    });
+    const provider = dependencies.providers.getVersion(
+      run.providerKey,
+      run.modelKey,
+      run.modelVersion,
+    );
+    if (!run.groundedContextId) {
+      await prisma.aiRun.update({
+        where: { id: run.id },
+        data: { groundedContextId: input.groundedContextId },
+      });
+    }
     const history = await loadBoundedHistory(
       prisma,
-      workspaceId,
+      input.workspaceId,
       run.conversationId,
       run.userMessageId,
     );
-    const provider = dependencies.providers.getCurrent();
-    const retrieval = actionGrounding
-      ? await retrieveKnowledgeDocumentVersionContext(
-          prisma,
-          actorUserId,
-          workspaceId,
-          actionGrounding.documentVersionId,
-        )
-      : await retrieveKnowledgeContext(
-          prisma,
-          dependencies.retrieval,
-          actorUserId,
-          workspaceId,
-          userMessage,
-        );
     const response = await generateWithTimeout(provider, {
-      citations: retrieval.items.map((item) => ({
-        citationId: item.citation.id,
-        text: item.text,
+      citations: groundedContext.excerpts.map((excerpt) => ({
+        citationId: excerpt.citation.id,
+        text: excerpt.text,
       })),
-      context: retrieval.context,
+      context: groundedContext.context,
       history,
-      responseFormat: actionGrounding
-        ? KNOWLEDGE_ACTION_DEFINITIONS[actionGrounding.actionType].responseFormat
-        : 'grounded_answer',
-      userMessage,
+      responseFormat: input.responseFormat,
+      userMessage: input.userMessage,
     });
     if (response.text.trim().length < 1 || response.text.length > provider.maxOutputCharacters) {
       throw new LanguageModelProviderError(
@@ -377,7 +420,7 @@ async function executeRun(
         'provider_output_invalid',
       );
     }
-    const allowed = new Set(retrieval.items.map((item) => item.citation.id));
+    const allowed = new Set(groundedContext.allowedCitationIds);
     const referencedCitationIds = [...new Set(response.citationIds)].filter((id) =>
       allowed.has(id),
     );
@@ -391,53 +434,17 @@ async function executeRun(
     );
     const completedAt = new Date();
     await prisma.$transaction(async (transaction) => {
-      const snapshot = await transaction.aiRetrievalSnapshot.create({
-        data: {
-          characterCount: retrieval.limits.characterCount,
-          context: retrieval.context,
-          contextChecksum: createHash('sha256').update(retrieval.context, 'utf8').digest('hex'),
-          queryChecksum: createHash('sha256').update(userMessage, 'utf8').digest('hex'),
-          resultCount: retrieval.items.length,
-          runId,
-          workspaceId,
-        },
-      });
-      if (retrieval.items.length) {
-        await transaction.aiRunCitation.createMany({
-          data: retrieval.items.map((item) => ({
-            attachmentId: item.citation.attachmentId,
-            characterEnd: item.citation.characterEnd,
-            characterStart: item.citation.characterStart,
-            chunkOrdinal: item.citation.chunkOrdinal,
-            chunkSetId: item.citation.chunkSetId,
-            citationId: item.citation.id,
-            displayedExcerpt: item.text,
-            displayedExcerptChecksum: item.citation.displayedExcerptChecksum,
-            documentSlug: item.citation.documentSlug,
-            documentVersion: item.citation.documentVersion,
-            extractionVersion: item.citation.extractionVersion,
-            filename: item.citation.filename,
-            snapshotId: snapshot.id,
-            sourceId: item.citation.sourceId,
-            sourceType:
-              item.citation.sourceType === 'document'
-                ? KnowledgeChunkSourceType.MARKDOWN_DOCUMENT
-                : KnowledgeChunkSourceType.ATTACHMENT_EXTRACTION,
-          })),
-        });
-      }
       await transaction.aiMessage.create({
         data: {
           content: response.text,
-          conversationId: (await transaction.aiRun.findUniqueOrThrow({ where: { id: runId } }))
-            .conversationId,
-          generatedByRunId: runId,
+          conversationId: run.conversationId,
+          generatedByRunId: run.id,
           role: AiMessageRole.ASSISTANT,
-          workspaceId,
+          workspaceId: input.workspaceId,
         },
       });
       await transaction.aiRun.update({
-        where: { id: runId },
+        where: { id: run.id },
         data: {
           completedAt,
           cacheWrite1HourInputTokens: usage.cacheWrite1HourInputTokens,
@@ -455,27 +462,67 @@ async function executeRun(
         },
       });
       await transaction.aiConversation.update({
-        where: {
-          id: (await transaction.aiRun.findUniqueOrThrow({ where: { id: runId } })).conversationId,
-        },
+        where: { id: run.conversationId },
         data: { updatedAt: completedAt },
       });
     });
   } catch (error) {
-    const failure = safeFailure(error);
-    await prisma.aiRun.update({
-      where: { id: runId },
-      data: {
-        completedAt: new Date(),
-        durationMs: Date.now() - startedAt,
-        failureCode: failure.code,
-        failureMessage: failure.message,
-        providerRequestId: failure.providerRequestId,
-        status: AiRunStatus.FAILED,
-      },
-    });
+    await failRun(prisma, input.runId, startedAt, error);
   }
-  return prisma.aiRun.findUniqueOrThrow({ where: { id: runId } });
+  return prisma.aiRun.findUniqueOrThrow({ where: { id: input.runId } });
+}
+
+async function executeRun(
+  prisma: PrismaClient,
+  dependencies: AiConversationDependencies,
+  actorUserId: string,
+  workspaceId: string,
+  runId: string,
+  userMessage: string,
+  actionGrounding?: KnowledgeActionGrounding,
+) {
+  const startedAt = Date.now();
+  try {
+    const retrieval = actionGrounding
+      ? await retrieveKnowledgeDocumentVersionContext(
+          prisma,
+          actorUserId,
+          workspaceId,
+          actionGrounding.documentVersionId,
+        )
+      : await retrieveKnowledgeContext(
+          prisma,
+          dependencies.retrieval,
+          actorUserId,
+          workspaceId,
+          userMessage,
+        );
+    const groundedContext = createGroundedContext(workspaceId, retrieval, {
+      knowledgeDocumentVersionId: actionGrounding?.documentVersionId,
+      type: actionGrounding
+        ? AiGroundedContextSourceType.KNOWLEDGE_DOCUMENT_VERSION
+        : AiGroundedContextSourceType.WORKSPACE_RETRIEVAL,
+    });
+    const snapshot = await persistGroundedContext(prisma, {
+      actorUserId,
+      context: groundedContext,
+      query: userMessage,
+      runId,
+    });
+    return executeGroundedRun(prisma, dependencies, {
+      actorUserId,
+      groundedContextId: snapshot.id,
+      responseFormat: actionGrounding
+        ? KNOWLEDGE_ACTION_DEFINITIONS[actionGrounding.actionType].responseFormat
+        : 'grounded_answer',
+      runId,
+      startedAt,
+      userMessage,
+      workspaceId,
+    });
+  } catch (error) {
+    return failRun(prisma, runId, startedAt, error);
+  }
 }
 
 async function createRunForMessage(

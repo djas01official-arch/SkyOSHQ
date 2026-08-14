@@ -30,10 +30,11 @@ Access is explicit, deny-by-default, and evaluated at the smallest applicable sc
 | Knowledge embedding job    | Durable, audited request to embed one immutable Knowledge chunk set.                             |
 | Knowledge embedding set    | Immutable provider/model-versioned vector collection for one exact chunk set.                    |
 | Knowledge embedding        | One immutable vector and input checksum mapped to exactly one chunk ordinal.                     |
-| Retrieval context          | Bounded, deterministic untrusted Knowledge excerpts prepared for one AI run.                     |
+| Grounded context           | Versioned, immutable, workspace-approved evidence shared by one or more AI runs.                 |
 | Retrieval citation         | Stable provenance for the exact displayed excerpt included in one retrieval context.             |
 | AI conversation            | One user-owned, workspace-scoped ordered history of immutable user and assistant messages.       |
 | AI run                     | One durable provider execution attempt for one immutable user message.                           |
+| AI orchestration           | One durable logical AI operation coordinating independently attributable child runs.             |
 | AI retrieval snapshot      | The exact bounded untrusted Knowledge context and permitted citations used by one run.           |
 | Knowledge AI action        | A normal AI run pinned to one immutable Markdown document version and one fixed action type.     |
 | Membership                 | A scoped, revocable relationship between a user and an organization or workspace.                |
@@ -765,7 +766,7 @@ These rules must be enforced transactionally by any future persistence and autho
 78. AI execution metadata is separate from tenancy `AuditEvent`; provider secrets, hidden prompts, raw vectors, authorization headers, and unnecessary full upstream payloads are never persisted.
 79. A Knowledge-launched AI action requires effective `knowledge.read` and `ai.use`, pins one active document's exact immutable version on its normal user-owned `AiRun`, and never invokes broad workspace retrieval. Client input supplies no workspace or organization authority; the service resolves both from effective membership and constrains the selected document through that workspace.
 80. Direct-version action context is complete or rejected: SkyOS never silently truncates a source and labels the result as a complete action. Direct citations derive from the trusted workspace, document/version, deterministic excerpt ordinal, offsets, and excerpt checksum; they may omit a chunk-set reference because the immutable version is authoritative. Retry creates a new run with the same action type and source relation. Strict action schemas keep unsupported owner, due date, or rationale fields null and produce explicit empty-result language for unsupported action items, risks, or decisions.
-81. Language-model providers are versioned execution backends registered behind one provider-neutral contract, not user-facing personalities or authorization authorities. The server selects the current backend; ordinary clients cannot select or silently trigger another provider. The registry may retain multiple unique provider/model/policy versions so future orchestration can execute independent runs over the same SkyOS-created grounded context without changing source scope.
+81. Language-model providers are versioned execution backends registered behind one provider-neutral contract, not user-facing personalities or authorization authorities. The server selects the current backend; ordinary clients cannot select or silently trigger another provider. The registry may retain multiple unique provider/model/policy versions so future orchestration can execute independent runs over the same SkyOS-created grounded context without changing source scope. Provider identity and orchestration role are independent dimensions.
 82. Every provider execution remains one distinct `AiRun`. Future solver, critic, verifier, and synthesizer roles must preserve per-run provider identity, usage, cost, failure, and citation evidence. A provider cannot retrieve additional sources, broaden context, or make its citation ids authoritative, and no fallback or synthesis behavior is implied by registering more than one backend.
 83. Every task belongs to exactly one workspace. Its `id`, `workspaceId`, and `createdByUserId` cannot be reassigned after creation, and creator attribution grants no authority.
 84. Listing or reading tasks requires effective `tasks.read`; creating, updating, assigning, unassigning, changing status or priority, and archiving requires effective `tasks.write`. All checks derive workspace scope from trusted server context and the persisted task, never a client-supplied workspace id.
@@ -836,7 +837,7 @@ Keyword mode does not depend on the embedding provider. Semantic mode requires a
 
 ## RAG context and citation lifecycle
 
-The RAG boundary first produces a bounded retrieval result in memory. When an AI run succeeds, the exact context and every permitted citation are persisted as an immutable retrieval snapshot in the same transaction as the assistant message and successful terminal run state. Search candidates are not sufficient by themselves: the retrieval transaction revalidates authorization and current active source generations, loads selected and neighboring chunks from exact immutable sets, then applies budgets and citations.
+The RAG boundary first produces a bounded retrieval result in memory. Before provider execution, SkyOS converts that result into one immutable, versioned GroundedContext and persists its exact context plus every permitted citation through the existing append-only retrieval-snapshot tables. Search candidates are not sufficient by themselves: the retrieval transaction revalidates authorization and current active source generations, loads selected and neighboring chunks from exact immutable sets, then applies budgets and citations. Multiple orchestration child runs may reference the same snapshot; they may not retrieve independently or mutate it.
 
 ```mermaid
 flowchart LR
@@ -848,7 +849,17 @@ flowchart LR
   Citations --> Package["Delimited untrusted JSON context"]
 ```
 
-Citation ids are not model-generated. They derive from trusted provenance and the exact excerpt checksum before a provider sees context. Future AI runs may reference only ids from their own persisted retrieval snapshot; no model-supplied workspace, source, URL, or citation identity is authoritative.
+Citation ids are not model-generated. They derive from trusted provenance and the exact excerpt checksum before a provider sees context. AI runs may reference only ids from their approved persisted GroundedContext; no model-supplied workspace, source, URL, or citation identity is authoritative. Provider outputs do not become trusted evidence or expand the context automatically.
+
+### AI orchestration invariants
+
+`AiOrchestration` is workspace- and organization-scoped, creator-attributed, and protected by effective `ai.use`. It stores one immutable GroundedContext identity and optional conversation/user-message identity, plus an application-owned mode, policy key/version, orchestration version, lifecycle timestamps, safe failure code, and optional intentional final run.
+
+Modes are `FAST`, `BALANCED`, `DEEP`, and `CRITICAL`. Roles are `CANDIDATE`, `CRITIC`, `VERIFIER`, and `SYNTHESIZER`. Static policy steps determine allowed roles, stages, required status, and registered provider/model eligibility. No role is assigned permanently to OpenAI, Anthropic, Gemini, or another provider.
+
+Every orchestrated `AiRun` belongs to the same workspace, creator, and GroundedContext as its parent orchestration, while retaining independent provider/model/version, usage, cost, status, request ID, and citation metadata. Historical runs may have no orchestration or GroundedContext link. A successful final result must be an explicitly selected successful child of the same orchestration and workspace; FAST permits a candidate final, while other modes require a synthesizer. Partial success may have no final run, and failed synthesis never promotes a candidate implicitly.
+
+Orchestration aggregation counts successful and failed child runs and sums available input, output, reasoning, cached, and total token telemetry. Known fixed-precision provider cost is aggregated separately from the count of successful runs whose cost is unknown; null cost is never treated as zero.
 
 Knowledge-launched AI actions use the same snapshot and citation allowlist but deliberately skip search. The run stores one action type and one immutable `KnowledgeDocumentVersion` relation; direct excerpts cover that complete bounded version and may have no `KnowledgeChunkSet`. This makes the source durable for result display and exact-source retry without requiring a prior chunking or embedding job. Normal chat retrieval continues to require immutable chunk sets and current searchable sources.
 

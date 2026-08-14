@@ -130,6 +130,34 @@ enum AiKnowledgeActionType {
   EXTRACT_KEY_DECISIONS
 }
 
+enum AiGroundedContextSourceType {
+  WORKSPACE_RETRIEVAL
+  KNOWLEDGE_DOCUMENT_VERSION
+}
+
+enum AiOrchestrationMode {
+  FAST
+  BALANCED
+  DEEP
+  CRITICAL
+}
+
+enum AiOrchestrationRole {
+  CANDIDATE
+  CRITIC
+  VERIFIER
+  SYNTHESIZER
+}
+
+enum AiOrchestrationStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  PARTIALLY_SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
 enum TaskStatus {
   TODO
   IN_PROGRESS
@@ -165,12 +193,14 @@ model User {
   documentProcessingJobs    DocumentProcessingJob[]    @relation("DocumentProcessingJobRequester")
   knowledgeChunkingJobs     KnowledgeChunkingJob[]     @relation("KnowledgeChunkingJobRequester")
   backgroundJobs            BackgroundJob[]            @relation("BackgroundJobRequester")
-  knowledgeEmbeddingJobs   KnowledgeEmbeddingJob[]    @relation("KnowledgeEmbeddingJobRequester")
-  aiConversations          AiConversation[]           @relation("AiConversationOwner")
-  aiMessages               AiMessage[]                @relation("AiMessageAuthor")
-  aiRuns                   AiRun[]                    @relation("AiRunRequester")
-  createdTasks             Task[]                     @relation("TaskCreator")
-  assignedTasks            Task[]                     @relation("TaskAssignee")
+  knowledgeEmbeddingJobs    KnowledgeEmbeddingJob[]    @relation("KnowledgeEmbeddingJobRequester")
+  aiConversations           AiConversation[]           @relation("AiConversationOwner")
+  aiMessages                AiMessage[]                @relation("AiMessageAuthor")
+  aiRuns                    AiRun[]                    @relation("AiRunRequester")
+  aiGroundedContexts        AiRetrievalSnapshot[]      @relation("AiGroundedContextCreator")
+  aiOrchestrations          AiOrchestration[]          @relation("AiOrchestrationCreator")
+  createdTasks              Task[]                     @relation("TaskCreator")
+  assignedTasks             Task[]                     @relation("TaskAssignee")
   organizationMemberships   OrganizationMembership[]
   sessions                  Session[]
   workspaceMemberships      WorkspaceMembership[]
@@ -242,24 +272,25 @@ model AuditEvent {
 }
 
 model Organization {
-  id              String                   @id @default(uuid()) @db.Uuid
-  name            String
-  slug            String
-  status          OrganizationStatus       @default(ACTIVE)
-  archivedAt      DateTime?                @db.Timestamptz(6)
-  deletedAt       DateTime?                @db.Timestamptz(6)
-  createdByUserId String?                  @db.Uuid
-  createdAt       DateTime                 @default(now()) @db.Timestamptz(6)
-  updatedAt       DateTime                 @updatedAt @db.Timestamptz(6)
-  createdBy       User?                    @relation("OrganizationCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  memberships     OrganizationMembership[]
-  auditEvents     AuditEvent[]
-  workspaces      Workspace[]
+  id               String                   @id @default(uuid()) @db.Uuid
+  name             String
+  slug             String
+  status           OrganizationStatus       @default(ACTIVE)
+  archivedAt       DateTime?                @db.Timestamptz(6)
+  deletedAt        DateTime?                @db.Timestamptz(6)
+  createdByUserId  String?                  @db.Uuid
+  createdAt        DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime                 @updatedAt @db.Timestamptz(6)
+  createdBy        User?                    @relation("OrganizationCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  memberships      OrganizationMembership[]
+  auditEvents      AuditEvent[]
+  workspaces       Workspace[]
+  aiOrchestrations AiOrchestration[]
 
+  @@unique([slug], map: "organizations_active_slug_key", where: raw("((status = 'ACTIVE'::\"OrganizationStatus\") AND (\"deletedAt\" IS NULL))"))
   @@index([status])
   @@index([deletedAt])
   @@index([createdByUserId])
-  @@unique([slug], map: "organizations_active_slug_key", where: raw("((status = 'ACTIVE'::\"OrganizationStatus\") AND (\"deletedAt\" IS NULL))"))
   @@map("organizations")
 }
 
@@ -283,37 +314,38 @@ model OrganizationMembership {
 }
 
 model Workspace {
-  id                    String                 @id @default(uuid()) @db.Uuid
-  organizationId        String                 @db.Uuid
-  name                  String
-  slug                  String
-  status                WorkspaceStatus        @default(ACTIVE)
-  archivedAt            DateTime?              @db.Timestamptz(6)
-  deletedAt             DateTime?              @db.Timestamptz(6)
-  createdByUserId       String?                @db.Uuid
-  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
-  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
-  createdBy             User?                  @relation("WorkspaceCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  memberships           WorkspaceMembership[]
-  auditEvents           AuditEvent[]
-  knowledgeDocuments    KnowledgeDocument[]
-  knowledgeAttachments  KnowledgeAttachment[]
-  knowledgeChunkingJobs KnowledgeChunkingJob[]
-  knowledgeChunkSets    KnowledgeChunkSet[]
-  backgroundJobs        BackgroundJob[]
+  id                     String                  @id @default(uuid()) @db.Uuid
+  organizationId         String                  @db.Uuid
+  name                   String
+  slug                   String
+  status                 WorkspaceStatus         @default(ACTIVE)
+  archivedAt             DateTime?               @db.Timestamptz(6)
+  deletedAt              DateTime?               @db.Timestamptz(6)
+  createdByUserId        String?                 @db.Uuid
+  createdAt              DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime                @updatedAt @db.Timestamptz(6)
+  createdBy              User?                   @relation("WorkspaceCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  organization           Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  memberships            WorkspaceMembership[]
+  auditEvents            AuditEvent[]
+  knowledgeDocuments     KnowledgeDocument[]
+  knowledgeAttachments   KnowledgeAttachment[]
+  knowledgeChunkingJobs  KnowledgeChunkingJob[]
+  knowledgeChunkSets     KnowledgeChunkSet[]
+  backgroundJobs         BackgroundJob[]
   knowledgeEmbeddingJobs KnowledgeEmbeddingJob[]
   knowledgeEmbeddingSets KnowledgeEmbeddingSet[]
   aiConversations        AiConversation[]
   aiMessages             AiMessage[]
   aiRuns                 AiRun[]
   aiRetrievalSnapshots   AiRetrievalSnapshot[]
+  aiOrchestrations       AiOrchestration[]
   tasks                  Task[]
 
+  @@unique([organizationId, slug], map: "workspaces_active_organization_slug_key", where: raw("((status = 'ACTIVE'::\"WorkspaceStatus\") AND (\"deletedAt\" IS NULL))"))
   @@index([organizationId, status])
   @@index([deletedAt])
   @@index([createdByUserId])
-  @@unique([organizationId, slug], map: "workspaces_active_organization_slug_key", where: raw("((status = 'ACTIVE'::\"WorkspaceStatus\") AND (\"deletedAt\" IS NULL))"))
   @@map("workspaces")
 }
 
@@ -344,18 +376,19 @@ model KnowledgeDocument {
 }
 
 model KnowledgeDocumentVersion {
-  id              String                 @id @default(uuid()) @db.Uuid
-  documentId      String                 @db.Uuid
-  versionNumber   Int
-  title           String
-  markdownContent String                 @db.Text
-  authorUserId    String                 @db.Uuid
-  createdAt       DateTime               @default(now()) @db.Timestamptz(6)
-  document        KnowledgeDocument      @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  author          User                   @relation("KnowledgeDocumentVersionAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  chunkingJobs    KnowledgeChunkingJob[] @relation("KnowledgeChunkingJobDocumentVersion")
-  chunkSets       KnowledgeChunkSet[]    @relation("KnowledgeChunkSetDocumentVersion")
-  aiRuns          AiRun[]                @relation("AiRunKnowledgeDocumentVersion")
+  id               String                 @id @default(uuid()) @db.Uuid
+  documentId       String                 @db.Uuid
+  versionNumber    Int
+  title            String
+  markdownContent  String                 @db.Text
+  authorUserId     String                 @db.Uuid
+  createdAt        DateTime               @default(now()) @db.Timestamptz(6)
+  document         KnowledgeDocument      @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  author           User                   @relation("KnowledgeDocumentVersionAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunkingJobs     KnowledgeChunkingJob[] @relation("KnowledgeChunkingJobDocumentVersion")
+  chunkSets        KnowledgeChunkSet[]    @relation("KnowledgeChunkSetDocumentVersion")
+  aiRuns           AiRun[]                @relation("AiRunKnowledgeDocumentVersion")
+  groundedContexts AiRetrievalSnapshot[]  @relation("AiGroundedContextKnowledgeDocumentVersion")
 
   @@unique([documentId, versionNumber])
   @@index([documentId, createdAt])
@@ -460,8 +493,8 @@ model KnowledgeChunkingJob {
   attachmentExtraction   KnowledgeAttachmentExtraction? @relation("KnowledgeChunkingJobAttachmentExtraction", fields: [attachmentExtractionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   chunkSet               KnowledgeChunkSet?
 
-  @@index([workspaceId, status, createdAt])
   @@unique([workspaceId, sourceType, sourceId, sourceVersion], map: "knowledge_chunking_jobs_active_source_key", where: raw("(status = ANY (ARRAY['QUEUED'::\"KnowledgeChunkingJobStatus\", 'PROCESSING'::\"KnowledgeChunkingJobStatus\"]))"))
+  @@index([workspaceId, status, createdAt])
   @@index([sourceType, sourceId, sourceVersion, createdAt], map: "knowledge_chunking_jobs_sourceType_sourceId_sourceVersion_creat")
   @@index([requestedByUserId, createdAt])
   @@index([documentVersionId])
@@ -500,18 +533,18 @@ model KnowledgeChunkSet {
 }
 
 model KnowledgeChunk {
-  id             String            @id @default(uuid()) @db.Uuid
-  chunkSetId     String            @db.Uuid
+  id             String                   @id @default(uuid()) @db.Uuid
+  chunkSetId     String                   @db.Uuid
   ordinal        Int
-  text           String            @db.Text
+  text           String                   @db.Text
   characterStart Int?
   characterEnd   Int?
   tokenEstimate  Int
-  sha256         String            @db.Char(64)
-  metadata       Json              @default("{}") @db.JsonB
+  sha256         String                   @db.Char(64)
+  metadata       Json                     @default("{}") @db.JsonB
   searchVector   Unsupported("tsvector")? @default(dbgenerated("to_tsvector('simple'::regconfig, COALESCE(text, ''::text))")) @map("searchVector")
-  createdAt      DateTime          @default(now()) @db.Timestamptz(6)
-  chunkSet       KnowledgeChunkSet @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdAt      DateTime                 @default(now()) @db.Timestamptz(6)
+  chunkSet       KnowledgeChunkSet        @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   embeddings     KnowledgeEmbedding[]
 
   @@unique([chunkSetId, ordinal])
@@ -547,20 +580,20 @@ model KnowledgeEmbeddingJob {
 }
 
 model KnowledgeEmbeddingSet {
-  id             String                 @id @default(uuid()) @db.Uuid
-  workspaceId    String                 @db.Uuid
-  chunkSetId     String                 @db.Uuid
-  createdByJobId String                 @unique @db.Uuid
+  id             String                @id @default(uuid()) @db.Uuid
+  workspaceId    String                @db.Uuid
+  chunkSetId     String                @db.Uuid
+  createdByJobId String                @unique @db.Uuid
   providerKey    String
   modelKey       String
   modelVersion   String
   dimensions     Int
-  inputChecksum  String                 @db.Char(64)
+  inputChecksum  String                @db.Char(64)
   embeddingCount Int
-  createdAt      DateTime               @default(now()) @db.Timestamptz(6)
-  workspace      Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  chunkSet       KnowledgeChunkSet      @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  createdByJob   KnowledgeEmbeddingJob  @relation(fields: [createdByJobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdAt      DateTime              @default(now()) @db.Timestamptz(6)
+  workspace      Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunkSet       KnowledgeChunkSet     @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdByJob   KnowledgeEmbeddingJob @relation(fields: [createdByJobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   embeddings     KnowledgeEmbedding[]
 
   @@index([workspaceId, createdAt])
@@ -570,16 +603,16 @@ model KnowledgeEmbeddingSet {
 }
 
 model KnowledgeEmbedding {
-  id              String                @id @default(uuid()) @db.Uuid
-  embeddingSetId  String                @db.Uuid
-  chunkId         String                @db.Uuid
-  ordinal         Int
-  chunkSha256     String                @db.Char(64)
-  inputChecksum   String                @db.Char(64)
-  vector          Unsupported("vector")
-  createdAt       DateTime              @default(now()) @db.Timestamptz(6)
-  embeddingSet    KnowledgeEmbeddingSet @relation(fields: [embeddingSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  chunk           KnowledgeChunk        @relation(fields: [chunkId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  id             String                @id @default(uuid()) @db.Uuid
+  embeddingSetId String                @db.Uuid
+  chunkId        String                @db.Uuid
+  ordinal        Int
+  chunkSha256    String                @db.Char(64)
+  inputChecksum  String                @db.Char(64)
+  vector         Unsupported("vector")
+  createdAt      DateTime              @default(now()) @db.Timestamptz(6)
+  embeddingSet   KnowledgeEmbeddingSet @relation(fields: [embeddingSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunk          KnowledgeChunk        @relation(fields: [chunkId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([embeddingSetId, ordinal])
   @@unique([embeddingSetId, chunkId])
@@ -682,18 +715,19 @@ model Task {
 }
 
 model AiConversation {
-  id          String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  workspaceId String               @db.Uuid
-  ownerUserId String               @db.Uuid
-  title       String
-  status      AiConversationStatus @default(ACTIVE)
-  archivedAt  DateTime?            @db.Timestamptz(6)
-  createdAt   DateTime             @default(now()) @db.Timestamptz(6)
-  updatedAt   DateTime             @updatedAt @db.Timestamptz(6)
-  workspace   Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  owner       User                 @relation("AiConversationOwner", fields: [ownerUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  messages    AiMessage[]
-  runs        AiRun[]
+  id             String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId    String               @db.Uuid
+  ownerUserId    String               @db.Uuid
+  title          String
+  status         AiConversationStatus @default(ACTIVE)
+  archivedAt     DateTime?            @db.Timestamptz(6)
+  createdAt      DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime             @updatedAt @db.Timestamptz(6)
+  workspace      Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  owner          User                 @relation("AiConversationOwner", fields: [ownerUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  messages       AiMessage[]
+  runs           AiRun[]
+  orchestrations AiOrchestration[]
 
   @@unique([id, workspaceId])
   @@index([workspaceId, status, updatedAt])
@@ -702,19 +736,20 @@ model AiConversation {
 }
 
 model AiMessage {
-  id               String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  conversationId   String         @db.Uuid
-  workspaceId      String         @db.Uuid
-  authorUserId     String?        @db.Uuid
-  generatedByRunId String?        @unique @db.Uuid
+  id               String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId   String            @db.Uuid
+  workspaceId      String            @db.Uuid
+  authorUserId     String?           @db.Uuid
+  generatedByRunId String?           @unique @db.Uuid
   role             AiMessageRole
-  content          String         @db.Text
-  createdAt        DateTime       @default(now()) @db.Timestamptz(6)
-  conversation     AiConversation @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_messages_conversation_workspace_fkey")
-  workspace        Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  author           User?          @relation("AiMessageAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  generatedByRun   AiRun?         @relation("AiRunAssistantMessage", fields: [generatedByRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  requestedRuns    AiRun[]        @relation("AiRunUserMessage")
+  content          String            @db.Text
+  createdAt        DateTime          @default(now()) @db.Timestamptz(6)
+  conversation     AiConversation    @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_messages_conversation_workspace_fkey")
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  author           User?             @relation("AiMessageAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  generatedByRun   AiRun?            @relation("AiRunAssistantMessage", fields: [generatedByRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  requestedRuns    AiRun[]           @relation("AiRunUserMessage")
+  orchestrations   AiOrchestration[]
 
   @@index([conversationId, createdAt])
   @@index([workspaceId, createdAt])
@@ -723,67 +758,124 @@ model AiMessage {
 }
 
 model AiRun {
-  id                String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  conversationId    String              @db.Uuid
-  workspaceId       String              @db.Uuid
-  requestedByUserId String              @db.Uuid
-  userMessageId     String              @db.Uuid
-  knowledgeActionType       AiKnowledgeActionType?
-  knowledgeDocumentVersionId String?                 @db.Uuid
-  providerKey       String
-  modelKey          String
-  modelVersion      String
-  status            AiRunStatus         @default(PROCESSING)
-  inputTokens           Int?
+  id                         String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId             String                    @db.Uuid
+  workspaceId                String                    @db.Uuid
+  requestedByUserId          String                    @db.Uuid
+  userMessageId              String                    @db.Uuid
+  knowledgeActionType        AiKnowledgeActionType?
+  knowledgeDocumentVersionId String?                   @db.Uuid
+  orchestrationId            String?                   @db.Uuid
+  orchestrationRole          AiOrchestrationRole?
+  orchestrationStep          Int?
+  groundedContextId          String?                   @db.Uuid
+  providerKey                String
+  modelKey                   String
+  modelVersion               String
+  status                     AiRunStatus               @default(PROCESSING)
+  inputTokens                Int?
   cacheWrite1HourInputTokens Int?
-  cacheWriteInputTokens Int?
-  cachedInputTokens     Int?
-  outputTokens          Int?
-  reasoningTokens       Int?
-  totalTokens           Int?
-  providerRequestId     String?
-  estimatedCostUsd      Decimal?            @db.Decimal(20, 12)
-  referencedCitationIds String[]           @default([])
-  durationMs        Int?
-  failureCode       String?
-  failureMessage    String?             @db.Text
-  createdAt         DateTime            @default(now()) @db.Timestamptz(6)
-  completedAt       DateTime?           @db.Timestamptz(6)
-  conversation      AiConversation      @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_runs_conversation_workspace_fkey")
-  workspace         Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  requestedBy       User                @relation("AiRunRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  userMessage       AiMessage           @relation("AiRunUserMessage", fields: [userMessageId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  assistantMessage  AiMessage?          @relation("AiRunAssistantMessage")
-  retrievalSnapshot AiRetrievalSnapshot?
-  knowledgeDocumentVersion KnowledgeDocumentVersion? @relation("AiRunKnowledgeDocumentVersion", fields: [knowledgeDocumentVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  cacheWriteInputTokens      Int?
+  cachedInputTokens          Int?
+  outputTokens               Int?
+  reasoningTokens            Int?
+  totalTokens                Int?
+  providerRequestId          String?
+  estimatedCostUsd           Decimal?                  @db.Decimal(20, 12)
+  referencedCitationIds      String[]                  @default([])
+  durationMs                 Int?
+  failureCode                String?
+  failureMessage             String?                   @db.Text
+  createdAt                  DateTime                  @default(now()) @db.Timestamptz(6)
+  completedAt                DateTime?                 @db.Timestamptz(6)
+  conversation               AiConversation            @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_runs_conversation_workspace_fkey")
+  workspace                  Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  requestedBy                User                      @relation("AiRunRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  userMessage                AiMessage                 @relation("AiRunUserMessage", fields: [userMessageId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  assistantMessage           AiMessage?                @relation("AiRunAssistantMessage")
+  retrievalSnapshot          AiRetrievalSnapshot?
+  knowledgeDocumentVersion   KnowledgeDocumentVersion? @relation("AiRunKnowledgeDocumentVersion", fields: [knowledgeDocumentVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  orchestration              AiOrchestration?          @relation("AiOrchestrationRuns", fields: [orchestrationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  groundedContext            AiRetrievalSnapshot?      @relation("AiRunGroundedContext", fields: [groundedContextId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  finalForOrchestration      AiOrchestration?          @relation("AiOrchestrationFinalRun")
 
   @@unique([id, workspaceId])
-  @@unique([userMessageId], map: "ai_runs_active_user_message_key", where: raw("(status = 'PROCESSING'::\"AiRunStatus\")"))
+  @@unique([userMessageId], map: "ai_runs_active_user_message_key", where: raw("((status = 'PROCESSING'::\"AiRunStatus\") AND (\"orchestrationId\" IS NULL))"))
+  @@unique([orchestrationId, orchestrationStep])
   @@index([conversationId, createdAt])
   @@index([workspaceId, status, createdAt])
   @@index([requestedByUserId, createdAt])
   @@index([userMessageId, createdAt])
   @@index([knowledgeDocumentVersionId, createdAt])
+  @@index([orchestrationId, orchestrationRole, createdAt])
+  @@index([groundedContextId, createdAt])
   @@map("ai_runs")
 }
 
 model AiRetrievalSnapshot {
-  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  runId           String          @unique @db.Uuid
-  workspaceId     String          @db.Uuid
-  queryChecksum   String          @db.Char(64)
-  contextChecksum String          @db.Char(64)
-  context         String          @db.Text
-  resultCount     Int
-  characterCount  Int
-  createdAt       DateTime        @default(now()) @db.Timestamptz(6)
-  run             AiRun           @relation(fields: [runId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_retrieval_snapshots_run_workspace_fkey")
-  workspace       Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  citations       AiRunCitation[]
+  id                         String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId                      String?                     @unique @db.Uuid
+  workspaceId                String                      @db.Uuid
+  createdByUserId            String                      @db.Uuid
+  sourceType                 AiGroundedContextSourceType
+  knowledgeDocumentVersionId String?                     @db.Uuid
+  contextVersion             String
+  queryChecksum              String                      @db.Char(64)
+  contextChecksum            String                      @db.Char(64)
+  evidenceChecksum           String                      @db.Char(64)
+  context                    String                      @db.Text
+  resultCount                Int
+  characterCount             Int
+  createdAt                  DateTime                    @default(now()) @db.Timestamptz(6)
+  run                        AiRun?                      @relation(fields: [runId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_retrieval_snapshots_run_workspace_fkey")
+  workspace                  Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdBy                  User                        @relation("AiGroundedContextCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  knowledgeDocumentVersion   KnowledgeDocumentVersion?   @relation("AiGroundedContextKnowledgeDocumentVersion", fields: [knowledgeDocumentVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  groundedRuns               AiRun[]                     @relation("AiRunGroundedContext")
+  orchestrations             AiOrchestration[]
+  citations                  AiRunCitation[]
 
   @@unique([runId, workspaceId])
   @@index([workspaceId, createdAt])
+  @@index([createdByUserId, createdAt])
+  @@index([knowledgeDocumentVersionId, createdAt])
   @@map("ai_retrieval_snapshots")
+}
+
+model AiOrchestration {
+  id                   String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId       String                @db.Uuid
+  workspaceId          String                @db.Uuid
+  createdByUserId      String                @db.Uuid
+  conversationId       String?               @db.Uuid
+  userMessageId        String?               @db.Uuid
+  groundedContextId    String                @db.Uuid
+  mode                 AiOrchestrationMode
+  policyKey            String
+  policyVersion        String
+  orchestrationVersion String
+  status               AiOrchestrationStatus @default(PENDING)
+  finalRunId           String?               @unique @db.Uuid
+  failureCode          String?
+  createdAt            DateTime              @default(now()) @db.Timestamptz(6)
+  startedAt            DateTime?             @db.Timestamptz(6)
+  completedAt          DateTime?             @db.Timestamptz(6)
+  organization         Organization          @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  workspace            Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdBy            User                  @relation("AiOrchestrationCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  conversation         AiConversation?       @relation(fields: [conversationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  userMessage          AiMessage?            @relation(fields: [userMessageId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  groundedContext      AiRetrievalSnapshot   @relation(fields: [groundedContextId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  finalRun             AiRun?                @relation("AiOrchestrationFinalRun", fields: [finalRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  runs                 AiRun[]               @relation("AiOrchestrationRuns")
+
+  @@index([workspaceId, status, createdAt])
+  @@index([organizationId, status, createdAt])
+  @@index([createdByUserId, createdAt])
+  @@index([groundedContextId])
+  @@index([conversationId, createdAt])
+  @@index([userMessageId])
+  @@map("ai_orchestrations")
 }
 
 model AiRunCitation {
@@ -805,7 +897,7 @@ model AiRunCitation {
   displayedExcerptChecksum String                   @db.Char(64)
   createdAt                DateTime                 @default(now()) @db.Timestamptz(6)
   snapshot                 AiRetrievalSnapshot      @relation(fields: [snapshotId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  chunkSet                  KnowledgeChunkSet?       @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  chunkSet                 KnowledgeChunkSet?       @relation(fields: [chunkSetId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([snapshotId, citationId])
   @@unique([snapshotId, chunkSetId, chunkOrdinal])
