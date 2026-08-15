@@ -1,4 +1,7 @@
-import { OpenAILanguageModelProvider } from './openai-language-model-provider';
+import {
+  OPENAI_APPROVED_MODEL,
+  OpenAILanguageModelProvider,
+} from './openai-language-model-provider';
 import {
   ANTHROPIC_APPROVED_MODELS,
   AnthropicLanguageModelProvider,
@@ -186,16 +189,16 @@ class UnavailableLanguageModelProvider implements LanguageModelProvider {
   readonly maxInputCharacters = 20_000;
   readonly maxOutputCharacters = 2_000;
   readonly timeoutMs = 1;
-  readonly #code: string;
+  readonly errorCode: string;
 
   constructor(code = 'provider_not_configured') {
-    this.#code = code;
+    this.errorCode = code;
   }
 
   async generate(): Promise<never> {
     throw new LanguageModelProviderError(
       'No production language-model provider is configured.',
-      this.#code,
+      this.errorCode,
     );
   }
 }
@@ -232,7 +235,9 @@ export class LanguageModelProviderRegistry {
     if (!provider) {
       throw new LanguageModelProviderError(
         'The requested language model provider version is not registered.',
-        'provider_not_configured',
+        this.#current instanceof UnavailableLanguageModelProvider
+          ? this.#current.errorCode
+          : 'provider_not_configured',
       );
     }
     return provider;
@@ -254,6 +259,7 @@ export function createDefaultLanguageModelProviderRegistry(
     configuredProvider?: string;
     anthropicApiKey?: string;
     anthropicFetch?: typeof globalThis.fetch;
+    chatMode?: string;
     deterministicFailureMessage?: string;
     geminiApiKey?: string;
     geminiInteractionClient?: GeminiInteractionClient;
@@ -274,6 +280,77 @@ export function createDefaultLanguageModelProviderRegistry(
         failureMessage: options.deterministicFailureMessage ?? process.env.AI_LOCAL_FAILURE_MESSAGE,
       }),
     );
+  }
+
+  const chatMode = (options.chatMode ?? process.env.AI_CHAT_MODE)?.trim().toUpperCase();
+  if (chatMode === 'BALANCED') {
+    const model = (options.model ?? process.env.AI_MODEL)?.trim();
+    const openAiApiKey = (options.openAiApiKey ?? process.env.OPENAI_API_KEY)?.trim();
+    const anthropicApiKey = (options.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY)?.trim();
+    const geminiApiKey = (options.geminiApiKey ?? process.env.GEMINI_API_KEY)?.trim();
+    if (!model || !openAiApiKey || !anthropicApiKey || !geminiApiKey) {
+      return new LanguageModelProviderRegistry(
+        new UnavailableLanguageModelProvider('provider_configuration_invalid'),
+      );
+    }
+    if (
+      runtime !== 'production' &&
+      (!options.openAiFetch || !options.anthropicFetch || !options.geminiInteractionClient)
+    ) {
+      return new LanguageModelProviderRegistry(
+        new UnavailableLanguageModelProvider('provider_network_disabled'),
+      );
+    }
+    try {
+      const providers: LanguageModelProvider[] = [
+        new OpenAILanguageModelProvider({
+          apiKey: openAiApiKey,
+          fetch: options.openAiFetch,
+          model: OPENAI_APPROVED_MODEL,
+          runtime,
+        }),
+        ...ANTHROPIC_APPROVED_MODELS.map(
+          (approvedModel) =>
+            new AnthropicLanguageModelProvider({
+              apiKey: anthropicApiKey,
+              fetch: options.anthropicFetch,
+              model: approvedModel,
+              runtime,
+            }),
+        ),
+        ...GEMINI_APPROVED_MODELS.map(
+          (approvedModel) =>
+            new GeminiLanguageModelProvider({
+              apiKey: geminiApiKey,
+              interactionClient: options.geminiInteractionClient,
+              model: approvedModel,
+              runtime,
+            }),
+        ),
+      ];
+      const current = providers.find(
+        (provider) => provider.providerKey === key && provider.modelKey === model,
+      );
+      if (!current) {
+        return new LanguageModelProviderRegistry(
+          new UnavailableLanguageModelProvider('provider_configuration_invalid'),
+        );
+      }
+      return new LanguageModelProviderRegistry(
+        current,
+        providers.filter((provider) => provider !== current),
+      );
+    } catch (error) {
+      if (
+        error instanceof LanguageModelProviderError &&
+        error.code === 'provider_configuration_invalid'
+      ) {
+        return new LanguageModelProviderRegistry(
+          new UnavailableLanguageModelProvider('provider_configuration_invalid'),
+        );
+      }
+      throw error;
+    }
   }
 
   if (key === 'openai') {

@@ -43,32 +43,38 @@ test('production prohibits the deterministic local provider', async () => {
 });
 
 test('production selects only explicitly configured providers and never falls back', async () => {
-  const configured = createDefaultLanguageModelProviderRegistry({
+  const openAiRegistry = createDefaultLanguageModelProviderRegistry({
     configuredProvider: 'openai',
     model: 'gpt-5.6-terra',
     openAiApiKey: 'production-secret-shaped-value',
     runtime: 'production',
-  }).getCurrent();
+  });
+  const configured = openAiRegistry.getCurrent();
   assert.equal(configured.providerKey, 'openai');
   assert.equal(configured.modelKey, 'gpt-5.6-terra');
+  assert.equal(openAiRegistry.list().length, 1);
 
-  const anthropic = createDefaultLanguageModelProviderRegistry({
+  const anthropicRegistry = createDefaultLanguageModelProviderRegistry({
     anthropicApiKey: 'production-secret-shaped-value',
     configuredProvider: 'anthropic',
     model: 'claude-sonnet-5',
     runtime: 'production',
-  }).getCurrent();
+  });
+  const anthropic = anthropicRegistry.getCurrent();
   assert.equal(anthropic.providerKey, 'anthropic');
   assert.equal(anthropic.modelKey, 'claude-sonnet-5');
+  assert.equal(anthropicRegistry.list().length, 2);
 
-  const gemini = createDefaultLanguageModelProviderRegistry({
+  const geminiRegistry = createDefaultLanguageModelProviderRegistry({
     configuredProvider: 'gemini',
     geminiApiKey: 'production-secret-shaped-value',
     model: 'gemini-3.6-flash',
     runtime: 'production',
-  }).getCurrent();
+  });
+  const gemini = geminiRegistry.getCurrent();
   assert.equal(gemini.providerKey, 'gemini');
   assert.equal(gemini.modelKey, 'gemini-3.6-flash');
+  assert.equal(geminiRegistry.list().length, 1);
 
   for (const options of [
     { configuredProvider: '', model: 'gpt-5.6-terra', openAiApiKey: 'valid-value' },
@@ -113,6 +119,87 @@ test('production selects only explicitly configured providers and never falls ba
         error.code === 'provider_configuration_invalid',
     );
   }
+});
+
+test('BALANCED production registry resolves every approved cross-provider identity', () => {
+  const expectedIdentities = [
+    'anthropic/claude-sonnet-4-6/messages-json-schema-v1',
+    'anthropic/claude-sonnet-5/messages-json-schema-v1',
+    'gemini/gemini-3.6-flash/interactions-json-schema-v1',
+    'openai/gpt-5.6-terra/responses-json-schema-v1',
+  ];
+  for (const [configuredProvider, model] of [
+    ['openai', 'gpt-5.6-terra'],
+    ['anthropic', 'claude-sonnet-5'],
+    ['gemini', 'gemini-3.6-flash'],
+  ] as const) {
+    const registry = createDefaultLanguageModelProviderRegistry({
+      anthropicApiKey: 'production-secret-shaped-value',
+      chatMode: 'BALANCED',
+      configuredProvider,
+      geminiApiKey: 'production-secret-shaped-value',
+      model,
+      openAiApiKey: 'production-secret-shaped-value',
+      runtime: 'production',
+    });
+    assert.equal(registry.getCurrent().providerKey, configuredProvider);
+    assert.equal(registry.getCurrent().modelKey, model);
+    assert.deepEqual(
+      registry
+        .list()
+        .map((provider) => `${provider.providerKey}/${provider.modelKey}/${provider.modelVersion}`)
+        .sort(),
+      expectedIdentities,
+    );
+    assert.equal(
+      registry.getVersion('openai', 'gpt-5.6-terra', 'responses-json-schema-v1').providerKey,
+      'openai',
+    );
+    assert.equal(
+      registry.getVersion('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1').providerKey,
+      'anthropic',
+    );
+    assert.equal(
+      registry.getVersion('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1').providerKey,
+      'gemini',
+    );
+  }
+});
+
+test('BALANCED production registry fails closed when a required provider is unconfigured', async () => {
+  for (const missing of ['openai', 'anthropic', 'gemini'] as const) {
+    const registry = createDefaultLanguageModelProviderRegistry({
+      anthropicApiKey: missing === 'anthropic' ? '   ' : 'production-secret-shaped-value',
+      chatMode: 'BALANCED',
+      configuredProvider: 'openai',
+      geminiApiKey: missing === 'gemini' ? '   ' : 'production-secret-shaped-value',
+      model: 'gpt-5.6-terra',
+      openAiApiKey: missing === 'openai' ? '   ' : 'production-secret-shaped-value',
+      runtime: 'production',
+    });
+    await assert.rejects(
+      registry.getCurrent().generate(request),
+      (error: unknown) =>
+        error instanceof LanguageModelProviderError &&
+        error.code === 'provider_configuration_invalid',
+    );
+    assert.throws(
+      () => registry.getVersion('openai', 'gpt-5.6-terra', 'responses-json-schema-v1'),
+      (error: unknown) =>
+        error instanceof LanguageModelProviderError &&
+        error.code === 'provider_configuration_invalid',
+    );
+  }
+});
+
+test('development local provider remains deterministic when BALANCED is configured', () => {
+  const registry = createDefaultLanguageModelProviderRegistry({
+    chatMode: 'BALANCED',
+    configuredProvider: 'local',
+    runtime: 'development',
+  });
+  assert.equal(registry.getCurrent().providerKey, 'local');
+  assert.equal(registry.list().length, 1);
 });
 
 test('Anthropic registry retains Sonnet 5 and 4.6 as separate approved versions', () => {
