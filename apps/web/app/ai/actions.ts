@@ -57,7 +57,7 @@ export async function submitMessageAction(
       conversationId,
       value(formData, 'message'),
     );
-    if (result.mode === 'BALANCED' && !result.responseRun) {
+    if (result.mode !== 'FAST' && !result.responseRun) {
       return { error: 'The AI response could not be generated.' };
     }
   } catch (error) {

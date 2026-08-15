@@ -34,7 +34,10 @@ import {
   estimateLanguageModelCostUsd,
   normalizeLanguageModelUsage,
 } from '../../services/ai/language-model-pricing';
-import type { BalancedAiRuntimeConfiguration } from '../../services/ai/ai-orchestration-policy';
+import type {
+  BalancedAiRuntimeConfiguration,
+  DeepAiRuntimeConfiguration,
+} from '../../services/ai/ai-orchestration-policy';
 
 const MAX_MESSAGE_CHARACTERS = 4_000;
 const MAX_HISTORY_CHARACTERS = 8_000;
@@ -88,11 +91,15 @@ export type AiConversationDependencies = Readonly<{
   retrieval: KnowledgeRetrievalDependencies;
 }>;
 
-export type AiChatMode = 'FAST' | 'BALANCED';
+export type AiChatMode = 'FAST' | 'BALANCED' | 'DEEP';
 
 export type AiChatSubmissionResult =
   | Readonly<{ mode: 'FAST'; responseRun: AiRun }>
-  | Readonly<{ failureCode: string | null; mode: 'BALANCED'; responseRun: AiRun | null }>;
+  | Readonly<{
+      failureCode: string | null;
+      mode: 'BALANCED' | 'DEEP';
+      responseRun: AiRun | null;
+    }>;
 
 export class AiConversationError extends Error {
   readonly code: string;
@@ -791,13 +798,14 @@ function resolveAiChatMode(value: string | undefined): AiChatMode {
   const mode = value?.trim().toUpperCase();
   if (!mode || mode === 'FAST') return 'FAST';
   if (mode === 'BALANCED') return 'BALANCED';
+  if (mode === 'DEEP') return 'DEEP';
   throw new AiConversationValidationError(
     'The configured AI Chat mode is invalid.',
     'chat_mode_invalid',
   );
 }
 
-async function prepareBalancedChatRequest(
+async function prepareOrchestratedChatRequest(
   prisma: PrismaClient,
   dependencies: AiConversationDependencies,
   actorUserId: string,
@@ -860,6 +868,7 @@ export async function submitAiChatMessage(
   value: string,
   runtime: Readonly<{
     balancedProviderConfiguration?: BalancedAiRuntimeConfiguration;
+    deepProviderConfiguration?: DeepAiRuntimeConfiguration;
     mode?: string;
   }> = {},
 ): Promise<AiChatSubmissionResult> {
@@ -877,7 +886,7 @@ export async function submitAiChatMessage(
       ),
     };
   }
-  const prepared = await prepareBalancedChatRequest(
+  const prepared = await prepareOrchestratedChatRequest(
     prisma,
     dependencies,
     actorUserId,
@@ -885,22 +894,28 @@ export async function submitAiChatMessage(
     conversationId,
     value,
   );
-  const { executeBalancedGroundedRequest } = await import('./ai-orchestrations');
-  const orchestration = await executeBalancedGroundedRequest(
-    prisma,
-    dependencies,
-    actorUserId,
-    workspaceId,
-    {
-      conversationId,
-      groundedContextId: prepared.groundedContextId,
-      originalUserRequest: prepared.content,
-      ...(runtime.balancedProviderConfiguration
-        ? { providerConfiguration: runtime.balancedProviderConfiguration }
-        : {}),
-      userMessageId: prepared.messageId,
-    },
-  );
+  const { executeBalancedGroundedRequest, executeDeepGroundedRequest } =
+    await import('./ai-orchestrations');
+  const request = {
+    conversationId,
+    groundedContextId: prepared.groundedContextId,
+    originalUserRequest: prepared.content,
+    userMessageId: prepared.messageId,
+  };
+  const orchestration =
+    mode === 'BALANCED'
+      ? await executeBalancedGroundedRequest(prisma, dependencies, actorUserId, workspaceId, {
+          ...request,
+          ...(runtime.balancedProviderConfiguration
+            ? { providerConfiguration: runtime.balancedProviderConfiguration }
+            : {}),
+        })
+      : await executeDeepGroundedRequest(prisma, dependencies, actorUserId, workspaceId, {
+          ...request,
+          ...(runtime.deepProviderConfiguration
+            ? { providerConfiguration: runtime.deepProviderConfiguration }
+            : {}),
+        });
   if (!orchestration.finalRunId) {
     return {
       failureCode: orchestration.failureCode ?? 'generation_failed',
