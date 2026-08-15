@@ -22,6 +22,7 @@ import {
   WorkspaceStatus,
 } from '../generated/client/client';
 import {
+  AiConversationError,
   AiConversationValidationError,
   createAiConversation,
   getAiConversation,
@@ -47,6 +48,7 @@ import {
 } from '../ai/ai-orchestrations';
 import { createGroundedContext, persistGroundedContext } from '../ai/grounded-context';
 import { retrieveKnowledgeDocumentVersionContext } from '../ai/knowledge-retrieval';
+import { getAiRoutingDecision } from '../ai/ai-routing-decisions';
 import {
   executeKnowledgeChunkingJob,
   requestKnowledgeDocumentChunking,
@@ -66,6 +68,10 @@ import type {
   CriticalAiRuntimeConfiguration,
   DeepAiRuntimeConfiguration,
 } from '../../services/ai/ai-orchestration-policy';
+import {
+  AiTaskAnalyzerValidationError,
+  routeAiTaskRequest,
+} from '../../services/ai/ai-task-analyzer';
 import {
   DeterministicLocalEmbeddingProvider,
   EmbeddingProviderRegistry,
@@ -87,7 +93,7 @@ const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: test
 
 async function reset(): Promise<void> {
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE "ai_run_citations", "ai_orchestrations", "ai_retrieval_snapshots", "ai_messages", "ai_runs", "ai_conversations", "knowledge_document_versions", "knowledge_documents", "workspace_memberships", "organization_memberships", "workspaces", "organizations", "users" CASCADE;',
+    'TRUNCATE TABLE "ai_run_citations", "ai_routing_decisions", "ai_orchestrations", "ai_retrieval_snapshots", "ai_messages", "ai_runs", "ai_conversations", "knowledge_document_versions", "knowledge_documents", "workspace_memberships", "organization_memberships", "workspaces", "organizations", "users" CASCADE;',
   );
 }
 
@@ -209,7 +215,7 @@ function model(
   modelVersion: string,
   options: Readonly<{
     fail?: boolean;
-    onRequest?: (request: LanguageModelRequest) => void;
+    onRequest?: (request: LanguageModelRequest) => unknown;
     text?: string | ((request: LanguageModelRequest) => string);
   }> = {},
 ): LanguageModelProvider {
@@ -221,7 +227,7 @@ function model(
     providerKey,
     timeoutMs: 3_000,
     generate: async (request) => {
-      options.onRequest?.(request);
+      await options.onRequest?.(request);
       if (options.fail) throw new Error('Safe offline failure.');
       return {
         cachedInputTokens: 10,
@@ -312,14 +318,65 @@ function providers() {
   ]);
 }
 
-function dependencies(registry = providers()): AiConversationDependencies {
+function dependencies(
+  registry = providers(),
+  routingAudit?: NonNullable<AiConversationDependencies['routingAudit']>,
+): AiConversationDependencies {
   const embedding = new DeterministicLocalEmbeddingProvider();
   return {
     providers: registry,
     retrieval: {
       searchDependencies: { providers: new EmbeddingProviderRegistry([embedding], embedding) },
     },
+    ...(routingAudit ? { routingAudit } : {}),
   };
+}
+
+async function routingDecisionForMessage(content: string) {
+  const message = await prisma.aiMessage.findFirstOrThrow({
+    where: { content, role: AiMessageRole.USER },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+  });
+  return prisma.aiRoutingDecision.findUniqueOrThrow({ where: { userMessageId: message.id } });
+}
+
+async function assertExplicitRoutingDecision(content: string, mode: string) {
+  const decision = await routingDecisionForMessage(content);
+  assert.equal(decision.configuredMode, mode);
+  assert.equal(decision.resolvedMode, mode);
+  assert.equal(decision.reason, 'EXPLICIT_MODE');
+  assert.deepEqual(decision.signals, ['EXPLICIT_MODE']);
+  assert.deepEqual(
+    [
+      decision.complexity,
+      decision.risk,
+      decision.ambiguity,
+      decision.verificationNeed,
+      decision.expectedEffort,
+    ],
+    ['NOT_ANALYZED', 'NOT_ANALYZED', 'NOT_ANALYZED', 'NOT_ANALYZED', 'NOT_ANALYZED'],
+  );
+  return decision;
+}
+
+async function assertAutomaticRoutingDecision(content: string) {
+  const expected = routeAiTaskRequest({ content });
+  const decision = await routingDecisionForMessage(content);
+  assert.equal(decision.configuredMode, 'AUTO');
+  assert.equal(decision.resolvedMode, expected.decision.mode);
+  assert.equal(decision.reason, expected.decision.reason);
+  assert.deepEqual(decision.signals, expected.analysis.signals);
+  assert.deepEqual(
+    {
+      ambiguity: decision.ambiguity,
+      complexity: decision.complexity,
+      expectedEffort: decision.expectedEffort,
+      risk: decision.risk,
+      verificationNeed: decision.verificationNeed,
+    },
+    expected.analysis.routingInput,
+  );
+  return decision;
 }
 
 async function orchestration(
@@ -1489,6 +1546,7 @@ test('Chat defaults to FAST and creates exactly one non-orchestrated provider ru
     assert.equal(calls, 1);
     assert.equal(await prisma.aiRun.count(), 1);
     assert.equal(await prisma.aiOrchestration.count(), 0);
+    await assertExplicitRoutingDecision('Use default Chat mode.', 'FAST');
   } finally {
     if (previousMode === undefined) delete process.env.AI_CHAT_MODE;
     else process.env.AI_CHAT_MODE = previousMode;
@@ -1525,6 +1583,7 @@ test('blank Chat mode defaults to the unchanged FAST path', async () => {
   assert.equal(calls, 1);
   assert.equal(await prisma.aiRun.count(), 1);
   assert.equal(await prisma.aiOrchestration.count(), 0);
+  await assertExplicitRoutingDecision('Use blank default Chat mode.', 'FAST');
 });
 
 test('explicit FAST Chat preserves the single-provider execution path', async () => {
@@ -1548,6 +1607,87 @@ test('explicit FAST Chat preserves the single-provider execution path', async ()
   assert.equal(calls, 1);
   assert.equal(await prisma.aiRun.count(), 1);
   assert.equal(await prisma.aiOrchestration.count(), 0);
+  await assertExplicitRoutingDecision('Use explicit FAST Chat mode.', 'FAST');
+});
+
+test('Chat persists its routing decision before FAST provider execution', async () => {
+  const f = await fixture();
+  let calls = 0;
+  const current = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: async () => {
+      calls += 1;
+      const decision = await routingDecisionForMessage('Prove routing audit ordering.');
+      assert.equal(decision.configuredMode, 'FAST');
+      assert.equal(decision.resolvedMode, 'FAST');
+    },
+  });
+  const result = await submitAiChatMessage(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(current)),
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
+    'Prove routing audit ordering.',
+    { mode: 'FAST' },
+  );
+
+  assert.equal(result.mode, 'FAST');
+  assert.equal(result.responseRun.status, AiRunStatus.SUCCEEDED);
+  assert.equal(calls, 1);
+  assert.equal(await prisma.aiRoutingDecision.count(), 1);
+  assert.equal(await prisma.aiOrchestration.count(), 0);
+});
+
+test('routing audit failure prevents provider and orchestration execution', async () => {
+  const f = await fixture();
+  let calls = 0;
+  const registry = new LanguageModelProviderRegistry(
+    model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+      onRequest: () => calls++,
+    }),
+    [
+      model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+        onRequest: () => calls++,
+      }),
+      model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+        onRequest: () => calls++,
+      }),
+    ],
+  );
+  const before = {
+    contexts: await prisma.aiRetrievalSnapshot.count(),
+    decisions: await prisma.aiRoutingDecision.count(),
+    messages: await prisma.aiMessage.count(),
+  };
+
+  await prisma.$executeRawUnsafe(
+    'CREATE TRIGGER "a_fail_ai_routing_decision_for_test" BEFORE INSERT ON "ai_routing_decisions" FOR EACH ROW EXECUTE FUNCTION protect_ai_routing_decision();',
+  );
+  try {
+    await assert.rejects(
+      submitAiChatMessage(
+        prisma,
+        dependencies(registry),
+        f.ownerId,
+        f.workspaceId,
+        f.conversationId,
+        'Do not execute after routing audit failure.',
+        { balancedProviderConfiguration: balancedRuntimeConfiguration, mode: 'BALANCED' },
+      ),
+      (error: unknown) =>
+        error instanceof AiConversationError && error.code === 'routing_audit_failed',
+    );
+  } finally {
+    await prisma.$executeRawUnsafe(
+      'DROP TRIGGER IF EXISTS "a_fail_ai_routing_decision_for_test" ON "ai_routing_decisions";',
+    );
+  }
+  assert.equal(calls, 0);
+  assert.equal(await prisma.aiRoutingDecision.count(), before.decisions);
+  assert.equal(await prisma.aiRun.count(), 0);
+  assert.equal(await prisma.aiOrchestration.count(), 0);
+  assert.equal(await prisma.aiRetrievalSnapshot.count(), before.contexts);
+  assert.equal(await prisma.aiMessage.count(), before.messages + 1);
 });
 
 test('explicit BALANCED Chat returns only the successful synthesizer response', async () => {
@@ -1596,6 +1736,7 @@ test('explicit BALANCED Chat returns only the successful synthesizer response', 
       true,
     );
     assert.equal(visible.runs.length, 0);
+    await assertExplicitRoutingDecision('Use explicit BALANCED Chat mode.', 'BALANCED');
   } finally {
     if (previousMode === undefined) delete process.env.AI_CHAT_MODE;
     else process.env.AI_CHAT_MODE = previousMode;
@@ -1736,6 +1877,7 @@ test('DEEP Chat returns only its grounded synthesizer and excludes intermediates
   );
   assert.ok(visible.messages.some(({ content }) => content === response.content));
   assert.equal(visible.runs.length, 0);
+  await assertExplicitRoutingDecision('What is the approved control?', 'DEEP');
 
   let followUpRequest: LanguageModelRequest | undefined;
   const followUp = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
@@ -1918,6 +2060,7 @@ test('CRITICAL Chat returns only its grounded synthesizer and excludes all inter
   );
   assert.ok(visible.messages.some(({ content }) => content === response.content));
   assert.equal(visible.runs.length, 0);
+  await assertExplicitRoutingDecision('What is the approved control?', 'CRITICAL');
 
   let followUpRequest: LanguageModelRequest | undefined;
   const followUp = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
@@ -2021,10 +2164,24 @@ test('AUTO routes repeated simple requests deterministically through unchanged F
   assert.equal(calls, 2);
   assert.equal(await prisma.aiRun.count(), 2);
   assert.equal(await prisma.aiOrchestration.count(), 0);
+  const expected = routeAiTaskRequest({ content: 'Rename the dashboard heading.' });
+  const decisions = await prisma.aiRoutingDecision.findMany({ orderBy: { createdAt: 'asc' } });
+  assert.equal(decisions.length, 2);
+  assert.ok(
+    decisions.every(
+      (decision) =>
+        decision.configuredMode === 'AUTO' &&
+        decision.resolvedMode === expected.decision.mode &&
+        decision.reason === expected.decision.reason &&
+        JSON.stringify(decision.signals) === JSON.stringify(expected.analysis.signals),
+    ),
+  );
+  await assertAutomaticRoutingDecision('Rename the dashboard heading.');
 });
 
 test('AUTO routes a moderate request to BALANCED and exposes only its synthesizer', async () => {
   const f = await fixture();
+  let analysisCount = 0;
   const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
     text: 'Hidden AUTO BALANCED candidate A.',
   });
@@ -2036,7 +2193,12 @@ test('AUTO routes a moderate request to BALANCED and exposes only its synthesize
   });
   const result = await submitAiChatMessage(
     prisma,
-    dependencies(new LanguageModelProviderRegistry(gemini, [openai, anthropic])),
+    dependencies(new LanguageModelProviderRegistry(gemini, [openai, anthropic]), {
+      routeTaskRequest: (input) => {
+        analysisCount += 1;
+        return routeAiTaskRequest(input);
+      },
+    }),
     f.ownerId,
     f.workspaceId,
     f.conversationId,
@@ -2052,6 +2214,18 @@ test('AUTO routes a moderate request to BALANCED and exposes only its synthesize
     visible.messages.some(({ content }) => content.startsWith('Hidden AUTO BALANCED')),
     false,
   );
+  const decision = await assertAutomaticRoutingDecision(
+    'Please deliver:\n- Update the dashboard title\n- Refresh the empty-state copy',
+  );
+  assert.equal(decision.resolvedMode, result.mode);
+  const historical = await getAiRoutingDecision(
+    prisma,
+    f.ownerId,
+    f.workspaceId,
+    decision.userMessageId,
+  );
+  assert.deepEqual(historical, decision);
+  assert.equal(analysisCount, 1);
 });
 
 test('AUTO routes a complex verified request to DEEP with grounded citations and hidden history', async () => {
@@ -2121,6 +2295,10 @@ test('AUTO routes a complex verified request to DEEP with grounded citations and
     hiddenOutputs.every((content) => !visible.messages.some((item) => item.content === content)),
   );
   assert.ok(visible.messages.some(({ content }) => content === 'Visible AUTO DEEP synthesis.'));
+  const decision = await assertAutomaticRoutingDecision(
+    'Verify and prove that the approved control is supported by the source.',
+  );
+  assert.equal(decision.resolvedMode, result.mode);
 
   let followUpRequest: LanguageModelRequest | undefined;
   const followUp = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
@@ -2190,40 +2368,48 @@ test('AUTO routes an explicit high-risk request to CRITICAL and hides every inte
     visible.messages.some(({ content }) => content.startsWith('Hidden AUTO CRITICAL')),
     false,
   );
+  const decision = await assertAutomaticRoutingDecision('Review this patient safety protocol.');
+  assert.equal(decision.resolvedMode, result.mode);
 });
 
-test('AUTO analysis failure fails closed before persistence or provider execution', async () => {
+test('AUTO analysis failure preserves the user message but creates no audit or execution', async () => {
   const f = await fixture();
   let calls = 0;
   const current = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
     onRequest: () => calls++,
   });
   const before = {
+    decisions: await prisma.aiRoutingDecision.count(),
     messages: await prisma.aiMessage.count(),
     runs: await prisma.aiRun.count(),
   };
   await assert.rejects(
     submitAiChatMessage(
       prisma,
-      dependencies(new LanguageModelProviderRegistry(current)),
+      dependencies(new LanguageModelProviderRegistry(current), {
+        routeTaskRequest: () => {
+          throw new AiTaskAnalyzerValidationError('Deterministic test analyzer failure.');
+        },
+      }),
       f.ownerId,
       f.workspaceId,
       f.conversationId,
-      '   ',
+      'Persist this valid request before deterministic analysis fails.',
       { mode: 'AUTO' },
     ),
     (error: unknown) =>
       error instanceof AiConversationValidationError && error.code === 'chat_routing_invalid',
   );
   assert.equal(calls, 0);
-  assert.equal(await prisma.aiMessage.count(), before.messages);
+  assert.equal(await prisma.aiMessage.count(), before.messages + 1);
   assert.equal(await prisma.aiRun.count(), before.runs);
+  assert.equal(await prisma.aiRoutingDecision.count(), before.decisions);
   assert.equal(await prisma.aiOrchestration.count(), 0);
 });
 
 test('AUTO Chat composes the existing analyzer and router without local routing rules', () => {
   const source = readFileSync(new URL('../ai/ai-conversations.ts', import.meta.url), 'utf8');
-  assert.match(source, /routeAiTaskRequest\(\{ content \}\)\.decision\.mode/u);
+  assert.match(source, /const result = routeTaskRequest\(\{ content \}\)/u);
   assert.doesNotMatch(
     source,
     /HIGH_STAKES_REQUEST|MULTI_STEP_REQUEST|VERIFICATION_REQUEST|EXPLICIT_DEEP_ANALYSIS/u,
@@ -2233,6 +2419,7 @@ test('AUTO Chat composes the existing analyzer and router without local routing 
 test('invalid Chat mode fails closed before persisting a request', async () => {
   const f = await fixture();
   const before = {
+    decisions: await prisma.aiRoutingDecision.count(),
     messages: await prisma.aiMessage.count(),
     runs: await prisma.aiRun.count(),
   };
@@ -2257,6 +2444,7 @@ test('invalid Chat mode fails closed before persisting a request', async () => {
   }
   assert.equal(await prisma.aiMessage.count(), before.messages);
   assert.equal(await prisma.aiRun.count(), before.runs);
+  assert.equal(await prisma.aiRoutingDecision.count(), before.decisions);
   assert.equal(await prisma.aiOrchestration.count(), 0);
 });
 
@@ -2288,6 +2476,7 @@ test('Knowledge Actions remain single-provider when AUTO Chat is configured', as
   assert.equal(result.run.orchestrationId, null);
   assert.equal(result.run.knowledgeActionType, AiKnowledgeActionType.SUMMARIZE);
   assert.equal(calls, 1);
+  assert.equal(await prisma.aiRoutingDecision.count(), 0);
 });
 
 test('rejects cross-workspace context, child, and final-run injection', async () => {

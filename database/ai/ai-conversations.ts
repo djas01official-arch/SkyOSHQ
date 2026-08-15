@@ -43,6 +43,11 @@ import {
   AiTaskAnalyzerValidationError,
   routeAiTaskRequest,
 } from '../../services/ai/ai-task-analyzer';
+import {
+  createAiRoutingDecision,
+  explicitAiRoutingAudit,
+  type CreateAiRoutingDecisionInput,
+} from './ai-routing-decisions';
 
 const MAX_MESSAGE_CHARACTERS = 4_000;
 const MAX_HISTORY_CHARACTERS = 8_000;
@@ -94,6 +99,9 @@ type KnowledgeActionGrounding = Readonly<{
 export type AiConversationDependencies = Readonly<{
   providers: LanguageModelProviderRegistry;
   retrieval: KnowledgeRetrievalDependencies;
+  routingAudit?: Readonly<{
+    routeTaskRequest?: typeof routeAiTaskRequest;
+  }>;
 }>;
 
 export type AiChatMode = 'FAST' | 'BALANCED' | 'DEEP' | 'CRITICAL';
@@ -813,11 +821,30 @@ function resolveConfiguredAiChatMode(value: string | undefined): AiConfiguredCha
   );
 }
 
-function resolveAiChatMode(value: string | undefined, content: string): AiChatMode {
-  const configuredMode = resolveConfiguredAiChatMode(value);
-  if (configuredMode !== 'AUTO') return configuredMode;
+function resolveAiChatRouting(
+  configuredMode: AiConfiguredChatMode,
+  content: string,
+  routeTaskRequest: typeof routeAiTaskRequest,
+): Readonly<
+  Pick<CreateAiRoutingDecisionInput, 'analysis' | 'configuredMode' | 'decision'> & {
+    resolvedMode: AiChatMode;
+  }
+> {
+  if (configuredMode !== 'AUTO') {
+    return {
+      configuredMode,
+      ...explicitAiRoutingAudit(configuredMode),
+      resolvedMode: configuredMode,
+    };
+  }
   try {
-    return routeAiTaskRequest({ content }).decision.mode;
+    const result = routeTaskRequest({ content });
+    return {
+      analysis: result.analysis,
+      configuredMode,
+      decision: result.decision,
+      resolvedMode: result.decision.mode,
+    };
   } catch (error) {
     if (error instanceof AiTaskAnalyzerValidationError) {
       throw new AiConversationValidationError(
@@ -829,9 +856,8 @@ function resolveAiChatMode(value: string | undefined, content: string): AiChatMo
   }
 }
 
-async function prepareOrchestratedChatRequest(
+async function persistChatUserMessage(
   prisma: PrismaClient,
-  dependencies: AiConversationDependencies,
   actorUserId: string,
   workspaceId: string,
   conversationId: string,
@@ -845,16 +871,6 @@ async function prepareOrchestratedChatRequest(
     conversationId,
   );
   await enforceRateLimit(prisma, actorUserId, workspaceId);
-  const retrieval = await retrieveKnowledgeContext(
-    prisma,
-    dependencies.retrieval,
-    actorUserId,
-    workspaceId,
-    content,
-  );
-  const groundedContext = createGroundedContext(workspaceId, retrieval, {
-    type: AiGroundedContextSourceType.WORKSPACE_RETRIEVAL,
-  });
   const acceptedAt = new Date();
   const message = await prisma.$transaction(async (transaction) => {
     const created = await transaction.aiMessage.create({
@@ -875,12 +891,32 @@ async function prepareOrchestratedChatRequest(
     });
     return created;
   });
+  return { content, messageId: message.id };
+}
+
+async function prepareOrchestratedChatRequest(
+  prisma: PrismaClient,
+  dependencies: AiConversationDependencies,
+  actorUserId: string,
+  workspaceId: string,
+  content: string,
+) {
+  const retrieval = await retrieveKnowledgeContext(
+    prisma,
+    dependencies.retrieval,
+    actorUserId,
+    workspaceId,
+    content,
+  );
+  const groundedContext = createGroundedContext(workspaceId, retrieval, {
+    type: AiGroundedContextSourceType.WORKSPACE_RETRIEVAL,
+  });
   const persistedContext = await persistGroundedContext(prisma, {
     actorUserId,
     context: groundedContext,
     query: content,
   });
-  return { content, groundedContextId: persistedContext.id, messageId: message.id };
+  return { groundedContextId: persistedContext.id };
 }
 
 export async function submitAiChatMessage(
@@ -897,17 +933,47 @@ export async function submitAiChatMessage(
     mode?: string;
   }> = {},
 ): Promise<AiChatSubmissionResult> {
-  const mode = resolveAiChatMode(runtime.mode ?? process.env.AI_CHAT_MODE, value);
+  const configuredMode = resolveConfiguredAiChatMode(runtime.mode ?? process.env.AI_CHAT_MODE);
+  const persisted = await persistChatUserMessage(
+    prisma,
+    actorUserId,
+    workspaceId,
+    conversationId,
+    value,
+  );
+  const routing = resolveAiChatRouting(
+    configuredMode,
+    persisted.content,
+    dependencies.routingAudit?.routeTaskRequest ?? routeAiTaskRequest,
+  );
+  try {
+    await createAiRoutingDecision(prisma, {
+      actorUserId,
+      analysis: routing.analysis,
+      configuredMode: routing.configuredMode,
+      conversationId,
+      decision: routing.decision,
+      userMessageId: persisted.messageId,
+      workspaceId,
+    });
+  } catch {
+    throw new AiConversationError(
+      'The AI request could not be recorded for execution.',
+      'routing_audit_failed',
+    );
+  }
+  const mode = routing.resolvedMode;
   if (mode === 'FAST') {
     return {
       mode,
-      responseRun: await submitAiMessage(
+      responseRun: await createRunForMessage(
         prisma,
         dependencies,
         actorUserId,
         workspaceId,
         conversationId,
-        value,
+        persisted.messageId,
+        persisted.content,
       ),
     };
   }
@@ -916,8 +982,7 @@ export async function submitAiChatMessage(
     dependencies,
     actorUserId,
     workspaceId,
-    conversationId,
-    value,
+    persisted.content,
   );
   const {
     executeBalancedGroundedRequest,
@@ -927,8 +992,8 @@ export async function submitAiChatMessage(
   const request = {
     conversationId,
     groundedContextId: prepared.groundedContextId,
-    originalUserRequest: prepared.content,
-    userMessageId: prepared.messageId,
+    originalUserRequest: persisted.content,
+    userMessageId: persisted.messageId,
   };
   const orchestration =
     mode === 'BALANCED'

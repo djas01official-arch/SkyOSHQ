@@ -158,6 +158,89 @@ enum AiOrchestrationStatus {
   CANCELLED
 }
 
+enum AiRoutingConfiguredMode {
+  AUTO
+  FAST
+  BALANCED
+  DEEP
+  CRITICAL
+}
+
+enum AiTaskComplexity {
+  NOT_ANALYZED
+  LOW
+  MEDIUM
+  HIGH
+  VERY_HIGH
+}
+
+enum AiTaskRisk {
+  NOT_ANALYZED
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum AiTaskAmbiguity {
+  NOT_ANALYZED
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum AiTaskVerificationNeed {
+  NOT_ANALYZED
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum AiTaskExpectedEffort {
+  NOT_ANALYZED
+  SMALL
+  MEDIUM
+  LARGE
+}
+
+enum AiTaskRoutingReason {
+  EXPLICIT_MODE
+  CRITICAL_RISK
+  HIGH_RISK
+  HIGH_VERIFICATION_NEED
+  VERY_HIGH_COMPLEXITY
+  HIGH_COMPLEXITY
+  HIGH_AMBIGUITY
+  LARGE_EXPECTED_EFFORT
+  MODERATE_RISK
+  MODERATE_COMPLEXITY
+  MODERATE_AMBIGUITY
+  MODERATE_VERIFICATION_NEED
+  MODERATE_EXPECTED_EFFORT
+  LOW_COMPLEXITY
+}
+
+enum AiTaskAnalysisSignal {
+  EXPLICIT_MODE
+  SHORT_REQUEST
+  LONG_REQUEST
+  LARGE_INPUT
+  MULTI_STEP_REQUEST
+  MULTIPLE_DELIVERABLES
+  STRUCTURED_INPUT
+  COMPARISON_REQUEST
+  CHECK_REQUEST
+  REVIEW_REQUEST
+  VERIFICATION_REQUEST
+  AUDIT_REQUEST
+  EXPLICIT_DEEP_ANALYSIS
+  AMBIGUITY_SIGNAL
+  OPERATIONAL_RISK_REQUEST
+  HIGH_STAKES_REQUEST
+  CRITICAL_STAKES_REQUEST
+  EMBEDDED_UNTRUSTED_CONTENT
+}
+
 enum TaskStatus {
   TODO
   IN_PROGRESS
@@ -340,6 +423,7 @@ model Workspace {
   aiRuns                 AiRun[]
   aiRetrievalSnapshots   AiRetrievalSnapshot[]
   aiOrchestrations       AiOrchestration[]
+  aiRoutingDecisions     AiRoutingDecision[]
   tasks                  Task[]
 
   @@unique([organizationId, slug], map: "workspaces_active_organization_slug_key", where: raw("((status = 'ACTIVE'::\"WorkspaceStatus\") AND (\"deletedAt\" IS NULL))"))
@@ -728,6 +812,7 @@ model AiConversation {
   messages       AiMessage[]
   runs           AiRun[]
   orchestrations AiOrchestration[]
+  routingDecisions AiRoutingDecision[]
 
   @@unique([id, workspaceId])
   @@index([workspaceId, status, updatedAt])
@@ -750,11 +835,39 @@ model AiMessage {
   generatedByRun   AiRun?            @relation("AiRunAssistantMessage", fields: [generatedByRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   requestedRuns    AiRun[]           @relation("AiRunUserMessage")
   orchestrations   AiOrchestration[]
+  routingDecision  AiRoutingDecision?
 
+  @@unique([id, conversationId, workspaceId])
   @@index([conversationId, createdAt])
   @@index([workspaceId, createdAt])
   @@index([authorUserId, createdAt])
   @@map("ai_messages")
+}
+
+model AiRoutingDecision {
+  id               String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId      String                  @db.Uuid
+  conversationId   String                  @db.Uuid
+  userMessageId    String                  @unique @db.Uuid
+  configuredMode   AiRoutingConfiguredMode
+  resolvedMode     AiOrchestrationMode
+  reason           AiTaskRoutingReason
+  signals          AiTaskAnalysisSignal[]
+  complexity       AiTaskComplexity
+  risk             AiTaskRisk
+  ambiguity        AiTaskAmbiguity
+  verificationNeed AiTaskVerificationNeed
+  expectedEffort   AiTaskExpectedEffort
+  createdAt        DateTime                @default(now()) @db.Timestamptz(6)
+  workspace        Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  conversation     AiConversation          @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_routing_decisions_conversation_workspace_fkey")
+  userMessage      AiMessage               @relation(fields: [userMessageId, conversationId, workspaceId], references: [id, conversationId, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_routing_decisions_message_conversation_workspace_fkey")
+
+  @@unique([userMessageId, conversationId, workspaceId], map: "ai_routing_decisions_userMessageId_conversationId_workspaceId_k")
+  @@index([workspaceId, createdAt])
+  @@index([conversationId, createdAt])
+  @@index([resolvedMode, createdAt])
+  @@map("ai_routing_decisions")
 }
 
 model AiRun {
