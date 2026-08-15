@@ -37,6 +37,7 @@ import {
   createAiOrchestrationRun,
   executeBalancedAiOrchestration,
   executeBalancedGroundedRequest,
+  executeCriticalGroundedRequest,
   executeDeepGroundedRequest,
   executeAiOrchestrationRun,
   getAiOrchestration,
@@ -60,7 +61,10 @@ import {
   type LanguageModelProvider,
   type LanguageModelRequest,
 } from '../../services/ai/language-model-provider';
-import type { DeepAiRuntimeConfiguration } from '../../services/ai/ai-orchestration-policy';
+import type {
+  CriticalAiRuntimeConfiguration,
+  DeepAiRuntimeConfiguration,
+} from '../../services/ai/ai-orchestration-policy';
 import {
   DeterministicLocalEmbeddingProvider,
   EmbeddingProviderRegistry,
@@ -289,6 +293,16 @@ const deepRuntimeConfiguration = {
   verifier: providerIdentities.anthropic,
 } as const;
 
+const criticalRuntimeConfiguration = {
+  candidateA: providerIdentities.openai,
+  candidateB: providerIdentities.anthropic,
+  candidateC: providerIdentities.gemini,
+  critic: providerIdentities.gemini,
+  synthesizer: providerIdentities.gemini,
+  verifierA: providerIdentities.openai,
+  verifierB: providerIdentities.anthropic,
+} as const;
+
 function providers() {
   const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1');
   return new LanguageModelProviderRegistry(openai, [
@@ -326,6 +340,20 @@ async function executeDeep(
   providerConfiguration: DeepAiRuntimeConfiguration = deepRuntimeConfiguration,
 ) {
   return executeDeepGroundedRequest(prisma, dependencies(registry), f.ownerId, f.workspaceId, {
+    conversationId: f.conversationId,
+    groundedContextId: f.contextId,
+    originalUserRequest: f.originalUserRequest,
+    providerConfiguration,
+    userMessageId: f.messageId,
+  });
+}
+
+async function executeCritical(
+  f: Awaited<ReturnType<typeof fixture>>,
+  registry: LanguageModelProviderRegistry,
+  providerConfiguration: CriticalAiRuntimeConfiguration = criticalRuntimeConfiguration,
+) {
+  return executeCriticalGroundedRequest(prisma, dependencies(registry), f.ownerId, f.workspaceId, {
     conversationId: f.conversationId,
     groundedContextId: f.contextId,
     originalUserRequest: f.originalUserRequest,
@@ -1007,6 +1035,395 @@ test('DEEP synthesizer failure leaves no intermediate fallback finalRun', async 
   assert.ok(result.runs.slice(0, 5).some((run) => run.status === AiRunStatus.SUCCEEDED));
 });
 
+test('CRITICAL executes seven grounded runs and only its synthesizer becomes final', async () => {
+  const f = await fixture();
+  const candidateRequests: LanguageModelRequest[] = [];
+  let criticRequest: LanguageModelRequest | undefined;
+  let verifierARequest: LanguageModelRequest | undefined;
+  let verifierBRequest: LanguageModelRequest | undefined;
+  let synthesisRequest: LanguageModelRequest | undefined;
+  const capture = (request: LanguageModelRequest) => {
+    if (request.userMessage.includes('Critique the candidate proposals')) criticRequest = request;
+    else if (request.userMessage.includes('Perform the first verification pass'))
+      verifierARequest = request;
+    else if (request.userMessage.includes('Perform the second verification pass'))
+      verifierBRequest = request;
+    else if (request.userMessage.includes('Synthesize one final answer'))
+      synthesisRequest = request;
+    else candidateRequests.push(request);
+  };
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: capture,
+    text: (request) =>
+      request.userMessage.includes('Perform the first verification pass')
+        ? 'Verifier A review.'
+        : 'OpenAI candidate proposal.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    onRequest: capture,
+    text: (request) =>
+      request.userMessage.includes('Perform the second verification pass')
+        ? 'Verifier B review.'
+        : 'Anthropic candidate proposal.',
+  });
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    onRequest: capture,
+    text: (request) =>
+      request.userMessage.includes('Critique the candidate proposals')
+        ? 'Critic review.'
+        : request.userMessage.includes('Synthesize one final answer')
+          ? 'Final CRITICAL synthesis.'
+          : 'Gemini candidate proposal.',
+  });
+  const result = await executeCritical(
+    f,
+    new LanguageModelProviderRegistry(openai, [anthropic, gemini]),
+  );
+
+  assert.equal(result.status, AiOrchestrationStatus.SUCCEEDED);
+  assert.equal(result.runs.length, 7);
+  assert.deepEqual(
+    result.runs.map((run) => [run.providerKey, run.orchestrationRole, run.orchestrationStep]),
+    [
+      ['openai', AiOrchestrationRole.CANDIDATE, 0],
+      ['anthropic', AiOrchestrationRole.CANDIDATE, 1],
+      ['gemini', AiOrchestrationRole.CANDIDATE, 2],
+      ['gemini', AiOrchestrationRole.CRITIC, 3],
+      ['openai', AiOrchestrationRole.VERIFIER, 4],
+      ['anthropic', AiOrchestrationRole.VERIFIER, 5],
+      ['gemini', AiOrchestrationRole.SYNTHESIZER, 6],
+    ],
+  );
+  assert.equal(result.finalRunId, result.runs[6]?.id);
+  assert.ok(result.runs.every((run) => run.status === AiRunStatus.SUCCEEDED));
+  assert.ok(result.runs.every((run) => run.groundedContextId === f.contextId));
+  assert.ok(
+    result.runs.every(
+      (run) =>
+        run.referencedCitationIds.length === 1 &&
+        run.referencedCitationIds[0] === f.context.allowedCitationIds[0],
+    ),
+  );
+  assert.equal(candidateRequests.length, 3);
+  for (const request of [
+    ...candidateRequests,
+    criticRequest,
+    verifierARequest,
+    verifierBRequest,
+    synthesisRequest,
+  ]) {
+    assert.equal(request?.context, f.context.context);
+    assert.equal(
+      request?.citations.some(({ citationId }) => citationId === 'cite_fabricated'),
+      false,
+    );
+  }
+  assert.match(verifierBRequest?.userMessage ?? '', /Verifier A review/u);
+  assert.match(verifierBRequest?.userMessage ?? '', /untrusted analysis, not evidence/u);
+  assert.match(synthesisRequest?.userMessage ?? '', /Critic review/u);
+  assert.match(synthesisRequest?.userMessage ?? '', /Verifier A review/u);
+  assert.match(synthesisRequest?.userMessage ?? '', /Verifier B review/u);
+});
+
+test('CRITICAL continues after one candidate failure using successful proposals', async () => {
+  const f = await fixture();
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1');
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1');
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    fail: true,
+  });
+  const result = await executeCritical(
+    f,
+    new LanguageModelProviderRegistry(openai, [anthropic, gemini]),
+    {
+      candidateA: providerIdentities.openai,
+      candidateB: providerIdentities.anthropic,
+      candidateC: providerIdentities.gemini,
+      critic: providerIdentities.openai,
+      synthesizer: providerIdentities.anthropic,
+      verifierA: providerIdentities.anthropic,
+      verifierB: providerIdentities.openai,
+    },
+  );
+
+  assert.equal(result.status, AiOrchestrationStatus.PARTIALLY_SUCCEEDED);
+  assert.equal(result.runs.length, 7);
+  assert.equal(result.runs[2]?.status, AiRunStatus.FAILED);
+  assert.ok(result.runs.slice(3).every((run) => run.status === AiRunStatus.SUCCEEDED));
+  assert.equal(result.finalRunId, result.runs[6]?.id);
+});
+
+test('CRITICAL continues with one successful candidate after two candidate failures', async () => {
+  const f = await fixture();
+  let criticRequest: LanguageModelRequest | undefined;
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: (request) => {
+      if (request.userMessage.includes('Critique the candidate proposals')) criticRequest = request;
+    },
+    text: (request) =>
+      request.userMessage === f.originalUserRequest
+        ? 'Only CRITICAL candidate.'
+        : 'Successful downstream analysis.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    fail: true,
+  });
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    fail: true,
+  });
+  const result = await executeCritical(
+    f,
+    new LanguageModelProviderRegistry(openai, [anthropic, gemini]),
+    {
+      candidateA: providerIdentities.openai,
+      candidateB: providerIdentities.anthropic,
+      candidateC: providerIdentities.gemini,
+      critic: providerIdentities.openai,
+      synthesizer: providerIdentities.openai,
+      verifierA: providerIdentities.openai,
+      verifierB: providerIdentities.openai,
+    },
+  );
+
+  assert.equal(result.status, AiOrchestrationStatus.PARTIALLY_SUCCEEDED);
+  assert.deepEqual(
+    result.runs.slice(0, 3).map(({ status }) => status),
+    [AiRunStatus.SUCCEEDED, AiRunStatus.FAILED, AiRunStatus.FAILED],
+  );
+  assert.equal(result.runs.length, 7);
+  assert.equal(result.finalRunId, result.runs[6]?.id);
+  assert.match(criticRequest?.userMessage ?? '', /Only CRITICAL candidate/u);
+  assert.doesNotMatch(criticRequest?.userMessage ?? '', /Grounded anthropic result/u);
+  assert.doesNotMatch(criticRequest?.userMessage ?? '', /Grounded gemini result/u);
+});
+
+test('CRITICAL stops after all three candidates fail', async () => {
+  const f = await fixture();
+  let downstreamCalls = 0;
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: () => downstreamCalls++,
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    fail: true,
+  });
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    fail: true,
+  });
+  const result = await executeCritical(
+    f,
+    new LanguageModelProviderRegistry(openai, [anthropic, gemini]),
+    {
+      candidateA: providerIdentities.anthropic,
+      candidateB: providerIdentities.gemini,
+      candidateC: providerIdentities.anthropic,
+      critic: providerIdentities.openai,
+      synthesizer: providerIdentities.openai,
+      verifierA: providerIdentities.openai,
+      verifierB: providerIdentities.openai,
+    },
+  );
+
+  assert.equal(result.status, AiOrchestrationStatus.FAILED);
+  assert.equal(result.failureCode, 'critical_candidates_failed');
+  assert.equal(result.finalRunId, null);
+  assert.equal(result.runs.length, 3);
+  assert.ok(result.runs.every((run) => run.orchestrationRole === AiOrchestrationRole.CANDIDATE));
+  assert.equal(downstreamCalls, 0);
+});
+
+test('CRITICAL continues through both verifiers when the critic fails', async () => {
+  const f = await fixture();
+  let verifierARequest: LanguageModelRequest | undefined;
+  let verifierBRequest: LanguageModelRequest | undefined;
+  let synthesisRequest: LanguageModelRequest | undefined;
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: (request) => {
+      if (request.userMessage.includes('Perform the second verification pass'))
+        verifierBRequest = request;
+    },
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    onRequest: (request) => {
+      if (request.userMessage.includes('Perform the first verification pass'))
+        verifierARequest = request;
+      if (request.userMessage.includes('Synthesize one final answer')) synthesisRequest = request;
+    },
+  });
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    fail: true,
+  });
+  const result = await executeCritical(
+    f,
+    new LanguageModelProviderRegistry(openai, [anthropic, gemini]),
+    {
+      candidateA: providerIdentities.openai,
+      candidateB: providerIdentities.anthropic,
+      candidateC: providerIdentities.openai,
+      critic: providerIdentities.gemini,
+      synthesizer: providerIdentities.anthropic,
+      verifierA: providerIdentities.anthropic,
+      verifierB: providerIdentities.openai,
+    },
+  );
+
+  assert.equal(result.status, AiOrchestrationStatus.PARTIALLY_SUCCEEDED);
+  assert.equal(result.runs[3]?.status, AiRunStatus.FAILED);
+  assert.ok(result.runs.slice(4).every((run) => run.status === AiRunStatus.SUCCEEDED));
+  assert.equal(result.finalRunId, result.runs[6]?.id);
+  for (const request of [verifierARequest, verifierBRequest, synthesisRequest]) {
+    assert.doesNotMatch(request?.userMessage ?? '', /"criticReview"/u);
+  }
+});
+
+test('CRITICAL verifier B and synthesis continue when verifier A fails', async () => {
+  const f = await fixture();
+  let verifierBRequest: LanguageModelRequest | undefined;
+  let synthesisRequest: LanguageModelRequest | undefined;
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: (request) => {
+      if (request.userMessage.includes('Perform the second verification pass'))
+        verifierBRequest = request;
+    },
+    text: (request) =>
+      request.userMessage.includes('Perform the second verification pass')
+        ? 'Verifier B survived.'
+        : 'Grounded openai result.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    onRequest: (request) => {
+      if (request.userMessage.includes('Synthesize one final answer')) synthesisRequest = request;
+    },
+  });
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    fail: true,
+  });
+  const result = await executeCritical(
+    f,
+    new LanguageModelProviderRegistry(openai, [anthropic, gemini]),
+    {
+      candidateA: providerIdentities.openai,
+      candidateB: providerIdentities.anthropic,
+      candidateC: providerIdentities.openai,
+      critic: providerIdentities.anthropic,
+      synthesizer: providerIdentities.anthropic,
+      verifierA: providerIdentities.gemini,
+      verifierB: providerIdentities.openai,
+    },
+  );
+
+  assert.equal(result.status, AiOrchestrationStatus.PARTIALLY_SUCCEEDED);
+  assert.equal(result.runs[4]?.status, AiRunStatus.FAILED);
+  assert.equal(result.runs[5]?.status, AiRunStatus.SUCCEEDED);
+  assert.equal(result.runs[6]?.status, AiRunStatus.SUCCEEDED);
+  assert.equal(result.finalRunId, result.runs[6]?.id);
+  assert.doesNotMatch(verifierBRequest?.userMessage ?? '', /"verifierAReview"/u);
+  assert.doesNotMatch(synthesisRequest?.userMessage ?? '', /"verifierAReview"/u);
+  assert.match(synthesisRequest?.userMessage ?? '', /Verifier B survived/u);
+});
+
+test('CRITICAL synthesis continues without verifier B output when verifier B fails', async () => {
+  const f = await fixture();
+  let synthesisRequest: LanguageModelRequest | undefined;
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    text: (request) =>
+      request.userMessage.includes('Perform the first verification pass')
+        ? 'Verifier A survived.'
+        : 'Grounded openai result.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    onRequest: (request) => {
+      if (request.userMessage.includes('Synthesize one final answer')) synthesisRequest = request;
+    },
+  });
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    fail: true,
+  });
+  const result = await executeCritical(
+    f,
+    new LanguageModelProviderRegistry(openai, [anthropic, gemini]),
+    {
+      candidateA: providerIdentities.openai,
+      candidateB: providerIdentities.anthropic,
+      candidateC: providerIdentities.openai,
+      critic: providerIdentities.anthropic,
+      synthesizer: providerIdentities.anthropic,
+      verifierA: providerIdentities.openai,
+      verifierB: providerIdentities.gemini,
+    },
+  );
+
+  assert.equal(result.status, AiOrchestrationStatus.PARTIALLY_SUCCEEDED);
+  assert.equal(result.runs[5]?.status, AiRunStatus.FAILED);
+  assert.equal(result.runs[6]?.status, AiRunStatus.SUCCEEDED);
+  assert.equal(result.finalRunId, result.runs[6]?.id);
+  assert.match(synthesisRequest?.userMessage ?? '', /Verifier A survived/u);
+  assert.doesNotMatch(synthesisRequest?.userMessage ?? '', /"verifierBReview"/u);
+});
+
+test('CRITICAL synthesis may succeed when both verifier passes fail', async () => {
+  const f = await fixture();
+  let synthesisRequest: LanguageModelRequest | undefined;
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1');
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    onRequest: (request) => {
+      if (request.userMessage.includes('Synthesize one final answer')) synthesisRequest = request;
+    },
+  });
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    fail: true,
+  });
+  const result = await executeCritical(
+    f,
+    new LanguageModelProviderRegistry(openai, [anthropic, gemini]),
+    {
+      candidateA: providerIdentities.openai,
+      candidateB: providerIdentities.anthropic,
+      candidateC: providerIdentities.openai,
+      critic: providerIdentities.anthropic,
+      synthesizer: providerIdentities.anthropic,
+      verifierA: providerIdentities.gemini,
+      verifierB: providerIdentities.gemini,
+    },
+  );
+
+  assert.equal(result.status, AiOrchestrationStatus.PARTIALLY_SUCCEEDED);
+  assert.equal(result.runs[4]?.status, AiRunStatus.FAILED);
+  assert.equal(result.runs[5]?.status, AiRunStatus.FAILED);
+  assert.equal(result.runs[6]?.status, AiRunStatus.SUCCEEDED);
+  assert.equal(result.finalRunId, result.runs[6]?.id);
+  assert.doesNotMatch(synthesisRequest?.userMessage ?? '', /"verifierAReview"/u);
+  assert.doesNotMatch(synthesisRequest?.userMessage ?? '', /"verifierBReview"/u);
+});
+
+test('CRITICAL synthesizer failure leaves no intermediate fallback finalRun', async () => {
+  const f = await fixture();
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1');
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1');
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    fail: true,
+  });
+  const result = await executeCritical(
+    f,
+    new LanguageModelProviderRegistry(openai, [anthropic, gemini]),
+    {
+      candidateA: providerIdentities.openai,
+      candidateB: providerIdentities.anthropic,
+      candidateC: providerIdentities.openai,
+      critic: providerIdentities.anthropic,
+      synthesizer: providerIdentities.gemini,
+      verifierA: providerIdentities.openai,
+      verifierB: providerIdentities.anthropic,
+    },
+  );
+
+  assert.equal(result.status, AiOrchestrationStatus.PARTIALLY_SUCCEEDED);
+  assert.equal(result.runs.length, 7);
+  assert.equal(result.runs[6]?.orchestrationRole, AiOrchestrationRole.SYNTHESIZER);
+  assert.equal(result.runs[6]?.status, AiRunStatus.FAILED);
+  assert.equal(result.finalRunId, null);
+  assert.ok(result.runs.slice(0, 6).some((run) => run.status === AiRunStatus.SUCCEEDED));
+});
+
 test('BALANCED cannot select a successful candidate as finalRun', async () => {
   const f = await fixture();
   const operation = await orchestration(f, AiOrchestrationMode.BALANCED);
@@ -1366,6 +1783,186 @@ test('DEEP Chat synthesis failure returns no intermediate fallback', async () =>
   );
 });
 
+test('CRITICAL Chat returns only its grounded synthesizer and excludes all intermediates from history', async () => {
+  const f = await fixture();
+  await indexFixtureKnowledge(f);
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    text: (request) =>
+      request.userMessage.includes('first verification pass')
+        ? 'Hidden CRITICAL verifier A review.'
+        : 'Hidden CRITICAL candidate A.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    text: (request) =>
+      request.userMessage.includes('second verification pass')
+        ? 'Hidden CRITICAL verifier B review.'
+        : 'Hidden CRITICAL candidate B.',
+  });
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    text: (request) => {
+      if (request.userMessage.includes('Synthesize one final answer')) {
+        return 'Visible CRITICAL synthesized answer.';
+      }
+      if (request.userMessage.includes('Critique the candidate proposals')) {
+        return 'Hidden CRITICAL critic review.';
+      }
+      return 'Hidden CRITICAL candidate C.';
+    },
+  });
+  const groundedContextCountBefore = await prisma.aiRetrievalSnapshot.count();
+  const previousMode = process.env.AI_CHAT_MODE;
+  process.env.AI_CHAT_MODE = 'CRITICAL';
+  const result = await (async () => {
+    try {
+      return await submitAiChatMessage(
+        prisma,
+        dependencies(new LanguageModelProviderRegistry(openai, [anthropic, gemini])),
+        f.ownerId,
+        f.workspaceId,
+        f.conversationId,
+        'What is the approved control?',
+        { criticalProviderConfiguration: criticalRuntimeConfiguration },
+      );
+    } finally {
+      if (previousMode === undefined) delete process.env.AI_CHAT_MODE;
+      else process.env.AI_CHAT_MODE = previousMode;
+    }
+  })();
+
+  assert.equal(result.mode, 'CRITICAL');
+  assert.equal(result.failureCode, null);
+  assert.equal(result.responseRun?.orchestrationRole, AiOrchestrationRole.SYNTHESIZER);
+  assert.equal(result.responseRun?.status, AiRunStatus.SUCCEEDED);
+  const orchestration = await prisma.aiOrchestration.findFirstOrThrow({
+    where: { id: result.responseRun?.orchestrationId ?? undefined },
+    include: { runs: { orderBy: { orchestrationStep: 'asc' } } },
+  });
+  assert.equal(orchestration.mode, AiOrchestrationMode.CRITICAL);
+  assert.equal(orchestration.finalRunId, result.responseRun?.id);
+  assert.equal(await prisma.aiRetrievalSnapshot.count(), groundedContextCountBefore + 1);
+  assert.equal(orchestration.runs.length, 7);
+  assert.deepEqual(
+    orchestration.runs.map(({ orchestrationRole }) => orchestrationRole),
+    [
+      AiOrchestrationRole.CANDIDATE,
+      AiOrchestrationRole.CANDIDATE,
+      AiOrchestrationRole.CANDIDATE,
+      AiOrchestrationRole.CRITIC,
+      AiOrchestrationRole.VERIFIER,
+      AiOrchestrationRole.VERIFIER,
+      AiOrchestrationRole.SYNTHESIZER,
+    ],
+  );
+  assert.ok(
+    orchestration.runs.every(
+      ({ groundedContextId }) => groundedContextId === orchestration.groundedContextId,
+    ),
+  );
+
+  const response = await prisma.aiMessage.findFirstOrThrow({
+    where: { generatedByRunId: result.responseRun?.id },
+  });
+  assert.equal(response.content, 'Visible CRITICAL synthesized answer.');
+  const groundedContext = await prisma.aiRetrievalSnapshot.findUniqueOrThrow({
+    where: { id: orchestration.groundedContextId },
+    include: { citations: true },
+  });
+  assert.ok(groundedContext.citations.length > 0);
+  assert.ok((result.responseRun?.referencedCitationIds.length ?? 0) > 0);
+  assert.ok(
+    result.responseRun?.referencedCitationIds.every((citationId) =>
+      groundedContext.citations.some((citation) => citation.citationId === citationId),
+    ),
+  );
+  const cited = groundedContext.citations.find((citation) =>
+    result.responseRun?.referencedCitationIds.includes(citation.citationId),
+  );
+  assert.equal(cited?.documentSlug, f.documentSlug);
+  assert.equal(cited?.documentVersion, 1);
+
+  const hiddenOutputs = [
+    'Hidden CRITICAL candidate A.',
+    'Hidden CRITICAL candidate B.',
+    'Hidden CRITICAL candidate C.',
+    'Hidden CRITICAL critic review.',
+    'Hidden CRITICAL verifier A review.',
+    'Hidden CRITICAL verifier B review.',
+  ];
+  const visible = await getAiConversation(prisma, f.ownerId, f.workspaceId, f.conversationId);
+  assert.ok(
+    hiddenOutputs.every((content) => !visible.messages.some((item) => item.content === content)),
+  );
+  assert.ok(visible.messages.some(({ content }) => content === response.content));
+  assert.equal(visible.runs.length, 0);
+
+  let followUpRequest: LanguageModelRequest | undefined;
+  const followUp = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: (request) => (followUpRequest = request),
+  });
+  await submitAiMessage(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(followUp)),
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
+    'Continue from the visible answer.',
+  );
+  assert.ok(
+    followUpRequest?.history.some(
+      ({ content, role }) => content === response.content && role === 'assistant',
+    ),
+  );
+  assert.ok(
+    hiddenOutputs.every(
+      (content) => !followUpRequest?.history.some((message) => message.content === content),
+    ),
+  );
+});
+
+test('CRITICAL Chat synthesis failure returns no intermediate fallback', async () => {
+  const f = await fixture();
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    text: 'Hidden successful CRITICAL candidate or verifier.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    text: 'Hidden successful CRITICAL candidate, critic, or verifier.',
+  });
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    fail: true,
+  });
+  const result = await submitAiChatMessage(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(openai, [anthropic, gemini])),
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
+    'Fail CRITICAL synthesis safely.',
+    {
+      criticalProviderConfiguration: {
+        candidateA: providerIdentities.openai,
+        candidateB: providerIdentities.anthropic,
+        candidateC: providerIdentities.openai,
+        critic: providerIdentities.anthropic,
+        synthesizer: providerIdentities.gemini,
+        verifierA: providerIdentities.openai,
+        verifierB: providerIdentities.anthropic,
+      },
+      mode: 'CRITICAL',
+    },
+  );
+
+  assert.equal(result.mode, 'CRITICAL');
+  assert.equal(result.responseRun, null);
+  assert.equal(result.failureCode, 'generation_failed');
+  const orchestration = await prisma.aiOrchestration.findFirstOrThrow();
+  assert.equal(orchestration.finalRunId, null);
+  const visible = await getAiConversation(prisma, f.ownerId, f.workspaceId, f.conversationId);
+  assert.equal(
+    visible.messages.some(({ role }) => role === AiMessageRole.ASSISTANT),
+    false,
+  );
+});
+
 test('invalid Chat mode fails closed before persisting a request', async () => {
   const f = await fixture();
   const before = {
@@ -1373,7 +1970,7 @@ test('invalid Chat mode fails closed before persisting a request', async () => {
     runs: await prisma.aiRun.count(),
   };
   const previousMode = process.env.AI_CHAT_MODE;
-  process.env.AI_CHAT_MODE = 'CRITICAL';
+  process.env.AI_CHAT_MODE = 'UNSUPPORTED';
   try {
     await assert.rejects(
       submitAiChatMessage(
@@ -1396,14 +1993,14 @@ test('invalid Chat mode fails closed before persisting a request', async () => {
   assert.equal(await prisma.aiOrchestration.count(), 0);
 });
 
-test('Knowledge Actions remain single-provider when DEEP Chat is configured', async () => {
+test('Knowledge Actions remain single-provider when CRITICAL Chat is configured', async () => {
   const f = await fixture();
   let calls = 0;
   const current = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
     onRequest: () => calls++,
   });
   const previousMode = process.env.AI_CHAT_MODE;
-  process.env.AI_CHAT_MODE = 'DEEP';
+  process.env.AI_CHAT_MODE = 'CRITICAL';
   const result = await (async () => {
     try {
       return await runKnowledgeDocumentAiAction(

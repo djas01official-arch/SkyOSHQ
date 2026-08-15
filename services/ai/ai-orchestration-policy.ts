@@ -45,6 +45,27 @@ export type DeepAiRuntimeConfiguration = Readonly<{
   verifier: AiOrchestrationProviderIdentity;
 }>;
 
+export type CriticalAiProviderAssignment = Readonly<{
+  candidates: readonly [
+    AiOrchestrationProviderIdentity,
+    AiOrchestrationProviderIdentity,
+    AiOrchestrationProviderIdentity,
+  ];
+  critic: AiOrchestrationProviderIdentity;
+  synthesizer: AiOrchestrationProviderIdentity;
+  verifiers: readonly [AiOrchestrationProviderIdentity, AiOrchestrationProviderIdentity];
+}>;
+
+export type CriticalAiRuntimeConfiguration = Readonly<{
+  candidateA: AiOrchestrationProviderIdentity;
+  candidateB: AiOrchestrationProviderIdentity;
+  candidateC: AiOrchestrationProviderIdentity;
+  critic: AiOrchestrationProviderIdentity;
+  synthesizer: AiOrchestrationProviderIdentity;
+  verifierA: AiOrchestrationProviderIdentity;
+  verifierB: AiOrchestrationProviderIdentity;
+}>;
+
 export const AI_ORCHESTRATION_VERSION = 'grounded-multi-model-v1';
 const ALL_PROVIDER_KEYS = ['openai', 'anthropic', 'gemini'] as const;
 
@@ -125,10 +146,11 @@ const policies: Readonly<Record<AiOrchestrationModeKey, AiOrchestrationPolicy>> 
       step(1, 0, 'CANDIDATE', true),
       step(2, 0, 'CANDIDATE', true),
       step(3, 1, 'CRITIC', true),
-      step(4, 1, 'VERIFIER', true),
-      step(5, 2, 'SYNTHESIZER', true),
+      step(4, 2, 'VERIFIER', true),
+      step(5, 3, 'VERIFIER', true),
+      step(6, 4, 'SYNTHESIZER', true),
     ]),
-    version: '1.0.0',
+    version: '1.1.0',
   }),
 });
 
@@ -203,6 +225,32 @@ function deepRuntimeConfiguration(environment: NodeJS.ProcessEnv): DeepAiRuntime
     critic: identity('AI_DEEP_CRITIC'),
     synthesizer: identity('AI_DEEP_SYNTHESIZER'),
     verifier: identity('AI_DEEP_VERIFIER'),
+  };
+}
+
+function criticalRuntimeConfiguration(
+  environment: NodeJS.ProcessEnv,
+): CriticalAiRuntimeConfiguration {
+  const identity = (prefix: string): AiOrchestrationProviderIdentity => {
+    const providerKey = environment[`${prefix}_PROVIDER`]?.trim();
+    const modelKey = environment[`${prefix}_MODEL`]?.trim();
+    const modelVersion = environment[`${prefix}_MODEL_VERSION`]?.trim();
+    if (!providerKey || !modelKey || !modelVersion) {
+      throw new LanguageModelProviderError(
+        'The CRITICAL provider assignment is incomplete.',
+        'provider_configuration_invalid',
+      );
+    }
+    return { modelKey, modelVersion, providerKey };
+  };
+  return {
+    candidateA: identity('AI_CRITICAL_CANDIDATE_A'),
+    candidateB: identity('AI_CRITICAL_CANDIDATE_B'),
+    candidateC: identity('AI_CRITICAL_CANDIDATE_C'),
+    critic: identity('AI_CRITICAL_CRITIC'),
+    synthesizer: identity('AI_CRITICAL_SYNTHESIZER'),
+    verifierA: identity('AI_CRITICAL_VERIFIER_A'),
+    verifierB: identity('AI_CRITICAL_VERIFIER_B'),
   };
 }
 
@@ -299,6 +347,62 @@ export function resolveDeepAiProviderAssignment(
     if (error instanceof LanguageModelProviderError) {
       throw new LanguageModelProviderError(
         'The DEEP provider assignment is invalid.',
+        'provider_configuration_invalid',
+      );
+    }
+    throw error;
+  }
+}
+
+export function resolveCriticalAiProviderAssignment(
+  providers: LanguageModelProviderRegistry,
+  configuration: CriticalAiRuntimeConfiguration = criticalRuntimeConfiguration(process.env),
+): CriticalAiProviderAssignment {
+  try {
+    const assignment = Object.freeze({
+      candidates: Object.freeze([
+        configuredIdentity(providers, configuration.candidateA),
+        configuredIdentity(providers, configuration.candidateB),
+        configuredIdentity(providers, configuration.candidateC),
+      ]) as readonly [
+        AiOrchestrationProviderIdentity,
+        AiOrchestrationProviderIdentity,
+        AiOrchestrationProviderIdentity,
+      ],
+      critic: configuredIdentity(providers, configuration.critic),
+      synthesizer: configuredIdentity(providers, configuration.synthesizer),
+      verifiers: Object.freeze([
+        configuredIdentity(providers, configuration.verifierA),
+        configuredIdentity(providers, configuration.verifierB),
+      ]) as readonly [AiOrchestrationProviderIdentity, AiOrchestrationProviderIdentity],
+    });
+    const policy = getAiOrchestrationPolicy('CRITICAL');
+    const steps = [
+      ...assignment.candidates.map((provider) => ({ provider, role: 'CANDIDATE' as const })),
+      { provider: assignment.critic, role: 'CRITIC' as const },
+      ...assignment.verifiers.map((provider) => ({ provider, role: 'VERIFIER' as const })),
+      { provider: assignment.synthesizer, role: 'SYNTHESIZER' as const },
+    ];
+    for (const [index, { provider, role }] of steps.entries()) {
+      if (
+        !getAiOrchestrationPolicyStep(
+          policy,
+          index,
+          role,
+          providers.getVersion(provider.providerKey, provider.modelKey, provider.modelVersion),
+        )
+      ) {
+        throw new LanguageModelProviderError(
+          'The CRITICAL provider assignment is not permitted by policy.',
+          'provider_configuration_invalid',
+        );
+      }
+    }
+    return assignment;
+  } catch (error) {
+    if (error instanceof LanguageModelProviderError) {
+      throw new LanguageModelProviderError(
+        'The CRITICAL provider assignment is invalid.',
         'provider_configuration_invalid',
       );
     }

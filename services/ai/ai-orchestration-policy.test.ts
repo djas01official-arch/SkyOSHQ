@@ -7,6 +7,7 @@ import {
   getAiOrchestrationPolicy,
   getAiOrchestrationPolicyStep,
   resolveBalancedAiProviderAssignment,
+  resolveCriticalAiProviderAssignment,
   resolveDeepAiProviderAssignment,
 } from './ai-orchestration-policy';
 import {
@@ -48,6 +49,16 @@ test('defines immutable FAST, BALANCED, DEEP, and CRITICAL policy identities', (
     assert.ok(Object.isFrozen(policy));
     assert.ok(Object.isFrozen(policy.steps));
   }
+});
+
+test('FAST policy remains the single-candidate version 1.0 contract', () => {
+  const policy = getAiOrchestrationPolicy('FAST');
+  assert.equal(policy.version, '1.0.0');
+  assert.equal(policy.allowDegradedSynthesis, false);
+  assert.deepEqual(
+    policy.steps.map(({ index, role, stage }) => ({ index, role, stage })),
+    [{ index: 0, role: 'CANDIDATE', stage: 0 }],
+  );
 });
 
 test('provider identity and orchestration role remain independent dimensions', () => {
@@ -107,6 +118,47 @@ test('DEEP policy defines three candidates, critic, verifier, and synthesizer in
     policy.steps.filter(({ role }) => role === 'SYNTHESIZER').map(({ index }) => index),
     [5],
   );
+});
+
+test('CRITICAL policy defines seven ordered sequential review steps', () => {
+  const policy = getAiOrchestrationPolicy('CRITICAL');
+  assert.equal(policy.version, '1.1.0');
+  assert.equal(policy.allowDegradedSynthesis, false);
+  assert.equal(policy.steps.length, 7);
+  assert.deepEqual(
+    policy.steps.map(({ index, role, stage }) => ({ index, role, stage })),
+    [
+      { index: 0, role: 'CANDIDATE', stage: 0 },
+      { index: 1, role: 'CANDIDATE', stage: 0 },
+      { index: 2, role: 'CANDIDATE', stage: 0 },
+      { index: 3, role: 'CRITIC', stage: 1 },
+      { index: 4, role: 'VERIFIER', stage: 2 },
+      { index: 5, role: 'VERIFIER', stage: 3 },
+      { index: 6, role: 'SYNTHESIZER', stage: 4 },
+    ],
+  );
+  assert.deepEqual(
+    policy.steps.filter(({ role }) => role === 'SYNTHESIZER').map(({ index }) => index),
+    [6],
+  );
+});
+
+test('CRITICAL roles remain provider-neutral at every compatible step', () => {
+  const policy = getAiOrchestrationPolicy('CRITICAL');
+  for (const [providerKey, modelKey, modelVersion] of providers) {
+    for (const { index, role } of policy.steps) {
+      assert.ok(
+        getAiOrchestrationPolicyStep(policy, index, role, {
+          maxInputCharacters: 20_000,
+          maxOutputCharacters: 2_000,
+          modelKey,
+          modelVersion,
+          providerKey,
+          timeoutMs: 45_000,
+        }),
+      );
+    }
+  }
 });
 
 test('BALANCED explicitly permits degraded synthesis from one successful candidate', () => {
@@ -222,4 +274,106 @@ test('DEEP runtime assignment rejects identities absent from the registry', () =
       error instanceof LanguageModelProviderError &&
       error.code === 'provider_configuration_invalid',
   );
+});
+
+test('runtime CRITICAL assignment resolves seven explicit provider identities', () => {
+  const registered = registeredProviders();
+  const assignment = resolveCriticalAiProviderAssignment(providerRegistry(registered), {
+    candidateA: registered[0]!,
+    candidateB: registered[1]!,
+    candidateC: registered[2]!,
+    critic: registered[2]!,
+    synthesizer: registered[1]!,
+    verifierA: registered[0]!,
+    verifierB: registered[2]!,
+  });
+  assert.deepEqual(
+    assignment.candidates.map(({ providerKey }) => providerKey),
+    ['openai', 'anthropic', 'gemini'],
+  );
+  assert.equal(assignment.critic.providerKey, 'gemini');
+  assert.deepEqual(
+    assignment.verifiers.map(({ providerKey }) => providerKey),
+    ['openai', 'gemini'],
+  );
+  assert.equal(assignment.synthesizer.providerKey, 'anthropic');
+  assert.ok(Object.isFrozen(assignment));
+  assert.ok(Object.isFrozen(assignment.candidates));
+  assert.ok(Object.isFrozen(assignment.verifiers));
+});
+
+test('CRITICAL runtime environment parses every explicit assignment and fails closed when incomplete', () => {
+  const prefixes = [
+    'AI_CRITICAL_CANDIDATE_A',
+    'AI_CRITICAL_CANDIDATE_B',
+    'AI_CRITICAL_CANDIDATE_C',
+    'AI_CRITICAL_CRITIC',
+    'AI_CRITICAL_VERIFIER_A',
+    'AI_CRITICAL_VERIFIER_B',
+    'AI_CRITICAL_SYNTHESIZER',
+  ] as const;
+  const previous = new Map<string, string | undefined>();
+  for (const [index, prefix] of prefixes.entries()) {
+    const [providerKey, modelKey, modelVersion] = providers[index % providers.length]!;
+    for (const [suffix, value] of [
+      ['PROVIDER', providerKey],
+      ['MODEL', modelKey],
+      ['MODEL_VERSION', modelVersion],
+    ] as const) {
+      const name = `${prefix}_${suffix}`;
+      previous.set(name, process.env[name]);
+      process.env[name] = value;
+    }
+  }
+  try {
+    const assignment = resolveCriticalAiProviderAssignment(providerRegistry());
+    assert.deepEqual(
+      assignment.candidates.map(({ providerKey }) => providerKey),
+      ['openai', 'anthropic', 'gemini'],
+    );
+    assert.equal(assignment.critic.providerKey, 'openai');
+    assert.deepEqual(
+      assignment.verifiers.map(({ providerKey }) => providerKey),
+      ['anthropic', 'gemini'],
+    );
+    assert.equal(assignment.synthesizer.providerKey, 'openai');
+
+    delete process.env.AI_CRITICAL_VERIFIER_B_MODEL_VERSION;
+    assert.throws(
+      () => resolveCriticalAiProviderAssignment(providerRegistry()),
+      (error: unknown) =>
+        error instanceof LanguageModelProviderError &&
+        error.code === 'provider_configuration_invalid',
+    );
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test('CRITICAL runtime assignment rejects unknown provider, model, and model version', () => {
+  const registered = registeredProviders();
+  const valid = {
+    candidateA: registered[0]!,
+    candidateB: registered[1]!,
+    candidateC: registered[2]!,
+    critic: registered[0]!,
+    synthesizer: registered[2]!,
+    verifierA: registered[1]!,
+    verifierB: registered[2]!,
+  };
+  for (const configuration of [
+    { ...valid, candidateA: { ...valid.candidateA, providerKey: 'unknown' } },
+    { ...valid, critic: { ...valid.critic, modelKey: 'unknown' } },
+    { ...valid, verifierA: { ...valid.verifierA, modelVersion: 'unknown' } },
+  ]) {
+    assert.throws(
+      () => resolveCriticalAiProviderAssignment(providerRegistry(registered), configuration),
+      (error: unknown) =>
+        error instanceof LanguageModelProviderError &&
+        error.code === 'provider_configuration_invalid',
+    );
+  }
 });

@@ -201,6 +201,38 @@ test('DEEP production registry resolves every approved cross-provider identity',
   }
 });
 
+test('CRITICAL production registry resolves every approved cross-provider identity', () => {
+  for (const [configuredProvider, model] of [
+    ['openai', 'gpt-5.6-terra'],
+    ['anthropic', 'claude-sonnet-5'],
+    ['gemini', 'gemini-3.6-flash'],
+  ] as const) {
+    const registry = createDefaultLanguageModelProviderRegistry({
+      anthropicApiKey: 'production-secret-shaped-value',
+      chatMode: 'CRITICAL',
+      configuredProvider,
+      geminiApiKey: 'production-secret-shaped-value',
+      model,
+      openAiApiKey: 'production-secret-shaped-value',
+      runtime: 'production',
+    });
+    assert.equal(registry.getCurrent().providerKey, configuredProvider);
+    assert.equal(registry.getCurrent().modelKey, model);
+    assert.equal(
+      registry.getVersion('openai', 'gpt-5.6-terra', 'responses-json-schema-v1').providerKey,
+      'openai',
+    );
+    assert.equal(
+      registry.getVersion('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1').providerKey,
+      'anthropic',
+    );
+    assert.equal(
+      registry.getVersion('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1').providerKey,
+      'gemini',
+    );
+  }
+});
+
 test('BALANCED production registry fails closed when a required provider is unconfigured', async () => {
   for (const missing of ['openai', 'anthropic', 'gemini'] as const) {
     const registry = createDefaultLanguageModelProviderRegistry({
@@ -253,8 +285,34 @@ test('DEEP production registry fails closed when a required provider is unconfig
   }
 });
 
+test('CRITICAL production registry fails closed when a required provider is unconfigured', async () => {
+  for (const missing of ['openai', 'anthropic', 'gemini'] as const) {
+    const registry = createDefaultLanguageModelProviderRegistry({
+      anthropicApiKey: missing === 'anthropic' ? '   ' : 'production-secret-shaped-value',
+      chatMode: 'CRITICAL',
+      configuredProvider: 'openai',
+      geminiApiKey: missing === 'gemini' ? '   ' : 'production-secret-shaped-value',
+      model: 'gpt-5.6-terra',
+      openAiApiKey: missing === 'openai' ? '   ' : 'production-secret-shaped-value',
+      runtime: 'production',
+    });
+    await assert.rejects(
+      registry.getCurrent().generate(request),
+      (error: unknown) =>
+        error instanceof LanguageModelProviderError &&
+        error.code === 'provider_configuration_invalid',
+    );
+    assert.throws(
+      () => registry.getVersion('openai', 'gpt-5.6-terra', 'responses-json-schema-v1'),
+      (error: unknown) =>
+        error instanceof LanguageModelProviderError &&
+        error.code === 'provider_configuration_invalid',
+    );
+  }
+});
+
 test('development local provider remains deterministic for orchestration modes', () => {
-  for (const chatMode of ['BALANCED', 'DEEP'] as const) {
+  for (const chatMode of ['BALANCED', 'DEEP', 'CRITICAL'] as const) {
     const registry = createDefaultLanguageModelProviderRegistry({
       chatMode,
       configuredProvider: 'local',

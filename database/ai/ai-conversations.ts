@@ -36,6 +36,7 @@ import {
 } from '../../services/ai/language-model-pricing';
 import type {
   BalancedAiRuntimeConfiguration,
+  CriticalAiRuntimeConfiguration,
   DeepAiRuntimeConfiguration,
 } from '../../services/ai/ai-orchestration-policy';
 
@@ -91,13 +92,13 @@ export type AiConversationDependencies = Readonly<{
   retrieval: KnowledgeRetrievalDependencies;
 }>;
 
-export type AiChatMode = 'FAST' | 'BALANCED' | 'DEEP';
+export type AiChatMode = 'FAST' | 'BALANCED' | 'DEEP' | 'CRITICAL';
 
 export type AiChatSubmissionResult =
   | Readonly<{ mode: 'FAST'; responseRun: AiRun }>
   | Readonly<{
       failureCode: string | null;
-      mode: 'BALANCED' | 'DEEP';
+      mode: 'BALANCED' | 'DEEP' | 'CRITICAL';
       responseRun: AiRun | null;
     }>;
 
@@ -799,6 +800,7 @@ function resolveAiChatMode(value: string | undefined): AiChatMode {
   if (!mode || mode === 'FAST') return 'FAST';
   if (mode === 'BALANCED') return 'BALANCED';
   if (mode === 'DEEP') return 'DEEP';
+  if (mode === 'CRITICAL') return 'CRITICAL';
   throw new AiConversationValidationError(
     'The configured AI Chat mode is invalid.',
     'chat_mode_invalid',
@@ -868,6 +870,7 @@ export async function submitAiChatMessage(
   value: string,
   runtime: Readonly<{
     balancedProviderConfiguration?: BalancedAiRuntimeConfiguration;
+    criticalProviderConfiguration?: CriticalAiRuntimeConfiguration;
     deepProviderConfiguration?: DeepAiRuntimeConfiguration;
     mode?: string;
   }> = {},
@@ -894,8 +897,11 @@ export async function submitAiChatMessage(
     conversationId,
     value,
   );
-  const { executeBalancedGroundedRequest, executeDeepGroundedRequest } =
-    await import('./ai-orchestrations');
+  const {
+    executeBalancedGroundedRequest,
+    executeCriticalGroundedRequest,
+    executeDeepGroundedRequest,
+  } = await import('./ai-orchestrations');
   const request = {
     conversationId,
     groundedContextId: prepared.groundedContextId,
@@ -910,12 +916,19 @@ export async function submitAiChatMessage(
             ? { providerConfiguration: runtime.balancedProviderConfiguration }
             : {}),
         })
-      : await executeDeepGroundedRequest(prisma, dependencies, actorUserId, workspaceId, {
-          ...request,
-          ...(runtime.deepProviderConfiguration
-            ? { providerConfiguration: runtime.deepProviderConfiguration }
-            : {}),
-        });
+      : mode === 'DEEP'
+        ? await executeDeepGroundedRequest(prisma, dependencies, actorUserId, workspaceId, {
+            ...request,
+            ...(runtime.deepProviderConfiguration
+              ? { providerConfiguration: runtime.deepProviderConfiguration }
+              : {}),
+          })
+        : await executeCriticalGroundedRequest(prisma, dependencies, actorUserId, workspaceId, {
+            ...request,
+            ...(runtime.criticalProviderConfiguration
+              ? { providerConfiguration: runtime.criticalProviderConfiguration }
+              : {}),
+          });
   if (!orchestration.finalRunId) {
     return {
       failureCode: orchestration.failureCode ?? 'generation_failed',
