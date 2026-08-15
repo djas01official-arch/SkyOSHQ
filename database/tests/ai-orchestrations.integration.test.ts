@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { after, beforeEach, test } from 'node:test';
 
 import { PrismaPg } from '@prisma/adapter-pg';
@@ -1526,6 +1527,29 @@ test('blank Chat mode defaults to the unchanged FAST path', async () => {
   assert.equal(await prisma.aiOrchestration.count(), 0);
 });
 
+test('explicit FAST Chat preserves the single-provider execution path', async () => {
+  const f = await fixture();
+  let calls = 0;
+  const current = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: () => calls++,
+  });
+  const result = await submitAiChatMessage(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(current)),
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
+    'Use explicit FAST Chat mode.',
+    { mode: 'FAST' },
+  );
+  assert.equal(result.mode, 'FAST');
+  assert.equal(result.responseRun.orchestrationId, null);
+  assert.equal(result.responseRun.status, AiRunStatus.SUCCEEDED);
+  assert.equal(calls, 1);
+  assert.equal(await prisma.aiRun.count(), 1);
+  assert.equal(await prisma.aiOrchestration.count(), 0);
+});
+
 test('explicit BALANCED Chat returns only the successful synthesizer response', async () => {
   const f = await fixture();
   const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
@@ -1963,6 +1987,249 @@ test('CRITICAL Chat synthesis failure returns no intermediate fallback', async (
   );
 });
 
+test('AUTO routes repeated simple requests deterministically through unchanged FAST execution', async () => {
+  const f = await fixture();
+  let calls = 0;
+  const current = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: () => calls++,
+  });
+  const previousMode = process.env.AI_CHAT_MODE;
+  process.env.AI_CHAT_MODE = 'AUTO';
+  const results = [];
+  try {
+    for (let index = 0; index < 2; index += 1) {
+      results.push(
+        await submitAiChatMessage(
+          prisma,
+          dependencies(new LanguageModelProviderRegistry(current)),
+          f.ownerId,
+          f.workspaceId,
+          f.conversationId,
+          'Rename the dashboard heading.',
+        ),
+      );
+    }
+  } finally {
+    if (previousMode === undefined) delete process.env.AI_CHAT_MODE;
+    else process.env.AI_CHAT_MODE = previousMode;
+  }
+  assert.deepEqual(
+    results.map(({ mode }) => mode),
+    ['FAST', 'FAST'],
+  );
+  assert.ok(results.every(({ responseRun }) => responseRun?.orchestrationId === null));
+  assert.equal(calls, 2);
+  assert.equal(await prisma.aiRun.count(), 2);
+  assert.equal(await prisma.aiOrchestration.count(), 0);
+});
+
+test('AUTO routes a moderate request to BALANCED and exposes only its synthesizer', async () => {
+  const f = await fixture();
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    text: 'Hidden AUTO BALANCED candidate A.',
+  });
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    text: 'Hidden AUTO BALANCED candidate B.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    text: 'Visible AUTO BALANCED synthesis.',
+  });
+  const result = await submitAiChatMessage(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(gemini, [openai, anthropic])),
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
+    'Please deliver:\n- Update the dashboard title\n- Refresh the empty-state copy',
+    { balancedProviderConfiguration: balancedRuntimeConfiguration, mode: 'AUTO' },
+  );
+
+  assert.equal(result.mode, 'BALANCED');
+  assert.equal(result.responseRun?.orchestrationRole, AiOrchestrationRole.SYNTHESIZER);
+  const visible = await getAiConversation(prisma, f.ownerId, f.workspaceId, f.conversationId);
+  assert.ok(visible.messages.some(({ content }) => content === 'Visible AUTO BALANCED synthesis.'));
+  assert.equal(
+    visible.messages.some(({ content }) => content.startsWith('Hidden AUTO BALANCED')),
+    false,
+  );
+});
+
+test('AUTO routes a complex verified request to DEEP with grounded citations and hidden history', async () => {
+  const f = await fixture();
+  await indexFixtureKnowledge(f);
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    text: (request) =>
+      request.userMessage.includes('Synthesize one final answer')
+        ? 'Visible AUTO DEEP synthesis.'
+        : 'Hidden AUTO DEEP candidate A.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    text: (request) =>
+      request.userMessage.includes('Verify the supported claims')
+        ? 'Hidden AUTO DEEP verifier.'
+        : 'Hidden AUTO DEEP candidate B.',
+  });
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    text: (request) =>
+      request.userMessage.includes('Critique the candidate proposals')
+        ? 'Hidden AUTO DEEP critic.'
+        : 'Hidden AUTO DEEP candidate C.',
+  });
+  const result = await submitAiChatMessage(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(openai, [anthropic, gemini])),
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
+    'Verify and prove that the approved control is supported by the source.',
+    { deepProviderConfiguration: deepRuntimeConfiguration, mode: 'AUTO' },
+  );
+
+  assert.equal(result.mode, 'DEEP');
+  assert.equal(result.responseRun?.orchestrationRole, AiOrchestrationRole.SYNTHESIZER);
+  const orchestration = await prisma.aiOrchestration.findFirstOrThrow({
+    where: { id: result.responseRun?.orchestrationId ?? undefined },
+    include: { runs: true },
+  });
+  assert.equal(orchestration.mode, AiOrchestrationMode.DEEP);
+  assert.equal(orchestration.finalRunId, result.responseRun?.id);
+  assert.ok(
+    orchestration.runs.every(
+      ({ groundedContextId }) => groundedContextId === orchestration.groundedContextId,
+    ),
+  );
+  const context = await prisma.aiRetrievalSnapshot.findUniqueOrThrow({
+    where: { id: orchestration.groundedContextId },
+    include: { citations: true },
+  });
+  assert.ok((result.responseRun?.referencedCitationIds.length ?? 0) > 0);
+  assert.ok(
+    result.responseRun?.referencedCitationIds.every((citationId) =>
+      context.citations.some((citation) => citation.citationId === citationId),
+    ),
+  );
+
+  const hiddenOutputs = [
+    'Hidden AUTO DEEP candidate A.',
+    'Hidden AUTO DEEP candidate B.',
+    'Hidden AUTO DEEP candidate C.',
+    'Hidden AUTO DEEP critic.',
+    'Hidden AUTO DEEP verifier.',
+  ];
+  const visible = await getAiConversation(prisma, f.ownerId, f.workspaceId, f.conversationId);
+  assert.ok(
+    hiddenOutputs.every((content) => !visible.messages.some((item) => item.content === content)),
+  );
+  assert.ok(visible.messages.some(({ content }) => content === 'Visible AUTO DEEP synthesis.'));
+
+  let followUpRequest: LanguageModelRequest | undefined;
+  const followUp = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: (request) => (followUpRequest = request),
+  });
+  await submitAiMessage(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(followUp)),
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
+    'Continue from the visible response.',
+  );
+  assert.ok(
+    hiddenOutputs.every(
+      (content) => !followUpRequest?.history.some((message) => message.content === content),
+    ),
+  );
+});
+
+test('AUTO routes an explicit high-risk request to CRITICAL and hides every intermediate', async () => {
+  const f = await fixture();
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    text: (request) =>
+      request.userMessage.includes('first verification pass')
+        ? 'Hidden AUTO CRITICAL verifier A.'
+        : 'Hidden AUTO CRITICAL candidate A.',
+  });
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    text: (request) =>
+      request.userMessage.includes('second verification pass')
+        ? 'Hidden AUTO CRITICAL verifier B.'
+        : 'Hidden AUTO CRITICAL candidate B.',
+  });
+  const gemini = model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+    text: (request) => {
+      if (request.userMessage.includes('Synthesize one final answer')) {
+        return 'Visible AUTO CRITICAL synthesis.';
+      }
+      if (request.userMessage.includes('Critique the candidate proposals')) {
+        return 'Hidden AUTO CRITICAL critic.';
+      }
+      return 'Hidden AUTO CRITICAL candidate C.';
+    },
+  });
+  const result = await submitAiChatMessage(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(openai, [anthropic, gemini])),
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
+    'Review this patient safety protocol.',
+    { criticalProviderConfiguration: criticalRuntimeConfiguration, mode: 'AUTO' },
+  );
+
+  assert.equal(result.mode, 'CRITICAL');
+  assert.equal(result.responseRun?.orchestrationRole, AiOrchestrationRole.SYNTHESIZER);
+  const orchestration = await prisma.aiOrchestration.findFirstOrThrow({
+    where: { id: result.responseRun?.orchestrationId ?? undefined },
+    include: { runs: true },
+  });
+  assert.equal(orchestration.mode, AiOrchestrationMode.CRITICAL);
+  assert.equal(orchestration.runs.length, 7);
+  const visible = await getAiConversation(prisma, f.ownerId, f.workspaceId, f.conversationId);
+  assert.ok(visible.messages.some(({ content }) => content === 'Visible AUTO CRITICAL synthesis.'));
+  assert.equal(
+    visible.messages.some(({ content }) => content.startsWith('Hidden AUTO CRITICAL')),
+    false,
+  );
+});
+
+test('AUTO analysis failure fails closed before persistence or provider execution', async () => {
+  const f = await fixture();
+  let calls = 0;
+  const current = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+    onRequest: () => calls++,
+  });
+  const before = {
+    messages: await prisma.aiMessage.count(),
+    runs: await prisma.aiRun.count(),
+  };
+  await assert.rejects(
+    submitAiChatMessage(
+      prisma,
+      dependencies(new LanguageModelProviderRegistry(current)),
+      f.ownerId,
+      f.workspaceId,
+      f.conversationId,
+      '   ',
+      { mode: 'AUTO' },
+    ),
+    (error: unknown) =>
+      error instanceof AiConversationValidationError && error.code === 'chat_routing_invalid',
+  );
+  assert.equal(calls, 0);
+  assert.equal(await prisma.aiMessage.count(), before.messages);
+  assert.equal(await prisma.aiRun.count(), before.runs);
+  assert.equal(await prisma.aiOrchestration.count(), 0);
+});
+
+test('AUTO Chat composes the existing analyzer and router without local routing rules', () => {
+  const source = readFileSync(new URL('../ai/ai-conversations.ts', import.meta.url), 'utf8');
+  assert.match(source, /routeAiTaskRequest\(\{ content \}\)\.decision\.mode/u);
+  assert.doesNotMatch(
+    source,
+    /HIGH_STAKES_REQUEST|MULTI_STEP_REQUEST|VERIFICATION_REQUEST|EXPLICIT_DEEP_ANALYSIS/u,
+  );
+});
+
 test('invalid Chat mode fails closed before persisting a request', async () => {
   const f = await fixture();
   const before = {
@@ -1993,14 +2260,14 @@ test('invalid Chat mode fails closed before persisting a request', async () => {
   assert.equal(await prisma.aiOrchestration.count(), 0);
 });
 
-test('Knowledge Actions remain single-provider when CRITICAL Chat is configured', async () => {
+test('Knowledge Actions remain single-provider when AUTO Chat is configured', async () => {
   const f = await fixture();
   let calls = 0;
   const current = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
     onRequest: () => calls++,
   });
   const previousMode = process.env.AI_CHAT_MODE;
-  process.env.AI_CHAT_MODE = 'CRITICAL';
+  process.env.AI_CHAT_MODE = 'AUTO';
   const result = await (async () => {
     try {
       return await runKnowledgeDocumentAiAction(

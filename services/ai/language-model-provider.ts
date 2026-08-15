@@ -283,7 +283,12 @@ export function createDefaultLanguageModelProviderRegistry(
   }
 
   const chatMode = (options.chatMode ?? process.env.AI_CHAT_MODE)?.trim().toUpperCase();
-  if (chatMode === 'BALANCED' || chatMode === 'DEEP' || chatMode === 'CRITICAL') {
+  if (
+    chatMode === 'AUTO' ||
+    chatMode === 'BALANCED' ||
+    chatMode === 'DEEP' ||
+    chatMode === 'CRITICAL'
+  ) {
     const model = (options.model ?? process.env.AI_MODEL)?.trim();
     const openAiApiKey = (options.openAiApiKey ?? process.env.OPENAI_API_KEY)?.trim();
     const anthropicApiKey = (options.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY)?.trim();

@@ -39,6 +39,10 @@ import type {
   CriticalAiRuntimeConfiguration,
   DeepAiRuntimeConfiguration,
 } from '../../services/ai/ai-orchestration-policy';
+import {
+  AiTaskAnalyzerValidationError,
+  routeAiTaskRequest,
+} from '../../services/ai/ai-task-analyzer';
 
 const MAX_MESSAGE_CHARACTERS = 4_000;
 const MAX_HISTORY_CHARACTERS = 8_000;
@@ -93,6 +97,7 @@ export type AiConversationDependencies = Readonly<{
 }>;
 
 export type AiChatMode = 'FAST' | 'BALANCED' | 'DEEP' | 'CRITICAL';
+type AiConfiguredChatMode = AiChatMode | 'AUTO';
 
 export type AiChatSubmissionResult =
   | Readonly<{ mode: 'FAST'; responseRun: AiRun }>
@@ -795,16 +800,33 @@ export async function submitAiMessage(
   return executeRun(prisma, dependencies, actorUserId, workspaceId, run.id, content);
 }
 
-function resolveAiChatMode(value: string | undefined): AiChatMode {
+function resolveConfiguredAiChatMode(value: string | undefined): AiConfiguredChatMode {
   const mode = value?.trim().toUpperCase();
   if (!mode || mode === 'FAST') return 'FAST';
   if (mode === 'BALANCED') return 'BALANCED';
   if (mode === 'DEEP') return 'DEEP';
   if (mode === 'CRITICAL') return 'CRITICAL';
+  if (mode === 'AUTO') return 'AUTO';
   throw new AiConversationValidationError(
     'The configured AI Chat mode is invalid.',
     'chat_mode_invalid',
   );
+}
+
+function resolveAiChatMode(value: string | undefined, content: string): AiChatMode {
+  const configuredMode = resolveConfiguredAiChatMode(value);
+  if (configuredMode !== 'AUTO') return configuredMode;
+  try {
+    return routeAiTaskRequest({ content }).decision.mode;
+  } catch (error) {
+    if (error instanceof AiTaskAnalyzerValidationError) {
+      throw new AiConversationValidationError(
+        'The AI request could not be analyzed for execution.',
+        'chat_routing_invalid',
+      );
+    }
+    throw error;
+  }
 }
 
 async function prepareOrchestratedChatRequest(
@@ -875,7 +897,7 @@ export async function submitAiChatMessage(
     mode?: string;
   }> = {},
 ): Promise<AiChatSubmissionResult> {
-  const mode = resolveAiChatMode(runtime.mode ?? process.env.AI_CHAT_MODE);
+  const mode = resolveAiChatMode(runtime.mode ?? process.env.AI_CHAT_MODE, value);
   if (mode === 'FAST') {
     return {
       mode,
