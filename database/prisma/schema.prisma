@@ -241,6 +241,17 @@ enum AiTaskAnalysisSignal {
   EMBEDDED_UNTRUSTED_CONTENT
 }
 
+enum AiBudgetLedgerEntryType {
+  CREDIT
+  DEBIT
+}
+
+enum AiBudgetReservationStatus {
+  RESERVED
+  SETTLED
+  RELEASED
+}
+
 enum TaskStatus {
   TODO
   IN_PROGRESS
@@ -424,6 +435,9 @@ model Workspace {
   aiRetrievalSnapshots   AiRetrievalSnapshot[]
   aiOrchestrations       AiOrchestration[]
   aiRoutingDecisions     AiRoutingDecision[]
+  aiBudgetAccount        AiBudgetAccount?
+  aiBudgetLedgerEntries  AiBudgetLedgerEntry[]
+  aiBudgetReservations   AiBudgetReservation[]
   tasks                  Task[]
 
   @@unique([organizationId, slug], map: "workspaces_active_organization_slug_key", where: raw("((status = 'ACTIVE'::\"WorkspaceStatus\") AND (\"deletedAt\" IS NULL))"))
@@ -799,19 +813,19 @@ model Task {
 }
 
 model AiConversation {
-  id             String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  workspaceId    String               @db.Uuid
-  ownerUserId    String               @db.Uuid
-  title          String
-  status         AiConversationStatus @default(ACTIVE)
-  archivedAt     DateTime?            @db.Timestamptz(6)
-  createdAt      DateTime             @default(now()) @db.Timestamptz(6)
-  updatedAt      DateTime             @updatedAt @db.Timestamptz(6)
-  workspace      Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  owner          User                 @relation("AiConversationOwner", fields: [ownerUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  messages       AiMessage[]
-  runs           AiRun[]
-  orchestrations AiOrchestration[]
+  id               String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId      String               @db.Uuid
+  ownerUserId      String               @db.Uuid
+  title            String
+  status           AiConversationStatus @default(ACTIVE)
+  archivedAt       DateTime?            @db.Timestamptz(6)
+  createdAt        DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime             @updatedAt @db.Timestamptz(6)
+  workspace        Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  owner            User                 @relation("AiConversationOwner", fields: [ownerUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  messages         AiMessage[]
+  runs             AiRun[]
+  orchestrations   AiOrchestration[]
   routingDecisions AiRoutingDecision[]
 
   @@unique([id, workspaceId])
@@ -821,19 +835,19 @@ model AiConversation {
 }
 
 model AiMessage {
-  id               String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  conversationId   String            @db.Uuid
-  workspaceId      String            @db.Uuid
-  authorUserId     String?           @db.Uuid
-  generatedByRunId String?           @unique @db.Uuid
+  id               String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId   String             @db.Uuid
+  workspaceId      String             @db.Uuid
+  authorUserId     String?            @db.Uuid
+  generatedByRunId String?            @unique @db.Uuid
   role             AiMessageRole
-  content          String            @db.Text
-  createdAt        DateTime          @default(now()) @db.Timestamptz(6)
-  conversation     AiConversation    @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_messages_conversation_workspace_fkey")
-  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  author           User?             @relation("AiMessageAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  generatedByRun   AiRun?            @relation("AiRunAssistantMessage", fields: [generatedByRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  requestedRuns    AiRun[]           @relation("AiRunUserMessage")
+  content          String             @db.Text
+  createdAt        DateTime           @default(now()) @db.Timestamptz(6)
+  conversation     AiConversation     @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_messages_conversation_workspace_fkey")
+  workspace        Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  author           User?              @relation("AiMessageAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  generatedByRun   AiRun?             @relation("AiRunAssistantMessage", fields: [generatedByRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  requestedRuns    AiRun[]            @relation("AiRunUserMessage")
   orchestrations   AiOrchestration[]
   routingDecision  AiRoutingDecision?
 
@@ -845,29 +859,90 @@ model AiMessage {
 }
 
 model AiRoutingDecision {
-  id               String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  workspaceId      String                  @db.Uuid
-  conversationId   String                  @db.Uuid
-  userMessageId    String                  @unique @db.Uuid
-  configuredMode   AiRoutingConfiguredMode
-  resolvedMode     AiOrchestrationMode
-  reason           AiTaskRoutingReason
-  signals          AiTaskAnalysisSignal[]
-  complexity       AiTaskComplexity
-  risk             AiTaskRisk
-  ambiguity        AiTaskAmbiguity
-  verificationNeed AiTaskVerificationNeed
-  expectedEffort   AiTaskExpectedEffort
-  createdAt        DateTime                @default(now()) @db.Timestamptz(6)
-  workspace        Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  conversation     AiConversation          @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_routing_decisions_conversation_workspace_fkey")
-  userMessage      AiMessage               @relation(fields: [userMessageId, conversationId, workspaceId], references: [id, conversationId, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_routing_decisions_message_conversation_workspace_fkey")
+  id                String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId       String                  @db.Uuid
+  conversationId    String                  @db.Uuid
+  userMessageId     String                  @unique @db.Uuid
+  configuredMode    AiRoutingConfiguredMode
+  resolvedMode      AiOrchestrationMode
+  reason            AiTaskRoutingReason
+  signals           AiTaskAnalysisSignal[]
+  complexity        AiTaskComplexity
+  risk              AiTaskRisk
+  ambiguity         AiTaskAmbiguity
+  verificationNeed  AiTaskVerificationNeed
+  expectedEffort    AiTaskExpectedEffort
+  createdAt         DateTime                @default(now()) @db.Timestamptz(6)
+  workspace         Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  conversation      AiConversation          @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_routing_decisions_conversation_workspace_fkey")
+  userMessage       AiMessage               @relation(fields: [userMessageId, conversationId, workspaceId], references: [id, conversationId, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_routing_decisions_message_conversation_workspace_fkey")
+  budgetReservation AiBudgetReservation?
+  runs              AiRun[]                 @relation("AiRunRoutingDecision")
 
+  @@unique([id, workspaceId])
+  @@unique([id, userMessageId, conversationId, workspaceId], map: "ai_routing_decisions_run_scope_key")
   @@unique([userMessageId, conversationId, workspaceId], map: "ai_routing_decisions_userMessageId_conversationId_workspaceId_k")
   @@index([workspaceId, createdAt])
   @@index([conversationId, createdAt])
   @@index([resolvedMode, createdAt])
   @@map("ai_routing_decisions")
+}
+
+model AiBudgetAccount {
+  id            String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId   String                @unique @db.Uuid
+  createdAt     DateTime              @default(now()) @db.Timestamptz(6)
+  workspace     Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  ledgerEntries AiBudgetLedgerEntry[]
+  reservations  AiBudgetReservation[]
+
+  @@unique([id, workspaceId])
+  @@map("ai_budget_accounts")
+}
+
+model AiBudgetLedgerEntry {
+  id             String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId      String                  @db.Uuid
+  workspaceId    String                  @db.Uuid
+  reservationId  String?                 @unique @db.Uuid
+  type           AiBudgetLedgerEntryType
+  amountUsd      Decimal                 @db.Decimal(65, 12)
+  idempotencyKey String
+  createdAt      DateTime                @default(now()) @db.Timestamptz(6)
+  account        AiBudgetAccount         @relation(fields: [accountId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_budget_ledger_entries_account_workspace_fkey")
+  workspace      Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reservation    AiBudgetReservation?    @relation("AiBudgetSettlementLedgerEntry", fields: [reservationId, accountId, workspaceId], references: [id, accountId, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_budget_ledger_entries_reservation_account_workspace_fkey")
+
+  @@unique([accountId, idempotencyKey])
+  @@unique([reservationId, accountId, workspaceId], map: "ai_budget_ledger_reservation_scope_key")
+  @@index([workspaceId, createdAt])
+  @@index([accountId, type, createdAt])
+  @@map("ai_budget_ledger_entries")
+}
+
+model AiBudgetReservation {
+  id                    String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId             String                    @db.Uuid
+  workspaceId           String                    @db.Uuid
+  routingDecisionId     String?                   @unique @db.Uuid
+  idempotencyKey        String
+  reservedAmountUsd     Decimal                   @db.Decimal(65, 12)
+  status                AiBudgetReservationStatus @default(RESERVED)
+  settledAmountUsd      Decimal?                  @db.Decimal(65, 12)
+  createdAt             DateTime                  @default(now()) @db.Timestamptz(6)
+  settledAt             DateTime?                 @db.Timestamptz(6)
+  releasedAt            DateTime?                 @db.Timestamptz(6)
+  account               AiBudgetAccount           @relation(fields: [accountId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_budget_reservations_account_workspace_fkey")
+  workspace             Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  routingDecision       AiRoutingDecision?        @relation(fields: [routingDecisionId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_budget_reservations_routing_decision_workspace_fkey")
+  settlementLedgerEntry AiBudgetLedgerEntry?      @relation("AiBudgetSettlementLedgerEntry")
+
+  @@unique([id, accountId, workspaceId])
+  @@unique([accountId, idempotencyKey])
+  @@unique([routingDecisionId, workspaceId], map: "ai_budget_reservation_routing_scope_key")
+  @@index([workspaceId, status, createdAt])
+  @@index([accountId, createdAt], map: "ai_budget_reservations_active_idx", where: raw("(status = 'RESERVED'::\"AiBudgetReservationStatus\")"))
+  @@map("ai_budget_reservations")
 }
 
 model AiRun {
@@ -882,6 +957,7 @@ model AiRun {
   orchestrationRole          AiOrchestrationRole?
   orchestrationStep          Int?
   groundedContextId          String?                   @db.Uuid
+  routingDecisionId          String?                   @db.Uuid
   providerKey                String
   modelKey                   String
   modelVersion               String
@@ -894,6 +970,7 @@ model AiRun {
   reasoningTokens            Int?
   totalTokens                Int?
   providerRequestId          String?
+  providerAttempted          Boolean?                  @default(false)
   estimatedCostUsd           Decimal?                  @db.Decimal(20, 12)
   referencedCitationIds      String[]                  @default([])
   durationMs                 Int?
@@ -910,6 +987,7 @@ model AiRun {
   knowledgeDocumentVersion   KnowledgeDocumentVersion? @relation("AiRunKnowledgeDocumentVersion", fields: [knowledgeDocumentVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   orchestration              AiOrchestration?          @relation("AiOrchestrationRuns", fields: [orchestrationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   groundedContext            AiRetrievalSnapshot?      @relation("AiRunGroundedContext", fields: [groundedContextId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  routingDecision            AiRoutingDecision?        @relation("AiRunRoutingDecision", fields: [routingDecisionId, userMessageId, conversationId, workspaceId], references: [id, userMessageId, conversationId, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_runs_routing_decision_scope_fkey")
   finalForOrchestration      AiOrchestration?          @relation("AiOrchestrationFinalRun")
 
   @@unique([id, workspaceId])
@@ -922,6 +1000,7 @@ model AiRun {
   @@index([knowledgeDocumentVersionId, createdAt])
   @@index([orchestrationId, orchestrationRole, createdAt])
   @@index([groundedContextId, createdAt])
+  @@index([routingDecisionId, orchestrationStep, createdAt])
   @@map("ai_runs")
 }
 

@@ -317,3 +317,38 @@ export async function getAiRoutingDecision(
   }
   return routingDecision;
 }
+
+export async function getAiRoutingDecisionById(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+  routingDecisionId: string,
+): Promise<AiRoutingDecision> {
+  if (
+    !UUID_PATTERN.test(actorUserId) ||
+    !UUID_PATTERN.test(workspaceId) ||
+    !UUID_PATTERN.test(routingDecisionId)
+  ) {
+    invalidInput();
+  }
+  await requireAiRoutingDecisionAccess(prisma, actorUserId, workspaceId);
+
+  const routingDecision = await prisma.aiRoutingDecision.findFirst({
+    where: {
+      id: routingDecisionId,
+      userMessage: {
+        authorUserId: actorUserId,
+        conversation: { ownerUserId: actorUserId },
+        role: AiMessageRole.USER,
+      },
+      workspaceId,
+    },
+  });
+  if (!routingDecision) {
+    throw new AiRoutingDecisionNotFoundError(
+      'The AI routing decision was not found in this workspace.',
+      'routing_decision_not_found',
+    );
+  }
+  return routingDecision;
+}

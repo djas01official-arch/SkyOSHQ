@@ -31,14 +31,29 @@ import {
   type LanguageModelResponse,
 } from '../../services/ai/language-model-provider';
 import {
+  AiBudgetRuntimeConfigurationError,
+  parseAiBudgetRuntimeConfiguration,
+  type AiBudgetRuntimeEnvironment,
+} from '../../services/ai/ai-budget-runtime-config';
+import type { AiCostEstimate } from '../../services/ai/ai-cost-estimator';
+import type { AiBudgetReason } from '../../services/ai/ai-budget-policy';
+import {
   estimateLanguageModelCostUsd,
   normalizeLanguageModelUsage,
+  type FixedPrecisionUsd,
 } from '../../services/ai/language-model-pricing';
-import type {
-  BalancedAiRuntimeConfiguration,
-  CriticalAiRuntimeConfiguration,
-  DeepAiRuntimeConfiguration,
+import {
+  resolveBalancedAiProviderAssignment,
+  resolveCriticalAiProviderAssignment,
+  resolveDeepAiProviderAssignment,
+  type BalancedAiProviderAssignment,
+  type BalancedAiRuntimeConfiguration,
+  type CriticalAiProviderAssignment,
+  type CriticalAiRuntimeConfiguration,
+  type DeepAiProviderAssignment,
+  type DeepAiRuntimeConfiguration,
 } from '../../services/ai/ai-orchestration-policy';
+import { buildAiExecutionCostPlan } from '../../services/ai/ai-execution-cost-plan';
 import {
   AiTaskAnalyzerValidationError,
   routeAiTaskRequest,
@@ -46,8 +61,15 @@ import {
 import {
   createAiRoutingDecision,
   explicitAiRoutingAudit,
+  getAiRoutingDecisionById,
   type CreateAiRoutingDecisionInput,
 } from './ai-routing-decisions';
+import { preflightAiBudget, type AiBudgetPreflightResult } from './ai-budget-preflight';
+import {
+  reconcileAiBudgetReservation,
+  validateAiBudgetExecutionPlan,
+  type AiBudgetExecutionContext,
+} from './ai-budget-accounting';
 
 const MAX_MESSAGE_CHARACTERS = 4_000;
 const MAX_HISTORY_CHARACTERS = 8_000;
@@ -97,6 +119,11 @@ type KnowledgeActionGrounding = Readonly<{
 }>;
 
 export type AiConversationDependencies = Readonly<{
+  budgetLifecycle?: Readonly<{
+    capturePricingAt?: () => Date;
+    preflight?: typeof preflightAiBudget;
+    reconcile?: typeof reconcileAiBudgetReservation;
+  }>;
   providers: LanguageModelProviderRegistry;
   retrieval: KnowledgeRetrievalDependencies;
   routingAudit?: Readonly<{
@@ -126,6 +153,29 @@ export class AiConversationAuthorizationError extends AiConversationError {}
 export class AiConversationNotFoundError extends AiConversationError {}
 export class AiConversationValidationError extends AiConversationError {}
 export class AiConversationRateLimitError extends AiConversationError {}
+export class AiConversationBudgetError extends AiConversationError {
+  readonly confirmationThresholdUsd: FixedPrecisionUsd | null;
+  readonly estimate: AiCostEstimate | null;
+  readonly proposedReserveUsd: FixedPrecisionUsd | null;
+  readonly reason: AiBudgetReason | 'SPENDABLE_BALANCE_CHANGED' | null;
+
+  constructor(
+    message: string,
+    code: string,
+    details: Readonly<{
+      confirmationThresholdUsd?: FixedPrecisionUsd;
+      estimate?: AiCostEstimate;
+      proposedReserveUsd?: FixedPrecisionUsd | null;
+      reason?: AiBudgetReason | 'SPENDABLE_BALANCE_CHANGED';
+    }> = {},
+  ) {
+    super(message, code);
+    this.confirmationThresholdUsd = details.confirmationThresholdUsd ?? null;
+    this.estimate = details.estimate ?? null;
+    this.proposedReserveUsd = details.proposedReserveUsd ?? null;
+    this.reason = details.reason ?? null;
+  }
+}
 
 export async function requireAiAccess(
   prisma: PrismaClient,
@@ -390,7 +440,18 @@ function safeFailure(error: unknown): {
   return { code: 'generation_failed', message: 'The AI response could not be generated.' };
 }
 
-async function failRun(prisma: PrismaClient, runId: string, startedAt: number, error: unknown) {
+type FailedRunAccounting = Readonly<{
+  estimatedCostUsd: FixedPrecisionUsd;
+  usage: ReturnType<typeof normalizeLanguageModelUsage>;
+}>;
+
+async function failRun(
+  prisma: PrismaClient,
+  runId: string,
+  startedAt: number,
+  error: unknown,
+  accounting?: FailedRunAccounting,
+) {
   const failure = safeFailure(error);
   return prisma.aiRun.update({
     where: { id: runId },
@@ -399,6 +460,18 @@ async function failRun(prisma: PrismaClient, runId: string, startedAt: number, e
       durationMs: Date.now() - startedAt,
       failureCode: failure.code,
       failureMessage: failure.message,
+      ...(accounting
+        ? {
+            cacheWrite1HourInputTokens: accounting.usage.cacheWrite1HourInputTokens,
+            cacheWriteInputTokens: accounting.usage.cacheWriteInputTokens,
+            cachedInputTokens: accounting.usage.cachedInputTokens,
+            estimatedCostUsd: accounting.estimatedCostUsd,
+            inputTokens: accounting.usage.inputTokens,
+            outputTokens: accounting.usage.outputTokens,
+            reasoningTokens: accounting.usage.reasoningTokens,
+            totalTokens: accounting.usage.totalTokens,
+          }
+        : {}),
       providerRequestId: failure.providerRequestId,
       status: AiRunStatus.FAILED,
     },
@@ -424,6 +497,7 @@ export async function executeGroundedRun(
   }>,
 ) {
   const startedAt = input.startedAt ?? Date.now();
+  let failureAccounting: FailedRunAccounting | undefined;
   await requireAiAccess(prisma, input.actorUserId, input.workspaceId);
   const run = await prisma.aiRun.findFirst({
     where: {
@@ -468,6 +542,20 @@ export async function executeGroundedRun(
       run.conversationId,
       run.userMessageId,
     );
+    const attempt = await prisma.aiRun.updateMany({
+      where: {
+        id: run.id,
+        OR: [{ providerAttempted: false }, { providerAttempted: null }],
+        status: AiRunStatus.PROCESSING,
+      },
+      data: { providerAttempted: true },
+    });
+    if (attempt.count !== 1) {
+      throw new AiConversationError(
+        'The AI provider attempt could not be recorded safely.',
+        'provider_attempt_state_invalid',
+      );
+    }
     const response = await generateWithTimeout(provider, {
       citations: groundedContext.excerpts.map((excerpt) => ({
         citationId: excerpt.citation.id,
@@ -478,6 +566,17 @@ export async function executeGroundedRun(
       responseFormat: input.responseFormat,
       userMessage: input.userMessage,
     });
+    const usage = normalizeLanguageModelUsage(response);
+    const estimatedCostUsd = estimateLanguageModelCostUsd(
+      provider.providerKey,
+      provider.modelKey,
+      usage,
+      run.createdAt,
+      { inferenceGeo: response.inferenceGeo },
+    );
+    if (estimatedCostUsd !== undefined) {
+      failureAccounting = { estimatedCostUsd, usage };
+    }
     if (response.text.trim().length < 1 || response.text.length > provider.maxOutputCharacters) {
       throw new LanguageModelProviderError(
         'Provider output is invalid.',
@@ -487,14 +586,6 @@ export async function executeGroundedRun(
     const allowed = new Set(groundedContext.allowedCitationIds);
     const referencedCitationIds = [...new Set(response.citationIds)].filter((id) =>
       allowed.has(id),
-    );
-    const usage = normalizeLanguageModelUsage(response);
-    const estimatedCostUsd = estimateLanguageModelCostUsd(
-      provider.providerKey,
-      provider.modelKey,
-      usage,
-      run.createdAt,
-      { inferenceGeo: response.inferenceGeo },
     );
     const completedAt = new Date();
     await prisma.$transaction(async (transaction) => {
@@ -531,7 +622,7 @@ export async function executeGroundedRun(
       });
     });
   } catch (error) {
-    await failRun(prisma, input.runId, startedAt, error);
+    await failRun(prisma, input.runId, startedAt, error, failureAccounting);
   }
   return prisma.aiRun.findUniqueOrThrow({ where: { id: input.runId } });
 }
@@ -598,8 +689,10 @@ async function createRunForMessage(
   userMessageId: string,
   content: string,
   actionGrounding?: KnowledgeActionGrounding,
+  routingDecisionId?: string,
+  resolvedProvider?: LanguageModelProvider,
 ) {
-  const provider = dependencies.providers.getCurrent();
+  const provider = resolvedProvider ?? dependencies.providers.getCurrent();
   const run = await prisma.aiRun.create({
     data: {
       conversationId,
@@ -609,6 +702,7 @@ async function createRunForMessage(
       modelVersion: provider.modelVersion,
       providerKey: provider.providerKey,
       requestedByUserId: actorUserId,
+      routingDecisionId,
       userMessageId,
       workspaceId,
     },
@@ -919,6 +1013,344 @@ async function prepareOrchestratedChatRequest(
   return { groundedContextId: persistedContext.id };
 }
 
+function budgetErrorFromPreflight(
+  result: Exclude<AiBudgetPreflightResult, { outcome: 'ALLOWED' }>,
+  confirmationThresholdUsd: FixedPrecisionUsd,
+): AiConversationBudgetError {
+  if (result.outcome === 'CONFIRMATION_REQUIRED') {
+    return new AiConversationBudgetError(
+      'This AI request requires budget confirmation before execution.',
+      'budget_confirmation_required',
+      {
+        confirmationThresholdUsd,
+        estimate: result.estimate,
+        proposedReserveUsd: result.budgetDecision.proposedReserveUsd,
+        reason: result.budgetDecision.reason,
+      },
+    );
+  }
+  return new AiConversationBudgetError(
+    'This AI request was rejected by the workspace budget policy.',
+    'budget_rejected',
+    {
+      estimate: result.estimate,
+      proposedReserveUsd: result.budgetDecision.proposedReserveUsd,
+      reason:
+        result.outcome === 'RESERVATION_FAILED'
+          ? result.failureReason
+          : result.budgetDecision.reason,
+    },
+  );
+}
+
+function assertFastEstimateMatchesProvider(
+  result: Extract<AiBudgetPreflightResult, { outcome: 'ALLOWED' }>,
+  provider: LanguageModelProvider,
+): void {
+  const estimate = result.estimate.runEstimates[0];
+  if (
+    result.estimate.mode !== 'FAST' ||
+    result.estimate.runEstimates.length !== 1 ||
+    !estimate ||
+    estimate.role !== 'CANDIDATE' ||
+    estimate.providerKey !== provider.providerKey ||
+    estimate.modelKey !== provider.modelKey ||
+    estimate.modelVersion !== provider.modelVersion ||
+    result.reservation.amountUsd !== result.budgetDecision.proposedReserveUsd ||
+    result.reservation.amountUsd !== result.estimate.knownEstimatedCostUsd
+  ) {
+    throw new AiConversationBudgetError(
+      'The FAST budget estimate does not match the resolved provider execution.',
+      'budget_execution_plan_mismatch',
+    );
+  }
+}
+
+async function reconcileFastBudget(
+  prisma: PrismaClient,
+  dependencies: AiConversationDependencies,
+  actorUserId: string,
+  workspaceId: string,
+  routingDecisionId: string,
+  reservationId: string,
+) {
+  try {
+    return await (dependencies.budgetLifecycle?.reconcile ?? reconcileAiBudgetReservation)(prisma, {
+      actorUserId,
+      reservationId,
+      routingDecisionId,
+      workspaceId,
+    });
+  } catch {
+    throw new AiConversationBudgetError(
+      'The AI budget reservation could not be reconciled safely.',
+      'budget_reconciliation_failed',
+    );
+  }
+}
+
+type MultiAiChatMode = Exclude<AiChatMode, 'FAST'>;
+type MultiAiProviderAssignment =
+  BalancedAiProviderAssignment | DeepAiProviderAssignment | CriticalAiProviderAssignment;
+type EnabledBudgetConfiguration = Extract<
+  ReturnType<typeof parseAiBudgetRuntimeConfiguration>,
+  { enforcement: 'ENABLED' }
+>;
+
+function resolveMultiAiProviderAssignment(
+  dependencies: AiConversationDependencies,
+  mode: MultiAiChatMode,
+  runtime: Readonly<{
+    balancedProviderConfiguration?: BalancedAiRuntimeConfiguration;
+    criticalProviderConfiguration?: CriticalAiRuntimeConfiguration;
+    deepProviderConfiguration?: DeepAiRuntimeConfiguration;
+  }>,
+): MultiAiProviderAssignment {
+  switch (mode) {
+    case 'BALANCED':
+      return resolveBalancedAiProviderAssignment(
+        dependencies.providers,
+        runtime.balancedProviderConfiguration,
+      );
+    case 'DEEP':
+      return resolveDeepAiProviderAssignment(
+        dependencies.providers,
+        runtime.deepProviderConfiguration,
+      );
+    case 'CRITICAL':
+      return resolveCriticalAiProviderAssignment(
+        dependencies.providers,
+        runtime.criticalProviderConfiguration,
+      );
+  }
+}
+
+function multiExecutionPlanInput(
+  mode: MultiAiChatMode,
+  assignment: MultiAiProviderAssignment,
+  plannedTokenBudget: EnabledBudgetConfiguration['plannedTokenBudget'],
+) {
+  switch (mode) {
+    case 'BALANCED':
+      return {
+        mode,
+        plannedTokenBudget,
+        providerAssignment: assignment as BalancedAiProviderAssignment,
+      } as const;
+    case 'DEEP':
+      return {
+        mode,
+        plannedTokenBudget,
+        providerAssignment: assignment as DeepAiProviderAssignment,
+      } as const;
+    case 'CRITICAL':
+      return {
+        mode,
+        plannedTokenBudget,
+        providerAssignment: assignment as CriticalAiProviderAssignment,
+      } as const;
+  }
+}
+
+function createMultiBudgetExecutionContext(
+  result: Extract<AiBudgetPreflightResult, { outcome: 'ALLOWED' }>,
+  mode: MultiAiChatMode,
+  assignment: MultiAiProviderAssignment,
+  plannedTokenBudget: EnabledBudgetConfiguration['plannedTokenBudget'],
+  routingDecisionId: string,
+): AiBudgetExecutionContext {
+  const plan = buildAiExecutionCostPlan(
+    multiExecutionPlanInput(mode, assignment, plannedTokenBudget),
+  );
+  if (
+    result.estimate.mode !== mode ||
+    result.reservation.amountUsd !== result.budgetDecision.proposedReserveUsd ||
+    result.reservation.amountUsd !== result.estimate.knownEstimatedCostUsd ||
+    result.estimate.hasUnknownCost
+  ) {
+    throw new AiConversationBudgetError(
+      'The budget estimate does not match the resolved multi-model execution.',
+      'budget_execution_plan_mismatch',
+    );
+  }
+  const context = Object.freeze({
+    reservationId: result.reservation.id,
+    reservedAmountUsd: result.reservation.amountUsd,
+    routingDecisionId,
+    runEstimates: result.estimate.runEstimates,
+  });
+  try {
+    validateAiBudgetExecutionPlan(
+      context,
+      mode,
+      plan.runs.map((run, step) => ({
+        modelKey: run.modelKey,
+        modelVersion: run.modelVersion,
+        providerKey: run.providerKey,
+        role: run.role,
+        step,
+      })),
+    );
+  } catch {
+    throw new AiConversationBudgetError(
+      'The budget estimate does not match the resolved multi-model execution.',
+      'budget_execution_plan_mismatch',
+    );
+  }
+  return context;
+}
+
+async function reconcileMultiBudget(
+  prisma: PrismaClient,
+  dependencies: AiConversationDependencies,
+  actorUserId: string,
+  workspaceId: string,
+  routingDecisionId: string,
+  reservationId: string,
+  executionAbortedBeforeProvider = false,
+) {
+  try {
+    return await (dependencies.budgetLifecycle?.reconcile ?? reconcileAiBudgetReservation)(prisma, {
+      actorUserId,
+      ...(executionAbortedBeforeProvider ? { executionAbortedBeforeProvider: true } : {}),
+      reservationId,
+      routingDecisionId,
+      workspaceId,
+    });
+  } catch {
+    throw new AiConversationBudgetError(
+      'The AI budget reservation could not be reconciled safely.',
+      'budget_reconciliation_failed',
+    );
+  }
+}
+
+async function executeFastChatMessage(
+  prisma: PrismaClient,
+  dependencies: AiConversationDependencies,
+  actorUserId: string,
+  workspaceId: string,
+  conversationId: string,
+  userMessageId: string,
+  content: string,
+  routingDecisionId: string,
+  environment: AiBudgetRuntimeEnvironment,
+): Promise<AiRun> {
+  const provider = dependencies.providers.getCurrent();
+  let budgetConfiguration;
+  try {
+    budgetConfiguration = parseAiBudgetRuntimeConfiguration(environment);
+  } catch (error) {
+    if (!(error instanceof AiBudgetRuntimeConfigurationError)) throw error;
+    throw new AiConversationBudgetError(
+      'The AI budget runtime configuration is invalid.',
+      error.code,
+    );
+  }
+  if (budgetConfiguration.enforcement === 'DISABLED') {
+    return createRunForMessage(
+      prisma,
+      dependencies,
+      actorUserId,
+      workspaceId,
+      conversationId,
+      userMessageId,
+      content,
+      undefined,
+      routingDecisionId,
+      provider,
+    );
+  }
+
+  let pricingAt: string;
+  try {
+    pricingAt = (dependencies.budgetLifecycle?.capturePricingAt?.() ?? new Date()).toISOString();
+  } catch {
+    throw new AiConversationBudgetError(
+      'The AI budget pricing timestamp is invalid.',
+      'budget_configuration_invalid',
+    );
+  }
+  let preflight: AiBudgetPreflightResult;
+  try {
+    preflight = await (dependencies.budgetLifecycle?.preflight ?? preflightAiBudget)(prisma, {
+      actorUserId,
+      confirmationThresholdUsd: budgetConfiguration.confirmationThresholdUsd,
+      executionPlan: {
+        mode: 'FAST',
+        plannedTokenBudget: budgetConfiguration.plannedTokenBudget,
+        providerAssignment: {
+          modelKey: provider.modelKey,
+          modelVersion: provider.modelVersion,
+          providerKey: provider.providerKey,
+        },
+      },
+      pricingAt,
+      reservationIdempotencyKey: `fast-chat:${routingDecisionId}`,
+      routingDecisionId,
+      taskHardMaxUsd: budgetConfiguration.taskHardMaxUsd,
+      workspaceId,
+    });
+  } catch {
+    throw new AiConversationBudgetError(
+      'The AI budget preflight could not be completed safely.',
+      'budget_preflight_failed',
+    );
+  }
+  if (preflight.outcome !== 'ALLOWED') {
+    throw budgetErrorFromPreflight(preflight, budgetConfiguration.confirmationThresholdUsd);
+  }
+
+  try {
+    assertFastEstimateMatchesProvider(preflight, provider);
+  } catch (error) {
+    await reconcileFastBudget(
+      prisma,
+      dependencies,
+      actorUserId,
+      workspaceId,
+      routingDecisionId,
+      preflight.reservation.id,
+    );
+    throw error;
+  }
+
+  let run: AiRun;
+  try {
+    run = await createRunForMessage(
+      prisma,
+      dependencies,
+      actorUserId,
+      workspaceId,
+      conversationId,
+      userMessageId,
+      content,
+      undefined,
+      routingDecisionId,
+      provider,
+    );
+  } catch (error) {
+    await reconcileFastBudget(
+      prisma,
+      dependencies,
+      actorUserId,
+      workspaceId,
+      routingDecisionId,
+      preflight.reservation.id,
+    );
+    throw error;
+  }
+  await reconcileFastBudget(
+    prisma,
+    dependencies,
+    actorUserId,
+    workspaceId,
+    routingDecisionId,
+    preflight.reservation.id,
+  );
+  return run;
+}
+
 export async function submitAiChatMessage(
   prisma: PrismaClient,
   dependencies: AiConversationDependencies,
@@ -930,6 +1362,7 @@ export async function submitAiChatMessage(
     balancedProviderConfiguration?: BalancedAiRuntimeConfiguration;
     criticalProviderConfiguration?: CriticalAiRuntimeConfiguration;
     deepProviderConfiguration?: DeepAiRuntimeConfiguration;
+    budgetEnvironment?: AiBudgetRuntimeEnvironment;
     mode?: string;
   }> = {},
 ): Promise<AiChatSubmissionResult> {
@@ -946,8 +1379,9 @@ export async function submitAiChatMessage(
     persisted.content,
     dependencies.routingAudit?.routeTaskRequest ?? routeAiTaskRequest,
   );
+  let routingDecision;
   try {
-    await createAiRoutingDecision(prisma, {
+    routingDecision = await createAiRoutingDecision(prisma, {
       actorUserId,
       analysis: routing.analysis,
       configuredMode: routing.configuredMode,
@@ -966,7 +1400,7 @@ export async function submitAiChatMessage(
   if (mode === 'FAST') {
     return {
       mode,
-      responseRun: await createRunForMessage(
+      responseRun: await executeFastChatMessage(
         prisma,
         dependencies,
         actorUserId,
@@ -974,48 +1408,169 @@ export async function submitAiChatMessage(
         conversationId,
         persisted.messageId,
         persisted.content,
+        routingDecision.id,
+        runtime.budgetEnvironment ?? process.env,
       ),
     };
   }
-  const prepared = await prepareOrchestratedChatRequest(
-    prisma,
-    dependencies,
-    actorUserId,
-    workspaceId,
-    persisted.content,
-  );
   const {
+    AiOrchestrationBudgetStoppedError,
     executeBalancedGroundedRequest,
     executeCriticalGroundedRequest,
     executeDeepGroundedRequest,
   } = await import('./ai-orchestrations');
+  const assignment = resolveMultiAiProviderAssignment(dependencies, mode, runtime);
+  let budgetConfiguration;
+  try {
+    budgetConfiguration = parseAiBudgetRuntimeConfiguration(
+      runtime.budgetEnvironment ?? process.env,
+    );
+  } catch (error) {
+    if (!(error instanceof AiBudgetRuntimeConfigurationError)) throw error;
+    throw new AiConversationBudgetError(
+      'The AI budget runtime configuration is invalid.',
+      error.code,
+    );
+  }
+
+  let executionContext: AiBudgetExecutionContext | undefined;
+  let reservationId: string | undefined;
+  if (budgetConfiguration.enforcement === 'ENABLED') {
+    let pricingAt: string;
+    try {
+      pricingAt = (dependencies.budgetLifecycle?.capturePricingAt?.() ?? new Date()).toISOString();
+    } catch {
+      throw new AiConversationBudgetError(
+        'The AI budget pricing timestamp is invalid.',
+        'budget_configuration_invalid',
+      );
+    }
+    let preflight: AiBudgetPreflightResult;
+    try {
+      preflight = await (dependencies.budgetLifecycle?.preflight ?? preflightAiBudget)(prisma, {
+        actorUserId,
+        confirmationThresholdUsd: budgetConfiguration.confirmationThresholdUsd,
+        executionPlan: multiExecutionPlanInput(
+          mode,
+          assignment,
+          budgetConfiguration.plannedTokenBudget,
+        ),
+        pricingAt,
+        reservationIdempotencyKey: `${mode.toLowerCase()}-chat:${routingDecision.id}`,
+        routingDecisionId: routingDecision.id,
+        taskHardMaxUsd: budgetConfiguration.taskHardMaxUsd,
+        workspaceId,
+      });
+    } catch {
+      throw new AiConversationBudgetError(
+        'The AI budget preflight could not be completed safely.',
+        'budget_preflight_failed',
+      );
+    }
+    if (preflight.outcome !== 'ALLOWED') {
+      throw budgetErrorFromPreflight(preflight, budgetConfiguration.confirmationThresholdUsd);
+    }
+    try {
+      executionContext = createMultiBudgetExecutionContext(
+        preflight,
+        mode,
+        assignment,
+        budgetConfiguration.plannedTokenBudget,
+        routingDecision.id,
+      );
+    } catch (error) {
+      await reconcileMultiBudget(
+        prisma,
+        dependencies,
+        actorUserId,
+        workspaceId,
+        routingDecision.id,
+        preflight.reservation.id,
+        true,
+      );
+      throw error;
+    }
+    reservationId = preflight.reservation.id;
+  }
+
+  let prepared;
+  try {
+    prepared = await prepareOrchestratedChatRequest(
+      prisma,
+      dependencies,
+      actorUserId,
+      workspaceId,
+      persisted.content,
+    );
+  } catch (error) {
+    if (reservationId) {
+      await reconcileMultiBudget(
+        prisma,
+        dependencies,
+        actorUserId,
+        workspaceId,
+        routingDecision.id,
+        reservationId,
+        true,
+      );
+    }
+    throw error;
+  }
   const request = {
     conversationId,
     groundedContextId: prepared.groundedContextId,
     originalUserRequest: persisted.content,
     userMessageId: persisted.messageId,
   };
-  const orchestration =
+  const executeOrchestration = () =>
     mode === 'BALANCED'
-      ? await executeBalancedGroundedRequest(prisma, dependencies, actorUserId, workspaceId, {
+      ? executeBalancedGroundedRequest(prisma, dependencies, actorUserId, workspaceId, {
           ...request,
-          ...(runtime.balancedProviderConfiguration
-            ? { providerConfiguration: runtime.balancedProviderConfiguration }
-            : {}),
+          providerAssignment: assignment as BalancedAiProviderAssignment,
+          ...(executionContext ? { budgetExecution: executionContext } : {}),
         })
       : mode === 'DEEP'
-        ? await executeDeepGroundedRequest(prisma, dependencies, actorUserId, workspaceId, {
+        ? executeDeepGroundedRequest(prisma, dependencies, actorUserId, workspaceId, {
             ...request,
-            ...(runtime.deepProviderConfiguration
-              ? { providerConfiguration: runtime.deepProviderConfiguration }
-              : {}),
+            providerAssignment: assignment as DeepAiProviderAssignment,
+            ...(executionContext ? { budgetExecution: executionContext } : {}),
           })
-        : await executeCriticalGroundedRequest(prisma, dependencies, actorUserId, workspaceId, {
+        : executeCriticalGroundedRequest(prisma, dependencies, actorUserId, workspaceId, {
             ...request,
-            ...(runtime.criticalProviderConfiguration
-              ? { providerConfiguration: runtime.criticalProviderConfiguration }
-              : {}),
+            providerAssignment: assignment as CriticalAiProviderAssignment,
+            ...(executionContext ? { budgetExecution: executionContext } : {}),
           });
+
+  let orchestration;
+  if (!reservationId) {
+    orchestration = await executeOrchestration();
+  } else {
+    try {
+      orchestration = await executeOrchestration();
+    } catch (error) {
+      await reconcileMultiBudget(
+        prisma,
+        dependencies,
+        actorUserId,
+        workspaceId,
+        routingDecision.id,
+        reservationId,
+        true,
+      );
+      if (error instanceof AiOrchestrationBudgetStoppedError) {
+        return { failureCode: error.code, mode, responseRun: null };
+      }
+      throw error;
+    }
+    await reconcileMultiBudget(
+      prisma,
+      dependencies,
+      actorUserId,
+      workspaceId,
+      routingDecision.id,
+      reservationId,
+    );
+  }
   if (!orchestration.finalRunId) {
     return {
       failureCode: orchestration.failureCode ?? 'generation_failed',
@@ -1045,6 +1600,7 @@ export async function retryAiRun(
   actorUserId: string,
   workspaceId: string,
   failedRunId: string,
+  budgetEnvironment: AiBudgetRuntimeEnvironment = process.env,
 ) {
   await requireAiAccess(prisma, actorUserId, workspaceId);
   if (!UUID_PATTERN.test(failedRunId)) {
@@ -1062,6 +1618,32 @@ export async function retryAiRun(
   if (!failed || failed.conversation.ownerUserId !== actorUserId) {
     throw new AiConversationNotFoundError('The failed AI run was not found.', 'run_not_found');
   }
+  if (failed.routingDecisionId) {
+    const routingDecision = await getAiRoutingDecisionById(
+      prisma,
+      actorUserId,
+      workspaceId,
+      failed.routingDecisionId,
+    );
+    let budgetConfiguration;
+    try {
+      budgetConfiguration = parseAiBudgetRuntimeConfiguration(budgetEnvironment);
+    } catch (error) {
+      if (!(error instanceof AiBudgetRuntimeConfigurationError)) throw error;
+      throw new AiConversationBudgetError(
+        'The AI budget runtime configuration is invalid.',
+        error.code,
+      );
+    }
+    if (budgetConfiguration.enforcement === 'ENABLED') {
+      throw new AiConversationBudgetError(
+        routingDecision.resolvedMode === 'FAST'
+          ? 'Budgeted FAST retries require a new audited request and reservation.'
+          : 'Budgeted multi-model retries require a new audited request and reservation.',
+        'budget_retry_requires_new_reservation',
+      );
+    }
+  }
   await findOwnedConversation(prisma, actorUserId, workspaceId, failed.conversationId);
   await enforceRateLimit(prisma, actorUserId, workspaceId);
   return createRunForMessage(
@@ -1078,6 +1660,7 @@ export async function retryAiRun(
           documentVersionId: failed.knowledgeDocumentVersionId,
         }
       : undefined,
+    failed.routingDecisionId ?? undefined,
   );
 }
 

@@ -1,6 +1,8 @@
 const PICO_USD_PER_USD = 1_000_000_000_000n;
 const TOKENS_PER_MILLION = 1_000_000n;
-const MAX_TOKEN_COUNT = 2_147_483_647;
+export const MAX_LANGUAGE_MODEL_TOKEN_COUNT = 2_147_483_647;
+
+export type FixedPrecisionUsd = string;
 
 export type LanguageModelPricing = Readonly<{
   cacheWrite1HourInputUsdPerMillionTokens?: number;
@@ -130,10 +132,17 @@ const pricingCatalog = new Map<string, readonly LanguageModelPricing[]>([
   ],
 ]);
 
+export function isLanguageModelTokenCount(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= MAX_LANGUAGE_MODEL_TOKEN_COUNT
+  );
+}
+
 function tokenCount(value: number | undefined): number | undefined {
-  return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= MAX_TOKEN_COUNT
-    ? Number(value)
-    : undefined;
+  return isLanguageModelTokenCount(value) ? value : undefined;
 }
 
 function picoUsdPerToken(usdPerMillionTokens: number): bigint {
@@ -148,10 +157,52 @@ function picoUsdPerToken(usdPerMillionTokens: number): bigint {
   return (millionthsOfUsd * PICO_USD_PER_USD) / TOKENS_PER_MILLION / TOKENS_PER_MILLION;
 }
 
-function formatPicoUsd(value: bigint): string {
+function formatPicoUsd(value: bigint): FixedPrecisionUsd {
   const whole = value / PICO_USD_PER_USD;
   const fraction = (value % PICO_USD_PER_USD).toString().padStart(12, '0');
   return `${whole}.${fraction}`;
+}
+
+function parsePicoUsd(value: unknown): bigint {
+  const match = typeof value === 'string' ? /^(0|[1-9]\d*)\.(\d{12})$/u.exec(value) : null;
+  const whole = match?.[1];
+  const fraction = match?.[2];
+  if (whole === undefined || fraction === undefined) {
+    throw new Error('Language-model cost must use the canonical twelve-decimal USD format.');
+  }
+  return BigInt(whole) * PICO_USD_PER_USD + BigInt(fraction);
+}
+
+export function isFixedPrecisionUsd(value: unknown): value is FixedPrecisionUsd {
+  try {
+    parsePicoUsd(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function compareFixedPrecisionUsd(
+  left: FixedPrecisionUsd,
+  right: FixedPrecisionUsd,
+): -1 | 0 | 1 {
+  const difference = parsePicoUsd(left) - parsePicoUsd(right);
+  return difference < 0n ? -1 : difference > 0n ? 1 : 0;
+}
+
+export function subtractFixedPrecisionUsd(
+  minuend: FixedPrecisionUsd,
+  subtrahend: FixedPrecisionUsd,
+): FixedPrecisionUsd {
+  const difference = parsePicoUsd(minuend) - parsePicoUsd(subtrahend);
+  if (difference < 0n) {
+    throw new Error('Fixed-precision USD subtraction cannot produce a negative value.');
+  }
+  return formatPicoUsd(difference);
+}
+
+export function sumLanguageModelCostUsd(costs: readonly FixedPrecisionUsd[]): FixedPrecisionUsd {
+  return formatPicoUsd(costs.reduce((total, cost) => total + parsePicoUsd(cost), 0n));
 }
 
 function pricedTokenCost(
@@ -231,7 +282,7 @@ export function getLanguageModelPricing(
 export function calculateLanguageModelCostUsd(
   usage: LanguageModelUsage,
   pricing: LanguageModelPricing,
-): string | undefined {
+): FixedPrecisionUsd | undefined {
   const normalized = normalizeLanguageModelUsage(usage);
   if (normalized.inputTokens === undefined || normalized.outputTokens === undefined) {
     return undefined;
@@ -304,7 +355,7 @@ export function estimateLanguageModelCostUsd(
   usage: LanguageModelUsage,
   effectiveAt: Date,
   context: LanguageModelPricingContext = {},
-): string | undefined {
+): FixedPrecisionUsd | undefined {
   const pricing = getLanguageModelPricing(providerKey, modelKey, effectiveAt);
   if (
     pricing?.supportedInferenceGeos !== undefined &&

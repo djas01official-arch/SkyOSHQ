@@ -32,6 +32,14 @@ import type {
   LanguageModelProviderRegistry,
   LanguageModelResponseFormat,
 } from '../../services/ai/language-model-provider';
+import {
+  AiBudgetAccountingError,
+  checkAiBudgetContinuation,
+  validateAiBudgetExecutionPlan,
+  type AiBudgetExecutionContext,
+  type AiBudgetPlannedRun,
+} from './ai-budget-accounting';
+import type { AiBudgetContinuationDecision } from '../../services/ai/ai-budget-execution-guard';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -45,6 +53,22 @@ export class AiOrchestrationError extends Error {
 export class AiOrchestrationAuthorizationError extends AiOrchestrationError {}
 export class AiOrchestrationNotFoundError extends AiOrchestrationError {}
 export class AiOrchestrationValidationError extends AiOrchestrationError {}
+export class AiOrchestrationBudgetStoppedError extends AiOrchestrationError {
+  readonly orchestrationId: string;
+  readonly reason: Extract<AiBudgetContinuationDecision, { decision: 'STOP' }>['reason'];
+
+  constructor(
+    orchestrationId: string,
+    reason: Extract<AiBudgetContinuationDecision, { decision: 'STOP' }>['reason'],
+  ) {
+    super(
+      'AI orchestration stopped before another provider execution.',
+      'budget_execution_stopped',
+    );
+    this.orchestrationId = orchestrationId;
+    this.reason = reason;
+  }
+}
 
 function identifier(value: string, label: string): string {
   if (!UUID_PATTERN.test(value)) {
@@ -61,6 +85,20 @@ function expectedFinalRole(mode: AiOrchestrationMode): AiOrchestrationRole {
   return mode === AiOrchestrationMode.FAST
     ? AiOrchestrationRole.CANDIDATE
     : AiOrchestrationRole.SYNTHESIZER;
+}
+
+function plannedRun(
+  provider: LanguageModelProvider,
+  role: AiOrchestrationRoleKey,
+  step: number,
+): AiBudgetPlannedRun {
+  return Object.freeze({
+    modelKey: provider.modelKey,
+    modelVersion: provider.modelVersion,
+    providerKey: provider.providerKey,
+    role,
+    step,
+  });
 }
 
 async function requireOrchestrationAccess(
@@ -235,6 +273,14 @@ export async function createAiOrchestrationRun(
       'orchestration_policy_invalid',
     );
   }
+  const routingDecision = await prisma.aiRoutingDecision.findFirst({
+    where: {
+      conversationId: orchestration.conversationId,
+      userMessageId: orchestration.userMessageId,
+      workspaceId,
+    },
+    select: { id: true },
+  });
   return prisma.aiRun.create({
     data: {
       conversationId: orchestration.conversationId,
@@ -246,6 +292,7 @@ export async function createAiOrchestrationRun(
       orchestrationStep: input.step,
       providerKey: provider.providerKey,
       requestedByUserId: actorUserId,
+      routingDecisionId: routingDecision?.id,
       userMessageId: orchestration.userMessageId,
       workspaceId,
     },
@@ -285,6 +332,103 @@ export async function executeAiOrchestrationRun(
     userMessage: run.userMessage.content,
     workspaceId,
   });
+}
+
+async function terminateForBudgetInterruption(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+  orchestrationId: string,
+  failureCode: 'budget_execution_context_invalid' | 'budget_execution_stopped',
+): Promise<void> {
+  const successfulRunCount = await prisma.aiRun.count({
+    where: { orchestrationId, status: AiRunStatus.SUCCEEDED, workspaceId },
+  });
+  await completeAiOrchestration(prisma, actorUserId, workspaceId, orchestrationId, {
+    ...(successfulRunCount === 0 ? { failureCode } : {}),
+    status:
+      successfulRunCount === 0
+        ? AiOrchestrationStatus.FAILED
+        : AiOrchestrationStatus.PARTIALLY_SUCCEEDED,
+  });
+}
+
+async function initializeBudgetExecution(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+  orchestrationId: string,
+  conversationId: string,
+  userMessageId: string,
+  mode: Exclude<AiOrchestrationModeKey, 'FAST'>,
+  context: AiBudgetExecutionContext | undefined,
+  runs: readonly AiBudgetPlannedRun[],
+): Promise<void> {
+  if (!context) return;
+  try {
+    const routingDecision = await prisma.aiRoutingDecision.findFirst({
+      where: { conversationId, userMessageId, workspaceId },
+      select: { id: true },
+    });
+    if (routingDecision?.id !== context.routingDecisionId) {
+      throw new AiBudgetAccountingError(
+        'The AI budget execution routing decision does not match the orchestration request.',
+        'budget_execution_context_invalid',
+      );
+    }
+    validateAiBudgetExecutionPlan(context, mode, runs);
+  } catch (error) {
+    if (!(error instanceof AiBudgetAccountingError)) throw error;
+    await terminateForBudgetInterruption(
+      prisma,
+      actorUserId,
+      workspaceId,
+      orchestrationId,
+      'budget_execution_context_invalid',
+    );
+    throw error;
+  }
+}
+
+async function requireBudgetContinuation(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+  orchestrationId: string,
+  mode: Exclude<AiOrchestrationModeKey, 'FAST'>,
+  context: AiBudgetExecutionContext | undefined,
+  nextRun: AiBudgetPlannedRun,
+): Promise<void> {
+  if (!context) return;
+  let result: Awaited<ReturnType<typeof checkAiBudgetContinuation>>;
+  try {
+    result = await checkAiBudgetContinuation(prisma, {
+      actorUserId,
+      context,
+      mode,
+      nextRun,
+      workspaceId,
+    });
+  } catch (error) {
+    if (!(error instanceof AiBudgetAccountingError)) throw error;
+    await terminateForBudgetInterruption(
+      prisma,
+      actorUserId,
+      workspaceId,
+      orchestrationId,
+      'budget_execution_context_invalid',
+    );
+    throw error;
+  }
+  if (result.decision.decision === 'CONTINUE') return;
+  await terminateForBudgetInterruption(
+    prisma,
+    actorUserId,
+    workspaceId,
+    orchestrationId,
+    'budget_execution_stopped',
+  );
+  throw new AiOrchestrationBudgetStoppedError(orchestrationId, result.decision.reason);
 }
 
 function balancedSynthesisMessage(
@@ -344,6 +488,7 @@ export async function executeBalancedAiOrchestration(
   workspaceId: string,
   orchestrationId: string,
   assignment: BalancedAiProviderAssignment,
+  budgetExecution?: AiBudgetExecutionContext,
 ) {
   const orchestration = await findOwnedOrchestration(
     prisma,
@@ -367,8 +512,33 @@ export async function executeBalancedAiOrchestration(
     );
   }
 
+  const budgetPlan = [
+    ...configured.candidates.map((provider, step) => plannedRun(provider, 'CANDIDATE', step)),
+    plannedRun(configured.synthesizer, 'SYNTHESIZER', 2),
+  ];
+  await initializeBudgetExecution(
+    prisma,
+    actorUserId,
+    workspaceId,
+    orchestration.id,
+    orchestration.conversationId,
+    orchestration.userMessageId,
+    'BALANCED',
+    budgetExecution,
+    budgetPlan,
+  );
+
   const candidateRuns = [];
   for (const [index, provider] of configured.candidates.entries()) {
+    await requireBudgetContinuation(
+      prisma,
+      actorUserId,
+      workspaceId,
+      orchestration.id,
+      'BALANCED',
+      budgetExecution,
+      budgetPlan[index]!,
+    );
     const created = await createAiOrchestrationRun(
       prisma,
       dependencies.providers,
@@ -437,6 +607,15 @@ export async function executeBalancedAiOrchestration(
     }
     return content;
   });
+  await requireBudgetContinuation(
+    prisma,
+    actorUserId,
+    workspaceId,
+    orchestration.id,
+    'BALANCED',
+    budgetExecution,
+    budgetPlan[2]!,
+  );
   const synthesizerRun = await createAiOrchestrationRun(
     prisma,
     dependencies.providers,
@@ -478,6 +657,8 @@ export async function executeBalancedGroundedRequest(
     conversationId: string;
     groundedContextId: string;
     originalUserRequest: string;
+    budgetExecution?: AiBudgetExecutionContext;
+    providerAssignment?: BalancedAiProviderAssignment;
     providerConfiguration?: BalancedAiRuntimeConfiguration;
     userMessageId: string;
   }>,
@@ -500,10 +681,9 @@ export async function executeBalancedGroundedRequest(
       'orchestration_forbidden',
     );
   }
-  const assignment = resolveBalancedAiProviderAssignment(
-    dependencies.providers,
-    input.providerConfiguration,
-  );
+  const assignment =
+    input.providerAssignment ??
+    resolveBalancedAiProviderAssignment(dependencies.providers, input.providerConfiguration);
   const created = await createAiOrchestration(prisma, actorUserId, workspaceId, {
     conversationId: input.conversationId,
     groundedContextId: input.groundedContextId,
@@ -518,6 +698,7 @@ export async function executeBalancedGroundedRequest(
     workspaceId,
     created.id,
     assignment,
+    input.budgetExecution,
   );
 }
 
@@ -759,6 +940,7 @@ export async function executeDeepAiOrchestration(
   workspaceId: string,
   orchestrationId: string,
   assignment: DeepAiProviderAssignment,
+  budgetExecution?: AiBudgetExecutionContext,
 ) {
   const orchestration = await findOwnedOrchestration(
     prisma,
@@ -782,8 +964,35 @@ export async function executeDeepAiOrchestration(
     );
   }
 
+  const budgetPlan = [
+    ...configured.candidates.map((provider, step) => plannedRun(provider, 'CANDIDATE', step)),
+    plannedRun(configured.critic, 'CRITIC', 3),
+    plannedRun(configured.verifier, 'VERIFIER', 4),
+    plannedRun(configured.synthesizer, 'SYNTHESIZER', 5),
+  ];
+  await initializeBudgetExecution(
+    prisma,
+    actorUserId,
+    workspaceId,
+    orchestration.id,
+    orchestration.conversationId,
+    orchestration.userMessageId,
+    'DEEP',
+    budgetExecution,
+    budgetPlan,
+  );
+
   const candidateRuns = [];
   for (const [index, provider] of configured.candidates.entries()) {
+    await requireBudgetContinuation(
+      prisma,
+      actorUserId,
+      workspaceId,
+      orchestration.id,
+      'DEEP',
+      budgetExecution,
+      budgetPlan[index]!,
+    );
     const created = await createAiOrchestrationRun(
       prisma,
       dependencies.providers,
@@ -830,6 +1039,15 @@ export async function executeDeepAiOrchestration(
     }),
     Promise.all(successfulCandidates.map((run) => generatedRunOutput(prisma, workspaceId, run.id))),
   ]);
+  await requireBudgetContinuation(
+    prisma,
+    actorUserId,
+    workspaceId,
+    orchestration.id,
+    'DEEP',
+    budgetExecution,
+    budgetPlan[3]!,
+  );
   const critic = await createAndExecuteReview(
     prisma,
     dependencies,
@@ -845,6 +1063,15 @@ export async function executeDeepAiOrchestration(
     critic.status === AiRunStatus.SUCCEEDED
       ? await generatedRunOutput(prisma, workspaceId, critic.id)
       : undefined;
+  await requireBudgetContinuation(
+    prisma,
+    actorUserId,
+    workspaceId,
+    orchestration.id,
+    'DEEP',
+    budgetExecution,
+    budgetPlan[4]!,
+  );
   const verifier = await createAndExecuteReview(
     prisma,
     dependencies,
@@ -860,6 +1087,15 @@ export async function executeDeepAiOrchestration(
     verifier.status === AiRunStatus.SUCCEEDED
       ? await generatedRunOutput(prisma, workspaceId, verifier.id)
       : undefined;
+  await requireBudgetContinuation(
+    prisma,
+    actorUserId,
+    workspaceId,
+    orchestration.id,
+    'DEEP',
+    budgetExecution,
+    budgetPlan[5]!,
+  );
   const synthesizerRun = await createAiOrchestrationRun(
     prisma,
     dependencies.providers,
@@ -908,8 +1144,10 @@ export async function executeDeepGroundedRequest(
   workspaceId: string,
   input: Readonly<{
     conversationId: string;
+    budgetExecution?: AiBudgetExecutionContext;
     groundedContextId: string;
     originalUserRequest: string;
+    providerAssignment?: DeepAiProviderAssignment;
     providerConfiguration?: DeepAiRuntimeConfiguration;
     userMessageId: string;
   }>,
@@ -932,10 +1170,9 @@ export async function executeDeepGroundedRequest(
       'orchestration_forbidden',
     );
   }
-  const assignment = resolveDeepAiProviderAssignment(
-    dependencies.providers,
-    input.providerConfiguration,
-  );
+  const assignment =
+    input.providerAssignment ??
+    resolveDeepAiProviderAssignment(dependencies.providers, input.providerConfiguration);
   const created = await createAiOrchestration(prisma, actorUserId, workspaceId, {
     conversationId: input.conversationId,
     groundedContextId: input.groundedContextId,
@@ -950,6 +1187,7 @@ export async function executeDeepGroundedRequest(
     workspaceId,
     created.id,
     assignment,
+    input.budgetExecution,
   );
 }
 
@@ -964,6 +1202,7 @@ export async function executeCriticalAiOrchestration(
   workspaceId: string,
   orchestrationId: string,
   assignment: CriticalAiProviderAssignment,
+  budgetExecution?: AiBudgetExecutionContext,
 ) {
   const orchestration = await findOwnedOrchestration(
     prisma,
@@ -987,8 +1226,36 @@ export async function executeCriticalAiOrchestration(
     );
   }
 
+  const budgetPlan = [
+    ...configured.candidates.map((provider, step) => plannedRun(provider, 'CANDIDATE', step)),
+    plannedRun(configured.critic, 'CRITIC', 3),
+    plannedRun(configured.verifiers[0], 'VERIFIER', 4),
+    plannedRun(configured.verifiers[1], 'VERIFIER', 5),
+    plannedRun(configured.synthesizer, 'SYNTHESIZER', 6),
+  ];
+  await initializeBudgetExecution(
+    prisma,
+    actorUserId,
+    workspaceId,
+    orchestration.id,
+    orchestration.conversationId,
+    orchestration.userMessageId,
+    'CRITICAL',
+    budgetExecution,
+    budgetPlan,
+  );
+
   const candidateRuns = [];
   for (const [index, provider] of configured.candidates.entries()) {
+    await requireBudgetContinuation(
+      prisma,
+      actorUserId,
+      workspaceId,
+      orchestration.id,
+      'CRITICAL',
+      budgetExecution,
+      budgetPlan[index]!,
+    );
     const created = await createAiOrchestrationRun(
       prisma,
       dependencies.providers,
@@ -1035,6 +1302,15 @@ export async function executeCriticalAiOrchestration(
     }),
     Promise.all(successfulCandidates.map((run) => generatedRunOutput(prisma, workspaceId, run.id))),
   ]);
+  await requireBudgetContinuation(
+    prisma,
+    actorUserId,
+    workspaceId,
+    orchestration.id,
+    'CRITICAL',
+    budgetExecution,
+    budgetPlan[3]!,
+  );
   const critic = await createAndExecuteReview(
     prisma,
     dependencies,
@@ -1050,6 +1326,15 @@ export async function executeCriticalAiOrchestration(
     critic.status === AiRunStatus.SUCCEEDED
       ? await generatedRunOutput(prisma, workspaceId, critic.id)
       : undefined;
+  await requireBudgetContinuation(
+    prisma,
+    actorUserId,
+    workspaceId,
+    orchestration.id,
+    'CRITICAL',
+    budgetExecution,
+    budgetPlan[4]!,
+  );
   const verifierA = await createAndExecuteReview(
     prisma,
     dependencies,
@@ -1065,6 +1350,15 @@ export async function executeCriticalAiOrchestration(
     verifierA.status === AiRunStatus.SUCCEEDED
       ? await generatedRunOutput(prisma, workspaceId, verifierA.id)
       : undefined;
+  await requireBudgetContinuation(
+    prisma,
+    actorUserId,
+    workspaceId,
+    orchestration.id,
+    'CRITICAL',
+    budgetExecution,
+    budgetPlan[5]!,
+  );
   const verifierB = await createAndExecuteReview(
     prisma,
     dependencies,
@@ -1086,6 +1380,15 @@ export async function executeCriticalAiOrchestration(
     verifierB.status === AiRunStatus.SUCCEEDED
       ? await generatedRunOutput(prisma, workspaceId, verifierB.id)
       : undefined;
+  await requireBudgetContinuation(
+    prisma,
+    actorUserId,
+    workspaceId,
+    orchestration.id,
+    'CRITICAL',
+    budgetExecution,
+    budgetPlan[6]!,
+  );
   const synthesizerRun = await createAiOrchestrationRun(
     prisma,
     dependencies.providers,
@@ -1136,8 +1439,10 @@ export async function executeCriticalGroundedRequest(
   workspaceId: string,
   input: Readonly<{
     conversationId: string;
+    budgetExecution?: AiBudgetExecutionContext;
     groundedContextId: string;
     originalUserRequest: string;
+    providerAssignment?: CriticalAiProviderAssignment;
     providerConfiguration?: CriticalAiRuntimeConfiguration;
     userMessageId: string;
   }>,
@@ -1160,10 +1465,9 @@ export async function executeCriticalGroundedRequest(
       'orchestration_forbidden',
     );
   }
-  const assignment = resolveCriticalAiProviderAssignment(
-    dependencies.providers,
-    input.providerConfiguration,
-  );
+  const assignment =
+    input.providerAssignment ??
+    resolveCriticalAiProviderAssignment(dependencies.providers, input.providerConfiguration);
   const created = await createAiOrchestration(prisma, actorUserId, workspaceId, {
     conversationId: input.conversationId,
     groundedContextId: input.groundedContextId,
@@ -1178,6 +1482,7 @@ export async function executeCriticalGroundedRequest(
     workspaceId,
     created.id,
     assignment,
+    input.budgetExecution,
   );
 }
 

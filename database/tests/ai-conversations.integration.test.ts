@@ -830,10 +830,91 @@ test('provider failure retains one user message and retry creates a new successf
   assert.equal(failed.reasoningTokens, null);
   assert.equal(failed.totalTokens, null);
   assert.equal(failed.estimatedCostUsd, null);
+  assert.equal(failed.providerAttempted, true);
   const retried = await retryAiRun(prisma, dependencies(), f.ownerId, f.workspaceId, failed.id);
   assert.equal(retried.status, AiRunStatus.SUCCEEDED);
   assert.equal(retried.userMessageId, failed.userMessageId);
   assert.equal(await prisma.aiMessage.count({ where: { role: AiMessageRole.USER } }), 1);
+});
+
+test('failure before the provider boundary keeps providerAttempted false', async () => {
+  const f = await fixture();
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+  let calls = 0;
+  const provider: LanguageModelProvider = {
+    ...fakeModel,
+    generate: async (request, options) => {
+      calls += 1;
+      return fakeModel.generate(request, options);
+    },
+  };
+  const base = dependencies(provider);
+  const run = await submitAiMessage(
+    prisma,
+    {
+      ...base,
+      retrieval: {
+        ...base.retrieval,
+        search: async () => {
+          throw new Error('Safe retrieval failure before provider boundary.');
+        },
+      },
+    },
+    f.ownerId,
+    f.workspaceId,
+    conversation.id,
+    'fail before the provider boundary',
+  );
+
+  assert.equal(run.status, AiRunStatus.FAILED);
+  assert.equal(run.providerAttempted, false);
+  assert.equal(calls, 0);
+});
+
+test('provider attempt persistence failure prevents the provider call', async () => {
+  const f = await fixture();
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+  let calls = 0;
+  const provider: LanguageModelProvider = {
+    ...fakeModel,
+    generate: async (request, options) => {
+      calls += 1;
+      return fakeModel.generate(request, options);
+    },
+  };
+  await prisma.$executeRawUnsafe(`
+    CREATE FUNCTION reject_provider_attempt_for_test() RETURNS trigger AS $$
+    BEGIN
+      IF NEW."providerAttempted" IS TRUE AND OLD."providerAttempted" IS NOT TRUE THEN
+        RAISE EXCEPTION 'forced provider-attempt persistence failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TRIGGER reject_provider_attempt_for_test
+    BEFORE UPDATE OF "providerAttempted" ON "ai_runs"
+    FOR EACH ROW EXECUTE FUNCTION reject_provider_attempt_for_test();
+  `);
+  try {
+    const run = await submitAiMessage(
+      prisma,
+      dependencies(provider),
+      f.ownerId,
+      f.workspaceId,
+      conversation.id,
+      'do not cross a failed provider-attempt boundary',
+    );
+    assert.equal(run.status, AiRunStatus.FAILED);
+    assert.equal(run.providerAttempted, false);
+  } finally {
+    await prisma.$executeRawUnsafe(
+      'DROP TRIGGER IF EXISTS "reject_provider_attempt_for_test" ON "ai_runs";',
+    );
+    await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS reject_provider_attempt_for_test();');
+  }
+  assert.equal(calls, 0);
 });
 
 test('message and opaque conversation identifiers are validated before persistence', async () => {
