@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import {
+  AiInputTokenMeasurementError,
+  type AiProviderInputTokenMeasurementIdentity,
+} from './ai-input-token-measurement';
 import { LanguageModelProviderError, type LanguageModelRequest } from './language-model-provider';
 import {
   OpenAILanguageModelProvider,
@@ -10,6 +14,13 @@ import {
 
 const TEST_API_KEY = 'offline-unit-test-key-never-sent-to-openai';
 const MODEL = 'gpt-5.6-terra';
+const measurementIdentity: AiProviderInputTokenMeasurementIdentity = {
+  modelKey: MODEL,
+  modelVersion: 'responses-json-schema-v1',
+  providerKey: 'openai',
+  role: 'CANDIDATE',
+  step: 0,
+};
 
 const baseRequest: LanguageModelRequest = {
   citations: [{ citationId: 'cite_allowed', text: 'SkyOS supports bounded context.' }],
@@ -171,6 +182,77 @@ async function providerError(
   assert.fail(`Expected ${code}.`);
 }
 
+test('measures the exact prepared OpenAI input through the count API only', async () => {
+  const transport = fakeFetch(() =>
+    jsonResponse({ input_tokens: 321, object: 'response.input_tokens' }),
+  );
+  const adapter = provider(transport.fetch);
+  assert.equal(adapter.inputTokenMeasurementAccounting, 'UNRESOLVED');
+  const result = await adapter.measureInputTokens!(baseRequest, measurementIdentity);
+
+  assert.equal(transport.calls.length, 1);
+  const sent = transport.calls[0]!;
+  assert.equal(new URL(sent.url).pathname, '/v1/responses/input_tokens');
+  const body = JSON.parse(await sent.text()) as Record<string, unknown>;
+  assert.equal(body.model, MODEL);
+  assert.equal('max_output_tokens' in body, false);
+  assert.equal('store' in body, false);
+  assert.equal((body.text as { format: { type: string } }).format.type, 'json_schema');
+  const serialized = JSON.stringify(body);
+  assert.ok(serialized.includes('Earlier question'));
+  assert.ok(serialized.includes('Earlier answer'));
+  assert.ok(serialized.includes('SKYOS_UNTRUSTED_KNOWLEDGE_CONTEXT_V1'));
+  assert.ok(serialized.includes(baseRequest.userMessage));
+  assert.deepEqual(result, {
+    identity: measurementIdentity,
+    measurement: { inputTokens: 321, method: 'PROVIDER_COUNT_API', status: 'KNOWN' },
+  });
+});
+
+test('OpenAI measurement rejects malformed counts, identity drift, and count failures safely', async () => {
+  for (const input_tokens of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, null, undefined]) {
+    const transport = fakeFetch(() => jsonResponse({ input_tokens }));
+    await assert.rejects(
+      provider(transport.fetch).measureInputTokens!(baseRequest, measurementIdentity),
+      (error: unknown) =>
+        error instanceof AiInputTokenMeasurementError &&
+        error.code === 'input_token_measurement_invalid',
+    );
+  }
+
+  const mismatch = fakeFetch(() => jsonResponse({ input_tokens: 1 }));
+  await assert.rejects(
+    provider(mismatch.fetch).measureInputTokens!(baseRequest, {
+      ...measurementIdentity,
+      modelKey: 'gpt-5.6',
+    }),
+    (error: unknown) =>
+      error instanceof AiInputTokenMeasurementError &&
+      error.code === 'input_token_measurement_identity_mismatch',
+  );
+  assert.equal(mismatch.calls.length, 0);
+
+  const failure = fakeFetch(() => apiError(500));
+  await assert.rejects(
+    provider(failure.fetch).measureInputTokens!(baseRequest, measurementIdentity),
+    (error: unknown) =>
+      error instanceof AiInputTokenMeasurementError &&
+      error.code === 'input_token_measurement_failed',
+  );
+
+  const cancelled = new AbortController();
+  cancelled.abort();
+  const timeout = fakeFetch(() => jsonResponse({ input_tokens: 1 }));
+  await assert.rejects(
+    provider(timeout.fetch).measureInputTokens!(baseRequest, measurementIdentity, {
+      signal: cancelled.signal,
+    }),
+    (error: unknown) =>
+      error instanceof AiInputTokenMeasurementError &&
+      error.code === 'input_token_measurement_timeout',
+  );
+});
+
 test('the adapter maps a bounded stateless request through the real SDK transport', async () => {
   const transport = fakeFetch(() =>
     jsonResponse(responseBody(), 200, { 'x-request-id': 'req_offline_123' }),
@@ -224,6 +306,16 @@ test('the adapter maps a bounded stateless request through the real SDK transpor
   assert.equal(result.modelKey, MODEL);
   assert.equal(result.providerRequestId, 'req_offline_123');
   assert.equal(result.attemptCount, 1);
+});
+
+test('maps the provider-neutral output-token limit to max_output_tokens', async () => {
+  const transport = fakeFetch(() => jsonResponse(responseBody()));
+  await provider(transport.fetch).generate({
+    ...baseRequest,
+    executionLimits: { maxOutputTokens: 137 },
+  });
+  const body = JSON.parse(await transport.calls[0]!.text()) as Record<string, unknown>;
+  assert.equal(body.max_output_tokens, 137);
 });
 
 test('knowledge summaries use a strict action schema and canonical readable output', async () => {

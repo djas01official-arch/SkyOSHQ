@@ -9,6 +9,7 @@ import { isFixedPrecisionUsd, type FixedPrecisionUsd } from './language-model-pr
 export const AI_BUDGET_RUNTIME_ENVIRONMENT_NAMES = Object.freeze({
   confirmationThresholdUsd: 'AI_BUDGET_CONFIRMATION_THRESHOLD_USD',
   enforcement: 'AI_BUDGET_ENFORCEMENT',
+  inputTokenMeasurement: 'AI_INPUT_TOKEN_MEASUREMENT',
   taskHardMaxUsd: 'AI_BUDGET_TASK_HARD_MAX_USD',
 } as const);
 
@@ -19,9 +20,12 @@ export type AiBudgetRuntimeConfiguration =
   | Readonly<{
       confirmationThresholdUsd: FixedPrecisionUsd;
       enforcement: 'ENABLED';
+      inputTokenMeasurement: AiInputTokenMeasurementPolicy;
       plannedTokenBudget: AiTokenBudgetProfile;
       taskHardMaxUsd: FixedPrecisionUsd;
     }>;
+
+export type AiInputTokenMeasurementPolicy = 'DISABLED' | 'REQUIRED' | 'WHEN_AVAILABLE';
 
 export class AiBudgetRuntimeConfigurationError extends Error {
   readonly code = 'budget_configuration_invalid';
@@ -33,6 +37,17 @@ function requiredMoney(environment: AiBudgetRuntimeEnvironment, name: string): F
     throw new AiBudgetRuntimeConfigurationError(`The ${name} budget setting is invalid.`);
   }
   return value;
+}
+
+function inputTokenMeasurementPolicy(
+  environment: AiBudgetRuntimeEnvironment,
+): AiInputTokenMeasurementPolicy {
+  const value = environment[AI_BUDGET_RUNTIME_ENVIRONMENT_NAMES.inputTokenMeasurement]
+    ?.trim()
+    .toUpperCase();
+  if (!value) return 'DISABLED';
+  if (value === 'DISABLED' || value === 'WHEN_AVAILABLE' || value === 'REQUIRED') return value;
+  throw new AiBudgetRuntimeConfigurationError('The AI_INPUT_TOKEN_MEASUREMENT setting is invalid.');
 }
 
 /**
@@ -65,6 +80,7 @@ export function parseAiBudgetRuntimeConfiguration(
       AI_BUDGET_RUNTIME_ENVIRONMENT_NAMES.confirmationThresholdUsd,
     ),
     enforcement: 'ENABLED' as const,
+    inputTokenMeasurement: inputTokenMeasurementPolicy(environment),
     plannedTokenBudget,
     taskHardMaxUsd: requiredMoney(environment, AI_BUDGET_RUNTIME_ENVIRONMENT_NAMES.taskHardMaxUsd),
   });

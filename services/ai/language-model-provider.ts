@@ -11,6 +11,11 @@ import {
   GeminiLanguageModelProvider,
   type GeminiInteractionClient,
 } from './gemini-language-model-provider';
+import type { AiProviderExecutionLimits } from './ai-execution-limits';
+import type {
+  AiBoundProviderInputTokenMeasurement,
+  AiProviderInputTokenMeasurementIdentity,
+} from './ai-input-token-measurement';
 
 export type LanguageModelProviderDescriptor = Readonly<{
   maxInputCharacters: number;
@@ -41,6 +46,7 @@ export type LanguageModelResponseFormat =
 export type LanguageModelRequest = Readonly<{
   context: string;
   citations: readonly LanguageModelCitationInput[];
+  executionLimits?: AiProviderExecutionLimits;
   history: readonly LanguageModelHistoryMessage[];
   responseFormat?: LanguageModelResponseFormat;
   userMessage: string;
@@ -63,11 +69,20 @@ export type LanguageModelResponse = Readonly<{
   totalTokens?: number;
 }>;
 
+export type AiProviderInputTokenMeasurementAccounting =
+  'DOCUMENTED_NO_ADDITIONAL_CHARGE' | 'NO_PROVIDER_CALL' | 'UNRESOLVED';
+
 export interface LanguageModelProvider extends LanguageModelProviderDescriptor {
+  readonly inputTokenMeasurementAccounting?: AiProviderInputTokenMeasurementAccounting;
   generate(
     request: LanguageModelRequest,
     options?: Readonly<{ signal?: AbortSignal }>,
   ): Promise<LanguageModelResponse>;
+  measureInputTokens?(
+    request: LanguageModelRequest,
+    identity: AiProviderInputTokenMeasurementIdentity,
+    options?: Readonly<{ signal?: AbortSignal }>,
+  ): Promise<AiBoundProviderInputTokenMeasurement>;
 }
 
 export class LanguageModelProviderError extends Error {

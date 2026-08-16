@@ -6,6 +6,14 @@ import {
   type LanguageModelRequest,
   type LanguageModelResponse,
 } from './language-model-provider';
+import { validateAiProviderExecutionLimits } from './ai-execution-limits';
+import {
+  AiInputTokenMeasurementError,
+  bindAiProviderInputTokenMeasurement,
+  knownAiProviderInputTokenMeasurement,
+  validateAiProviderInputTokenMeasurementIdentity,
+  type AiProviderInputTokenMeasurementIdentity,
+} from './ai-input-token-measurement';
 import {
   KnowledgeActionResponseError,
   knowledgeActionResponseSchema,
@@ -140,6 +148,23 @@ function requestInput(request: LanguageModelRequest) {
     ...context,
     { content: request.userMessage, role: 'user' as const },
   ];
+}
+
+function prepareOpenAIInputTokenRequest(request: LanguageModelRequest, model: string) {
+  const responseFormat = request.responseFormat ?? 'grounded_answer';
+  const actionSchema = knowledgeActionResponseSchema(responseFormat);
+  return {
+    input: requestInput(request),
+    model,
+    text: {
+      format: {
+        name: `skyos_${responseFormat}`,
+        schema: actionSchema ?? RESPONSE_SCHEMA,
+        strict: true as const,
+        type: 'json_schema' as const,
+      },
+    },
+  };
 }
 
 function hasRefusal(response: { output?: unknown }): boolean {
@@ -342,6 +367,7 @@ function retryAfterMs(error: unknown, now: number): number | undefined {
 }
 
 export class OpenAILanguageModelProvider implements LanguageModelProvider {
+  readonly inputTokenMeasurementAccounting = 'UNRESOLVED' as const;
   readonly providerKey = OPENAI_PROVIDER_KEY;
   readonly modelVersion = OPENAI_MODEL_POLICY_VERSION;
   readonly maxInputCharacters = MAX_INPUT_CHARACTERS;
@@ -376,13 +402,44 @@ export class OpenAILanguageModelProvider implements LanguageModelProvider {
     });
   }
 
+  async measureInputTokens(
+    request: LanguageModelRequest,
+    identity: AiProviderInputTokenMeasurementIdentity,
+    options: Readonly<{ signal?: AbortSignal }> = {},
+  ) {
+    validateInput(request);
+    validateAiProviderInputTokenMeasurementIdentity(identity, this);
+    const prepared = prepareOpenAIInputTokenRequest(request, this.modelKey);
+    try {
+      const response = await this.#client.responses.inputTokens.count(prepared, {
+        maxRetries: 0,
+        signal: options.signal,
+      });
+      return bindAiProviderInputTokenMeasurement(
+        identity,
+        this,
+        knownAiProviderInputTokenMeasurement(response.input_tokens),
+      );
+    } catch (error) {
+      if (error instanceof AiInputTokenMeasurementError) throw error;
+      throw new AiInputTokenMeasurementError(
+        'The OpenAI input-token measurement failed.',
+        options.signal?.aborted
+          ? 'input_token_measurement_timeout'
+          : 'input_token_measurement_failed',
+      );
+    }
+  }
+
   async generate(
     request: LanguageModelRequest,
     options: Readonly<{ signal?: AbortSignal }> = {},
   ): Promise<LanguageModelResponse> {
     validateInput(request);
+    if (request.executionLimits) validateAiProviderExecutionLimits(request.executionLimits);
+    const maxOutputTokens = request.executionLimits?.maxOutputTokens ?? MAX_OUTPUT_TOKENS;
     const responseFormat = request.responseFormat ?? 'grounded_answer';
-    const actionSchema = knowledgeActionResponseSchema(responseFormat);
+    const prepared = prepareOpenAIInputTokenRequest(request, this.modelKey);
     const startedAt = this.#clock.now();
     const deadlineAt = startedAt + this.timeoutMs;
     const controller = new AbortController();
@@ -422,18 +479,9 @@ export class OpenAILanguageModelProvider implements LanguageModelProvider {
         try {
           const response = await this.#client.responses.create(
             {
-              input: requestInput(request),
-              max_output_tokens: MAX_OUTPUT_TOKENS,
-              model: this.modelKey,
+              ...prepared,
+              max_output_tokens: maxOutputTokens,
               store: false,
-              text: {
-                format: {
-                  name: `skyos_${responseFormat}`,
-                  schema: actionSchema ?? RESPONSE_SCHEMA,
-                  strict: true,
-                  type: 'json_schema',
-                },
-              },
             },
             { maxRetries: 0, signal: controller.signal },
           );

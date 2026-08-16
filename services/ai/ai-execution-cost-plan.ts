@@ -16,8 +16,9 @@ export type AiPlannedTokenAssumption = Readonly<{
 }>;
 
 /**
- * Explicit pre-execution assumptions used for cost planning. These values are not
- * enforced provider token limits and therefore do not create a hard-spend guarantee.
+ * Explicit pre-execution assumptions used for cost planning. For budget-enforced
+ * execution, each output assumption also becomes that run's provider maximum. Input
+ * assumptions remain estimates, so this profile is not a complete hard-spend guarantee.
  */
 export type AiTokenBudgetProfile = Readonly<{
   candidate: AiPlannedTokenAssumption;

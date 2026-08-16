@@ -5,6 +5,7 @@ import {
 } from '../generated/client/client';
 import {
   buildAiExecutionCostPlan,
+  type AiExecutionCostPlan,
   type AiExecutionCostPlanInput,
 } from '../../services/ai/ai-execution-cost-plan';
 import { estimateAiExecutionCost, type AiCostEstimate } from '../../services/ai/ai-cost-estimator';
@@ -22,7 +23,7 @@ import { getAiRoutingDecisionById } from './ai-routing-decisions';
 export type AiBudgetPreflightInput = Readonly<{
   actorUserId: string;
   confirmationThresholdUsd: FixedPrecisionUsd;
-  executionPlan: AiExecutionCostPlanInput;
+  executionPlan: AiExecutionCostPlan | AiExecutionCostPlanInput;
   pricingAt: string;
   reservationIdempotencyKey: string;
   routingDecisionId: string;
@@ -94,7 +95,7 @@ const defaultDependencies: AiBudgetPreflightDependencies = Object.freeze({
 
 function assertModeMatches(
   routingDecision: AiRoutingDecision,
-  executionPlan: ReturnType<typeof buildAiExecutionCostPlan>,
+  executionPlan: AiExecutionCostPlan,
 ): void {
   if (routingDecision.resolvedMode !== executionPlan.mode) {
     throw new AiBudgetPreflightError(
@@ -102,6 +103,12 @@ function assertModeMatches(
       'budget_preflight_mode_mismatch',
     );
   }
+}
+
+function resolveExecutionPlan(
+  input: AiExecutionCostPlan | AiExecutionCostPlanInput,
+): AiExecutionCostPlan {
+  return 'runs' in input ? input : buildAiExecutionCostPlan(input);
 }
 
 /**
@@ -114,7 +121,7 @@ export function createAiBudgetPreflightService(dependencies: AiBudgetPreflightDe
     prisma: PrismaClient,
     input: AiBudgetPreflightInput,
   ): Promise<AiBudgetPreflightResult> {
-    const executionPlan = buildAiExecutionCostPlan(input.executionPlan);
+    const executionPlan = resolveExecutionPlan(input.executionPlan);
     const estimate = estimateAiExecutionCost({
       ...executionPlan,
       pricingEffectiveAt: input.pricingAt,

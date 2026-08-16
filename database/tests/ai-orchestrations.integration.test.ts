@@ -36,6 +36,7 @@ import {
 } from '../ai/ai-conversations';
 import {
   AiBudgetAccountingError,
+  reconcileAiBudgetReservation,
   type AiBudgetExecutionContext,
   type AiBudgetPlannedRun,
 } from '../ai/ai-budget-accounting';
@@ -43,6 +44,7 @@ import { getOrCreateAiBudgetAccount, recordAiBudgetCredit, reserveAiBudget } fro
 import {
   AiOrchestrationAuthorizationError,
   AiOrchestrationBudgetStoppedError,
+  AiOrchestrationInputMeasurementStoppedError,
   AiOrchestrationValidationError,
   completeAiOrchestration,
   createAiOrchestration,
@@ -75,6 +77,12 @@ import {
   type LanguageModelProvider,
   type LanguageModelRequest,
 } from '../../services/ai/language-model-provider';
+import {
+  bindAiProviderInputTokenMeasurement,
+  knownAiProviderInputTokenMeasurement,
+  unavailableAiProviderInputTokenMeasurement,
+  type AiProviderInputTokenMeasurementIdentity,
+} from '../../services/ai/ai-input-token-measurement';
 import type {
   CriticalAiRuntimeConfiguration,
   DeepAiRuntimeConfiguration,
@@ -83,10 +91,12 @@ import {
   AiTaskAnalyzerValidationError,
   routeAiTaskRequest,
 } from '../../services/ai/ai-task-analyzer';
+import { estimateAiExecutionCost } from '../../services/ai/ai-cost-estimator';
 import {
   estimateLanguageModelCostUsd,
   sumLanguageModelCostUsd,
 } from '../../services/ai/language-model-pricing';
+import type { AiExecutionCostPlan } from '../../services/ai/ai-execution-cost-plan';
 import type { AiBudgetRuntimeEnvironment } from '../../services/ai/ai-budget-runtime-config';
 import {
   DeterministicLocalEmbeddingProvider,
@@ -231,14 +241,50 @@ function model(
   modelVersion: string,
   options: Readonly<{
     fail?: boolean;
+    inputTokenMeasurementAccounting?: LanguageModelProvider['inputTokenMeasurementAccounting'];
     inputTokens?: number;
     knownCostTelemetry?: boolean;
+    measurement?: 'FAIL' | 'MALFORMED' | 'UNAVAILABLE' | number;
+    onMeasurement?: (
+      request: LanguageModelRequest,
+      identity: AiProviderInputTokenMeasurementIdentity,
+    ) => unknown;
     onRequest?: (request: LanguageModelRequest) => unknown;
     outputTokens?: number;
     text?: string | ((request: LanguageModelRequest) => string);
   }> = {},
 ): LanguageModelProvider {
   return {
+    ...(options.measurement !== undefined
+      ? {
+          inputTokenMeasurementAccounting:
+            options.inputTokenMeasurementAccounting ?? ('DOCUMENTED_NO_ADDITIONAL_CHARGE' as const),
+          measureInputTokens: async (
+            request: LanguageModelRequest,
+            identity: AiProviderInputTokenMeasurementIdentity,
+          ) => {
+            await options.onMeasurement?.(request, identity);
+            if (options.measurement === 'FAIL') throw new Error('Safe offline count failure.');
+            if (options.measurement === 'MALFORMED') {
+              return {
+                identity,
+                measurement: { inputTokens: -1, method: 'PROVIDER_COUNT_API', status: 'KNOWN' },
+              } as never;
+            }
+            return bindAiProviderInputTokenMeasurement(
+              identity,
+              { modelKey, modelVersion, providerKey },
+              options.measurement === 'UNAVAILABLE'
+                ? unavailableAiProviderInputTokenMeasurement(
+                    'EXACT_REQUEST_MEASUREMENT_UNAVAILABLE',
+                  )
+                : knownAiProviderInputTokenMeasurement(options.measurement),
+            );
+          },
+        }
+      : options.inputTokenMeasurementAccounting
+        ? { inputTokenMeasurementAccounting: options.inputTokenMeasurementAccounting }
+        : {}),
     maxInputCharacters: 20_000,
     maxOutputCharacters: 2_000,
     modelKey,
@@ -421,6 +467,42 @@ function multiModeRuntimeConfiguration(mode: 'BALANCED' | 'DEEP' | 'CRITICAL') {
             synthesizer: providerIdentities.openai,
             verifierA: providerIdentities.openai,
             verifierB: providerIdentities.openai,
+          },
+        };
+}
+
+function multiModeRuntimeForIdentity(
+  mode: 'BALANCED' | 'DEEP' | 'CRITICAL',
+  identity: (typeof providerIdentities)[keyof typeof providerIdentities],
+) {
+  return mode === 'BALANCED'
+    ? {
+        balancedProviderConfiguration: {
+          candidateA: identity,
+          candidateB: identity,
+          synthesizer: identity,
+        },
+      }
+    : mode === 'DEEP'
+      ? {
+          deepProviderConfiguration: {
+            candidateA: identity,
+            candidateB: identity,
+            candidateC: identity,
+            critic: identity,
+            synthesizer: identity,
+            verifier: identity,
+          },
+        }
+      : {
+          criticalProviderConfiguration: {
+            candidateA: identity,
+            candidateB: identity,
+            candidateC: identity,
+            critic: identity,
+            synthesizer: identity,
+            verifierA: identity,
+            verifierB: identity,
           },
         };
 }
@@ -681,6 +763,85 @@ async function budgetExecution(
       ),
     ),
   }) as AiBudgetExecutionContext;
+}
+
+async function measuredBudgetExecution(
+  f: Awaited<ReturnType<typeof fixture>>,
+  mode: 'BALANCED' | 'DEEP' | 'CRITICAL',
+  measurementPolicy: 'REQUIRED' | 'WHEN_AVAILABLE',
+  input: Readonly<{ reservedAmountUsd?: string }> = {},
+): Promise<AiBudgetExecutionContext> {
+  const planned = budgetPlan(mode).map((run) => ({
+    inputTokens: 100,
+    modelKey: 'claude-sonnet-5',
+    modelVersion: 'messages-json-schema-v1',
+    outputTokens: 20,
+    pricingContext: { inferenceGeo: 'global' },
+    providerKey: 'anthropic',
+    role: run.role,
+  }));
+  const executionPlan: AiExecutionCostPlan = Object.freeze({
+    mode,
+    runs: Object.freeze(planned.map((run) => Object.freeze(run))),
+  });
+  const pricingEffectiveAt = '2026-08-16T12:00:00.000Z';
+  const estimate = estimateAiExecutionCost({ ...executionPlan, pricingEffectiveAt });
+  assert.equal(estimate.hasUnknownCost, false);
+  const route = await prisma.aiRoutingDecision.create({
+    data: {
+      ambiguity: 'NOT_ANALYZED',
+      complexity: 'NOT_ANALYZED',
+      configuredMode: mode,
+      conversationId: f.conversationId,
+      expectedEffort: 'NOT_ANALYZED',
+      reason: 'EXPLICIT_MODE',
+      resolvedMode: mode,
+      risk: 'NOT_ANALYZED',
+      signals: ['EXPLICIT_MODE'],
+      userMessageId: f.messageId,
+      verificationNeed: 'NOT_ANALYZED',
+      workspaceId: f.workspaceId,
+    },
+  });
+  const account = await getOrCreateAiBudgetAccount(prisma, f.ownerId, f.workspaceId);
+  await recordAiBudgetCredit(prisma, {
+    accountId: account.id,
+    actorUserId: f.ownerId,
+    amountUsd: '10.000000000000',
+    idempotencyKey: `measured-guard-credit:${randomUUID()}`,
+    workspaceId: f.workspaceId,
+  });
+  const reservedAmountUsd = input.reservedAmountUsd ?? estimate.knownEstimatedCostUsd;
+  const reservation = await reserveAiBudget(prisma, {
+    accountId: account.id,
+    actorUserId: f.ownerId,
+    amountUsd: reservedAmountUsd,
+    idempotencyKey: `measured-guard-reservation:${randomUUID()}`,
+    routingDecisionId: route.id,
+    workspaceId: f.workspaceId,
+  });
+  return Object.freeze({
+    executionPlan,
+    inputTokenMeasurement: measurementPolicy,
+    pricingEffectiveAt,
+    reservationId: reservation.id,
+    reservedAmountUsd,
+    routingDecisionId: route.id,
+    runEstimates: estimate.runEstimates,
+  });
+}
+
+async function reconcileMeasuredBudget(
+  f: Awaited<ReturnType<typeof fixture>>,
+  context: AiBudgetExecutionContext,
+) {
+  return reconcileAiBudgetReservation(prisma, {
+    actorUserId: f.ownerId,
+    executionAbortedBeforeProvider: true,
+    reservationId: context.reservationId,
+    routingDecisionId: context.routingDecisionId,
+    workspaceId: f.workspaceId,
+  });
 }
 
 async function assertNoBudgetFinancialMutation(context: AiBudgetExecutionContext): Promise<void> {
@@ -1705,6 +1866,46 @@ test('BALANCED cannot select a successful candidate as finalRun', async () => {
   );
 });
 
+test('execution-limit identity mismatch fails before the provider-attempt boundary', async () => {
+  const f = await fixture();
+  const operation = await orchestration(f, AiOrchestrationMode.BALANCED);
+  let calls = 0;
+  const registry = new LanguageModelProviderRegistry(
+    model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+      onRequest: () => calls++,
+    }),
+  );
+  const candidate = await createAiOrchestrationRun(prisma, registry, f.ownerId, f.workspaceId, {
+    modelKey: 'gpt-5.6-terra',
+    modelVersion: 'responses-json-schema-v1',
+    orchestrationId: operation.id,
+    providerKey: 'openai',
+    role: AiOrchestrationRole.CANDIDATE,
+    step: 0,
+  });
+  const result = await executeAiOrchestrationRun(
+    prisma,
+    dependencies(registry),
+    f.ownerId,
+    f.workspaceId,
+    candidate.id,
+    'grounded_answer',
+    {
+      limits: { maxOutputTokens: 20 },
+      modelKey: 'gpt-5.6-terra',
+      modelVersion: 'responses-json-schema-v1',
+      plannedOutputTokens: 20,
+      providerKey: 'anthropic',
+      role: 'CANDIDATE',
+      step: 0,
+    },
+  );
+  assert.equal(result.status, AiRunStatus.FAILED);
+  assert.equal(result.failureCode, 'execution_limit_mismatch');
+  assert.equal(result.providerAttempted, false);
+  assert.equal(calls, 0);
+});
+
 test('current single-provider Chat path remains non-orchestrated', async () => {
   const f = await fixture();
   let calls = 0;
@@ -2672,8 +2873,10 @@ test('Knowledge Actions remain single-provider and outside Chat budget enforceme
   });
   const previousMode = process.env.AI_CHAT_MODE;
   const previousBudgetEnforcement = process.env.AI_BUDGET_ENFORCEMENT;
+  const previousInputMeasurement = process.env.AI_INPUT_TOKEN_MEASUREMENT;
   process.env.AI_CHAT_MODE = 'AUTO';
   process.env.AI_BUDGET_ENFORCEMENT = 'ENABLED';
+  process.env.AI_INPUT_TOKEN_MEASUREMENT = 'REQUIRED';
   const result = await (async () => {
     try {
       return await runKnowledgeDocumentAiAction(
@@ -2690,6 +2893,8 @@ test('Knowledge Actions remain single-provider and outside Chat budget enforceme
       else process.env.AI_CHAT_MODE = previousMode;
       if (previousBudgetEnforcement === undefined) delete process.env.AI_BUDGET_ENFORCEMENT;
       else process.env.AI_BUDGET_ENFORCEMENT = previousBudgetEnforcement;
+      if (previousInputMeasurement === undefined) delete process.env.AI_INPUT_TOKEN_MEASUREMENT;
+      else process.env.AI_INPUT_TOKEN_MEASUREMENT = previousInputMeasurement;
     }
   })();
   assert.equal(result.run.status, AiRunStatus.SUCCEEDED);
@@ -2783,7 +2988,7 @@ test('budget-enabled explicit multi-model Chat reserves its exact plan and settl
       f.conversationId,
       `Budgeted explicit ${mode} request.`,
       {
-        budgetEnvironment: budgetRuntimeEnvironment(),
+        budgetEnvironment: budgetRuntimeEnvironment({ AI_INPUT_TOKEN_MEASUREMENT: 'DISABLED' }),
         ...multiModeRuntimeConfiguration(mode),
         mode,
       },
@@ -2847,30 +3052,35 @@ test('budget-enabled explicit multi-model Chat reserves its exact plan and settl
   }
 });
 
-test('AUTO-resolved BALANCED, DEEP, and CRITICAL use the resolved mode budget lifecycle', async () => {
-  const requests = {
-    BALANCED: 'Please deliver:\n- Update the dashboard title\n- Refresh the empty-state copy',
-    CRITICAL: 'Review this patient safety protocol.',
-    DEEP: 'Verify and prove that the approved control is supported by the source.',
+test('budgeted multi-model steps receive their exact role-planned output-token limits', async () => {
+  const expected = {
+    BALANCED: [11, 11, 13],
+    DEEP: [11, 11, 11, 12, 14, 13],
+    CRITICAL: [11, 11, 11, 12, 14, 14, 13],
   } as const;
   for (const mode of ['BALANCED', 'DEEP', 'CRITICAL'] as const) {
     await reset();
     const f = await fixture();
     await fundAiBudget(f.ownerId, f.workspaceId);
-    let calls = 0;
+    const limits: Array<number | undefined> = [];
+    const capture = (request: LanguageModelRequest) =>
+      limits.push(request.executionLimits?.maxOutputTokens);
     const registry = new LanguageModelProviderRegistry(
       model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
         knownCostTelemetry: true,
-        onRequest: () => calls++,
+        onRequest: capture,
+        outputTokens: 10,
       }),
       [
         model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
           knownCostTelemetry: true,
-          onRequest: () => calls++,
+          onRequest: capture,
+          outputTokens: 10,
         }),
         model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
           knownCostTelemetry: true,
-          onRequest: () => calls++,
+          onRequest: capture,
+          outputTokens: 10,
         }),
       ],
     );
@@ -2882,10 +3092,487 @@ test('AUTO-resolved BALANCED, DEEP, and CRITICAL use the resolved mode budget li
       f.ownerId,
       f.workspaceId,
       f.conversationId,
+      `Enforce role limits for ${mode}.`,
+      {
+        budgetEnvironment: budgetRuntimeEnvironment({
+          AI_COST_CANDIDATE_OUTPUT_TOKENS: '11',
+          AI_COST_CRITIC_OUTPUT_TOKENS: '12',
+          AI_COST_SYNTHESIZER_OUTPUT_TOKENS: '13',
+          AI_COST_VERIFIER_OUTPUT_TOKENS: '14',
+        }),
+        ...multiModeRuntimeConfiguration(mode),
+        mode,
+      },
+    );
+    assert.ok(result.responseRun);
+    assert.deepEqual(limits, expected[mode]);
+  }
+});
+
+test('DEEP measures each exact dynamic request once and reuses it for generation', async () => {
+  const f = await fixture();
+  const budget = await measuredBudgetExecution(f, 'DEEP', 'WHEN_AVAILABLE', {
+    reservedAmountUsd: '1.000000000000',
+  });
+  const measuredRequests: LanguageModelRequest[] = [];
+  const measuredIdentities: AiProviderInputTokenMeasurementIdentity[] = [];
+  const generatedRequests: LanguageModelRequest[] = [];
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    inputTokens: 77,
+    knownCostTelemetry: true,
+    measurement: 100,
+    onMeasurement: (request, identity) => {
+      measuredRequests.push(request);
+      measuredIdentities.push(identity);
+    },
+    onRequest: (request) => generatedRequests.push(request),
+    text: () => `Grounded stage ${generatedRequests.length} result.`,
+  });
+  const result = await executeDeep(
+    f,
+    new LanguageModelProviderRegistry(anthropic),
+    multiModeRuntimeForIdentity('DEEP', providerIdentities.anthropic).deepProviderConfiguration,
+    budget,
+  );
+  assert.equal(result.finalRun?.orchestrationRole, AiOrchestrationRole.SYNTHESIZER);
+  assert.equal(measuredRequests.length, 6);
+  assert.equal(generatedRequests.length, 6);
+  assert.deepEqual(
+    measuredIdentities.map(({ role, step }) => ({ role, step })),
+    [
+      { role: 'CANDIDATE', step: 0 },
+      { role: 'CANDIDATE', step: 1 },
+      { role: 'CANDIDATE', step: 2 },
+      { role: 'CRITIC', step: 3 },
+      { role: 'VERIFIER', step: 4 },
+      { role: 'SYNTHESIZER', step: 5 },
+    ],
+  );
+  for (const [index, measured] of measuredRequests.entries()) {
+    assert.equal(measured, generatedRequests[index]);
+    assert.equal(measured.executionLimits?.maxOutputTokens, 20);
+  }
+  assert.match(measuredRequests[3]!.userMessage, /Grounded stage 1 result/u);
+  assert.match(measuredRequests[3]!.userMessage, /Grounded stage 3 result/u);
+  assert.match(measuredRequests[4]!.userMessage, /Grounded stage 4 result/u);
+  assert.match(measuredRequests[5]!.userMessage, /Grounded stage 5 result/u);
+  const runs = await prisma.aiRun.findMany({ orderBy: { orchestrationStep: 'asc' } });
+  assert.equal(runs.length, 6);
+  assert.ok(
+    runs.every(({ inputTokens, providerAttempted }) => inputTokens === 77 && providerAttempted),
+  );
+  const reservation = await prisma.aiBudgetReservation.findFirstOrThrow();
+  assert.equal(reservation.status, AiBudgetReservationStatus.RESERVED);
+  assert.equal(reservation.reservedAmountUsd.toFixed(12), '1.000000000000');
+  assert.equal(await prisma.aiBudgetReservation.count(), 1);
+});
+
+test('CRITICAL binds verifier A and verifier B measurements to separate dynamic requests', async () => {
+  const f = await fixture();
+  const budget = await measuredBudgetExecution(f, 'CRITICAL', 'REQUIRED', {
+    reservedAmountUsd: '1.000000000000',
+  });
+  const measured: Array<
+    Readonly<{ identity: AiProviderInputTokenMeasurementIdentity; request: LanguageModelRequest }>
+  > = [];
+  const generated: LanguageModelRequest[] = [];
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    inputTokens: 77,
+    knownCostTelemetry: true,
+    measurement: 100,
+    onMeasurement: (request, identity) => measured.push({ identity, request }),
+    onRequest: (request) => generated.push(request),
+    text: () => `Grounded critical stage ${generated.length} result.`,
+  });
+  const configuration = multiModeRuntimeForIdentity(
+    'CRITICAL',
+    providerIdentities.anthropic,
+  ).criticalProviderConfiguration;
+  const result = await executeCritical(
+    f,
+    new LanguageModelProviderRegistry(anthropic),
+    configuration,
+    budget,
+  );
+  assert.equal(result.finalRun?.orchestrationRole, AiOrchestrationRole.SYNTHESIZER);
+  assert.equal(measured.length, 7);
+  assert.equal(generated.length, 7);
+  assert.deepEqual(
+    measured.slice(4, 6).map(({ identity }) => ({ role: identity.role, step: identity.step })),
+    [
+      { role: 'VERIFIER', step: 4 },
+      { role: 'VERIFIER', step: 5 },
+    ],
+  );
+  assert.notEqual(measured[4]!.request, measured[5]!.request);
+  assert.equal(measured[4]!.request, generated[4]);
+  assert.equal(measured[5]!.request, generated[5]);
+  assert.match(measured[5]!.request.userMessage, /Grounded critical stage 5 result/u);
+  assert.match(measured[6]!.request.userMessage, /Grounded critical stage 6 result/u);
+  assert.equal(
+    (await prisma.aiBudgetReservation.findFirstOrThrow()).reservedAmountUsd.toFixed(12),
+    '1.000000000000',
+  );
+});
+
+test('elevated dynamic measurement either fits the original reserve or stops before generation', async () => {
+  for (const scenario of ['fits', 'exceeds'] as const) {
+    await reset();
+    const f = await fixture();
+    const budget = await measuredBudgetExecution(
+      f,
+      'BALANCED',
+      'WHEN_AVAILABLE',
+      scenario === 'fits' ? { reservedAmountUsd: '1.000000000000' } : {},
+    );
+    let measurements = 0;
+    let generations = 0;
+    const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+      inputTokens: scenario === 'fits' ? 10 : 100,
+      knownCostTelemetry: true,
+      measurement: scenario === 'fits' ? 150 : 1_000_000,
+      onMeasurement: () => measurements++,
+      onRequest: () => generations++,
+      outputTokens: scenario === 'fits' ? 0 : 20,
+    });
+    const execution = executeBalancedGroundedRequest(
+      prisma,
+      dependencies(new LanguageModelProviderRegistry(anthropic)),
+      f.ownerId,
+      f.workspaceId,
+      {
+        budgetExecution: budget,
+        conversationId: f.conversationId,
+        groundedContextId: f.contextId,
+        originalUserRequest: f.originalUserRequest,
+        providerConfiguration: multiModeRuntimeForIdentity('BALANCED', providerIdentities.anthropic)
+          .balancedProviderConfiguration,
+        userMessageId: f.messageId,
+      },
+    );
+    const reservation = await prisma.aiBudgetReservation.findFirstOrThrow();
+    assert.equal(await prisma.aiBudgetReservation.count(), 1);
+    if (scenario === 'fits') {
+      assert.ok((await execution).finalRun);
+      assert.equal(measurements, 3);
+      assert.equal(generations, 3);
+      assert.equal(reservation.status, AiBudgetReservationStatus.RESERVED);
+      assert.equal(reservation.reservedAmountUsd.toFixed(12), '1.000000000000');
+    } else {
+      await assert.rejects(execution, AiOrchestrationBudgetStoppedError);
+      assert.equal(measurements, 1);
+      assert.equal(generations, 0);
+      assert.equal(await prisma.aiRun.count(), 0);
+      assert.equal((await reconcileMeasuredBudget(f, budget)).outcome, 'RELEASED');
+      assert.equal(await prisma.aiBudgetLedgerEntry.count({ where: { type: 'DEBIT' } }), 0);
+      const orchestration = await prisma.aiOrchestration.findFirstOrThrow();
+      assert.equal(orchestration.status, AiOrchestrationStatus.FAILED);
+      assert.equal(orchestration.finalRunId, null);
+    }
+  }
+});
+
+test('measurement stop after known upstream cost settles exactly without expanding the reservation', async () => {
+  const f = await fixture();
+  const budget = await measuredBudgetExecution(f, 'BALANCED', 'REQUIRED', {
+    reservedAmountUsd: '1.000000000000',
+  });
+  let measurements = 0;
+  let generations = 0;
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    knownCostTelemetry: true,
+    measurement: 100,
+    onMeasurement: () => {
+      measurements++;
+      if (measurements === 2) throw new Error('Safe second-step count failure.');
+    },
+    onRequest: () => generations++,
+  });
+  await assert.rejects(
+    executeBalancedGroundedRequest(
+      prisma,
+      dependencies(new LanguageModelProviderRegistry(anthropic)),
+      f.ownerId,
+      f.workspaceId,
+      {
+        budgetExecution: budget,
+        conversationId: f.conversationId,
+        groundedContextId: f.contextId,
+        originalUserRequest: f.originalUserRequest,
+        providerConfiguration: multiModeRuntimeForIdentity('BALANCED', providerIdentities.anthropic)
+          .balancedProviderConfiguration,
+        userMessageId: f.messageId,
+      },
+    ),
+    (error: unknown) =>
+      error instanceof AiOrchestrationInputMeasurementStoppedError &&
+      error.code === 'input_measurement_failed',
+  );
+  assert.equal(measurements, 2);
+  assert.equal(generations, 1);
+  const run = await prisma.aiRun.findFirstOrThrow();
+  assert.equal(run.providerAttempted, true);
+  assert.ok(run.estimatedCostUsd);
+  const reconciliation = await reconcileMeasuredBudget(f, budget);
+  assert.equal(reconciliation.outcome, 'SETTLED');
+  assert.equal(reconciliation.reservation.settledAmountUsd, run.estimatedCostUsd.toFixed(12));
+  assert.equal(await prisma.aiBudgetReservation.count(), 1);
+  assert.equal(await prisma.aiBudgetLedgerEntry.count({ where: { type: 'DEBIT' } }), 1);
+  const orchestration = await prisma.aiOrchestration.findFirstOrThrow();
+  assert.equal(orchestration.status, AiOrchestrationStatus.PARTIALLY_SUCCEEDED);
+  assert.equal(orchestration.finalRunId, null);
+});
+
+test('unknown prior provider accounting stops before an unnecessary next measurement and HOLDs', async () => {
+  const f = await fixture();
+  const budget = await measuredBudgetExecution(f, 'BALANCED', 'WHEN_AVAILABLE', {
+    reservedAmountUsd: '1.000000000000',
+  });
+  let measurements = 0;
+  let generations = 0;
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    fail: true,
+    measurement: 100,
+    onMeasurement: () => measurements++,
+    onRequest: () => generations++,
+  });
+  await assert.rejects(
+    executeBalancedGroundedRequest(
+      prisma,
+      dependencies(new LanguageModelProviderRegistry(anthropic)),
+      f.ownerId,
+      f.workspaceId,
+      {
+        budgetExecution: budget,
+        conversationId: f.conversationId,
+        groundedContextId: f.contextId,
+        originalUserRequest: f.originalUserRequest,
+        providerConfiguration: multiModeRuntimeForIdentity('BALANCED', providerIdentities.anthropic)
+          .balancedProviderConfiguration,
+        userMessageId: f.messageId,
+      },
+    ),
+    AiOrchestrationBudgetStoppedError,
+  );
+  assert.equal(measurements, 1);
+  assert.equal(generations, 1);
+  const run = await prisma.aiRun.findFirstOrThrow();
+  assert.equal(run.providerAttempted, true);
+  assert.equal(run.estimatedCostUsd, null);
+  assert.equal((await reconcileMeasuredBudget(f, budget)).outcome, 'HELD');
+  assert.equal(await prisma.aiBudgetLedgerEntry.count({ where: { type: 'DEBIT' } }), 0);
+});
+
+test('OpenAI accounting-unresolved and Gemini unavailable policies never count or switch providers', async () => {
+  for (const providerKey of ['openai', 'gemini'] as const) {
+    for (const policy of ['WHEN_AVAILABLE', 'REQUIRED'] as const) {
+      await reset();
+      const f = await fixture();
+      await fundAiBudget(f.ownerId, f.workspaceId);
+      let measurements = 0;
+      let generations = 0;
+      const identity = providerIdentities[providerKey];
+      const selected = model(identity.providerKey, identity.modelKey, identity.modelVersion, {
+        inputTokenMeasurementAccounting:
+          providerKey === 'openai' ? 'UNRESOLVED' : 'NO_PROVIDER_CALL',
+        inputTokens: 90,
+        knownCostTelemetry: true,
+        measurement: 999,
+        onMeasurement: () => measurements++,
+        onRequest: () => generations++,
+        outputTokens: 10,
+      });
+      const result = await submitAiChatMessage(
+        prisma,
+        dependencies(new LanguageModelProviderRegistry(selected), undefined, {
+          capturePricingAt: () => new Date('2026-08-16T12:00:00.000Z'),
+        }),
+        f.ownerId,
+        f.workspaceId,
+        f.conversationId,
+        `${providerKey} ${policy} dynamic measurement.`,
+        {
+          budgetEnvironment: budgetRuntimeEnvironment({ AI_INPUT_TOKEN_MEASUREMENT: policy }),
+          ...multiModeRuntimeForIdentity('BALANCED', identity),
+          mode: 'BALANCED',
+        },
+      );
+      assert.equal(measurements, 0);
+      if (policy === 'WHEN_AVAILABLE') {
+        assert.ok(
+          result.responseRun,
+          `${providerKey} WHEN_AVAILABLE failed with ${'failureCode' in result ? result.failureCode : 'no code'}.`,
+        );
+        assert.equal(generations, 3);
+      } else {
+        assert.equal(
+          'failureCode' in result ? result.failureCode : null,
+          'input_measurement_required',
+        );
+        assert.equal(generations, 0);
+        assert.equal(await prisma.aiRun.count(), 0);
+        assert.equal(
+          (await prisma.aiBudgetReservation.findFirstOrThrow()).status,
+          AiBudgetReservationStatus.RELEASED,
+        );
+      }
+      assert.ok(
+        (await prisma.aiRun.findMany()).every(({ providerKey: actual }) => actual === providerKey),
+      );
+    }
+  }
+});
+
+test('DISABLED preserves all multi-model paths and budget-disabled execution never measures', async () => {
+  for (const mode of ['BALANCED', 'DEEP', 'CRITICAL'] as const) {
+    await reset();
+    const f = await fixture();
+    await fundAiBudget(f.ownerId, f.workspaceId);
+    let measurements = 0;
+    let generations = 0;
+    const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+      knownCostTelemetry: true,
+      measurement: 999,
+      onMeasurement: () => measurements++,
+      onRequest: () => generations++,
+    });
+    const result = await submitAiChatMessage(
+      prisma,
+      dependencies(new LanguageModelProviderRegistry(openai), undefined, {
+        capturePricingAt: () => new Date('2026-08-16T12:00:00.000Z'),
+      }),
+      f.ownerId,
+      f.workspaceId,
+      f.conversationId,
+      `Disabled dynamic measurement ${mode}.`,
+      {
+        budgetEnvironment: budgetRuntimeEnvironment({
+          AI_INPUT_TOKEN_MEASUREMENT: 'DISABLED',
+        }),
+        ...multiModeRuntimeForIdentity(mode, providerIdentities.openai),
+        mode,
+      },
+    );
+    assert.ok(result.responseRun);
+    assert.equal(measurements, 0);
+    assert.equal(generations, mode === 'BALANCED' ? 3 : mode === 'DEEP' ? 6 : 7);
+  }
+
+  await reset();
+  const f = await fixture();
+  let measurements = 0;
+  let generations = 0;
+  const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+    measurement: 999,
+    onMeasurement: () => measurements++,
+    onRequest: () => generations++,
+  });
+  const result = await submitAiChatMessage(
+    prisma,
+    dependencies(new LanguageModelProviderRegistry(anthropic)),
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
+    'Unbudgeted BALANCED does not measure.',
+    {
+      budgetEnvironment: budgetRuntimeEnvironment({
+        AI_BUDGET_ENFORCEMENT: 'DISABLED',
+        AI_INPUT_TOKEN_MEASUREMENT: 'REQUIRED',
+      }),
+      ...multiModeRuntimeForIdentity('BALANCED', providerIdentities.anthropic),
+      mode: 'BALANCED',
+    },
+  );
+  assert.ok(result.responseRun);
+  assert.equal(measurements, 0);
+  assert.equal(generations, 3);
+  assert.equal(await prisma.aiBudgetReservation.count(), 0);
+});
+
+test('Anthropic operational and malformed measurements stop before first generation and release', async () => {
+  for (const measurement of ['FAIL', 'MALFORMED'] as const) {
+    await reset();
+    const f = await fixture();
+    const budget = await measuredBudgetExecution(f, 'BALANCED', 'WHEN_AVAILABLE');
+    let measurements = 0;
+    let generations = 0;
+    const anthropic = model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+      measurement,
+      onMeasurement: () => measurements++,
+      onRequest: () => generations++,
+    });
+    await assert.rejects(
+      executeBalancedGroundedRequest(
+        prisma,
+        dependencies(new LanguageModelProviderRegistry(anthropic)),
+        f.ownerId,
+        f.workspaceId,
+        {
+          budgetExecution: budget,
+          conversationId: f.conversationId,
+          groundedContextId: f.contextId,
+          originalUserRequest: f.originalUserRequest,
+          providerConfiguration: multiModeRuntimeForIdentity(
+            'BALANCED',
+            providerIdentities.anthropic,
+          ).balancedProviderConfiguration,
+          userMessageId: f.messageId,
+        },
+      ),
+      (error: unknown) =>
+        error instanceof AiOrchestrationInputMeasurementStoppedError &&
+        error.code === 'input_measurement_failed',
+    );
+    assert.equal(measurements, 1);
+    assert.equal(generations, 0);
+    assert.equal(await prisma.aiRun.count(), 0);
+    assert.equal((await reconcileMeasuredBudget(f, budget)).outcome, 'RELEASED');
+    const orchestration = await prisma.aiOrchestration.findFirstOrThrow();
+    assert.equal(orchestration.status, AiOrchestrationStatus.FAILED);
+    assert.equal(orchestration.finalRunId, null);
+  }
+});
+
+test('AUTO-resolved BALANCED, DEEP, and CRITICAL use the resolved mode budget lifecycle', async () => {
+  const requests = {
+    BALANCED: 'Please deliver:\n- Update the dashboard title\n- Refresh the empty-state copy',
+    CRITICAL: 'Review this patient safety protocol.',
+    DEEP: 'Verify and prove that the approved control is supported by the source.',
+  } as const;
+  for (const mode of ['BALANCED', 'DEEP', 'CRITICAL'] as const) {
+    await reset();
+    const f = await fixture();
+    await fundAiBudget(f.ownerId, f.workspaceId);
+    let calls = 0;
+    let measurements = 0;
+    const limits: Array<number | undefined> = [];
+    const capture = (request: LanguageModelRequest) => {
+      calls++;
+      limits.push(request.executionLimits?.maxOutputTokens);
+    };
+    const registry = new LanguageModelProviderRegistry(
+      model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+        inputTokenMeasurementAccounting: 'UNRESOLVED',
+        knownCostTelemetry: true,
+        measurement: 999,
+        onMeasurement: () => measurements++,
+        onRequest: capture,
+      }),
+    );
+    const result = await submitAiChatMessage(
+      prisma,
+      dependencies(registry, undefined, {
+        capturePricingAt: () => new Date('2026-08-16T12:00:00.000Z'),
+      }),
+      f.ownerId,
+      f.workspaceId,
+      f.conversationId,
       requests[mode],
       {
-        budgetEnvironment: budgetRuntimeEnvironment(),
-        ...multiModeRuntimeConfiguration(mode),
+        budgetEnvironment: budgetRuntimeEnvironment({
+          AI_INPUT_TOKEN_MEASUREMENT: 'WHEN_AVAILABLE',
+        }),
+        ...multiModeRuntimeForIdentity(mode, providerIdentities.openai),
         mode: 'AUTO',
       },
     );
@@ -2894,6 +3581,11 @@ test('AUTO-resolved BALANCED, DEEP, and CRITICAL use the resolved mode budget li
     assert.equal(route.configuredMode, 'AUTO');
     assert.equal(route.resolvedMode, mode);
     assert.equal(calls, mode === 'BALANCED' ? 3 : mode === 'DEEP' ? 6 : 7);
+    assert.equal(measurements, 0);
+    assert.deepEqual(
+      limits,
+      Array.from({ length: calls }, () => 20),
+    );
     assert.equal(
       (
         await prisma.aiBudgetReservation.findFirstOrThrow({

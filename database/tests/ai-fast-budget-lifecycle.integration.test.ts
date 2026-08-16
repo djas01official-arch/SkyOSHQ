@@ -30,8 +30,18 @@ import { preflightAiBudget } from '../ai/ai-budget-preflight';
 import { getAiRoutingDecision } from '../ai/ai-routing-decisions';
 import {
   LanguageModelProviderRegistry,
+  type AiProviderInputTokenMeasurementAccounting,
   type LanguageModelProvider,
+  type LanguageModelRequest,
 } from '../../services/ai/language-model-provider';
+import {
+  AiInputTokenMeasurementError,
+  bindAiProviderInputTokenMeasurement,
+  knownAiProviderInputTokenMeasurement,
+  unavailableAiProviderInputTokenMeasurement,
+  type AiBoundProviderInputTokenMeasurement,
+  type AiProviderInputTokenMeasurementIdentity,
+} from '../../services/ai/ai-input-token-measurement';
 import type { AiBudgetRuntimeEnvironment } from '../../services/ai/ai-budget-runtime-config';
 import {
   DeterministicLocalEmbeddingProvider,
@@ -113,20 +123,30 @@ async function fixture() {
 
 function model(
   options: Readonly<{
+    accounting?: AiProviderInputTokenMeasurementAccounting;
     fail?: boolean;
+    identity?: Readonly<{ modelKey: string; modelVersion: string; providerKey: string }>;
     invalidOutput?: boolean;
-    onRequest?: () => Promise<void> | void;
+    measure?: (
+      request: LanguageModelRequest,
+      identity: AiProviderInputTokenMeasurementIdentity,
+    ) => Promise<AiBoundProviderInputTokenMeasurement>;
+    onRequest?: (request: LanguageModelRequest) => Promise<void> | void;
   }> = {},
 ): LanguageModelProvider {
-  return {
-    maxInputCharacters: 20_000,
-    maxOutputCharacters: 2_000,
+  const identity = options.identity ?? {
     modelKey: 'gpt-5.6-terra',
     modelVersion: 'responses-json-schema-v1',
     providerKey: 'openai',
+  };
+  return {
+    ...(options.accounting ? { inputTokenMeasurementAccounting: options.accounting } : {}),
+    maxInputCharacters: 20_000,
+    maxOutputCharacters: 2_000,
+    ...identity,
     timeoutMs: 3_000,
-    generate: async () => {
-      await options.onRequest?.();
+    generate: async (request) => {
+      await options.onRequest?.(request);
       if (options.fail) throw new Error('Safe offline provider failure.');
       return {
         citationIds: [],
@@ -138,6 +158,7 @@ function model(
         totalTokens: 120,
       };
     },
+    ...(options.measure ? { measureInputTokens: options.measure } : {}),
   };
 }
 
@@ -190,12 +211,19 @@ test('disabled budget enforcement preserves FAST and touches no budget persisten
   const f = await fixture();
   const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
   let calls = 0;
+  let measurementCalls = 0;
+  let executionLimits: LanguageModelRequest['executionLimits'];
   const result = await submitAiChatMessage(
     prisma,
     dependencies(
       model({
-        onRequest: () => {
+        measure: async () => {
+          measurementCalls++;
+          throw new Error('Measurement must remain disabled.');
+        },
+        onRequest: (request) => {
           calls++;
+          executionLimits = request.executionLimits;
         },
       }),
     ),
@@ -203,10 +231,18 @@ test('disabled budget enforcement preserves FAST and touches no budget persisten
     f.workspaceId,
     conversation.id,
     'Simple grounded question.',
-    { budgetEnvironment: { AI_BUDGET_ENFORCEMENT: 'DISABLED' }, mode: 'FAST' },
+    {
+      budgetEnvironment: {
+        AI_BUDGET_ENFORCEMENT: 'DISABLED',
+        AI_INPUT_TOKEN_MEASUREMENT: 'REQUIRED',
+      },
+      mode: 'FAST',
+    },
   );
   assert.equal(result.mode, 'FAST');
   assert.equal(calls, 1);
+  assert.equal(measurementCalls, 0);
+  assert.equal(executionLimits, undefined);
   assert.equal(await prisma.aiRun.count(), 1);
   assert.equal(await prisma.aiBudgetAccount.count(), 0);
   assert.equal(await prisma.aiBudgetReservation.count(), 0);
@@ -220,10 +256,17 @@ test('explicit FAST and AUTO-resolved FAST share one allowed reserve-run-settle 
     await fund(f.ownerId, f.workspaceId);
     const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
     let calls = 0;
+    let measurementCalls = 0;
     let pricingCaptures = 0;
+    const requestLimits: Array<LanguageModelRequest['executionLimits']> = [];
     const provider = model({
-      onRequest: () => {
+      measure: async () => {
+        measurementCalls++;
+        throw new Error('Default measurement policy must remain disabled.');
+      },
+      onRequest: (request) => {
         calls++;
+        requestLimits.push(request.executionLimits);
       },
     });
     const result = await submitAiChatMessage(
@@ -238,10 +281,17 @@ test('explicit FAST and AUTO-resolved FAST share one allowed reserve-run-settle 
       f.workspaceId,
       conversation.id,
       'Hi',
-      { budgetEnvironment: budgetEnvironment(), mode },
+      {
+        budgetEnvironment: budgetEnvironment({
+          AI_INPUT_TOKEN_MEASUREMENT: mode === 'FAST' ? 'DISABLED' : undefined,
+        }),
+        mode,
+      },
     );
     assert.equal(result.mode, 'FAST');
     assert.equal(calls, 1);
+    assert.equal(measurementCalls, 0);
+    assert.deepEqual(requestLimits, [{ maxOutputTokens: 20 }]);
     assert.equal(pricingCaptures, 1);
     const run = await prisma.aiRun.findFirstOrThrow();
     const reservation = await prisma.aiBudgetReservation.findFirstOrThrow();
@@ -257,6 +307,363 @@ test('explicit FAST and AUTO-resolved FAST share one allowed reserve-run-settle 
     assert.equal(await prisma.aiBudgetReservation.count(), 1);
     assert.equal(await prisma.aiRun.count(), 1);
     assert.equal(await prisma.aiOrchestration.count(), 0);
+  }
+});
+
+test('FAST measured input resolves once before preflight and never lowers the reservation plan', async () => {
+  for (const scenario of [
+    {
+      measured: 99,
+      mode: 'FAST' as const,
+      policy: 'WHEN_AVAILABLE' as const,
+      reserved: '0.000550000000',
+    },
+    {
+      measured: 100,
+      mode: 'AUTO' as const,
+      policy: 'REQUIRED' as const,
+      reserved: '0.000550000000',
+    },
+    {
+      measured: 200,
+      mode: 'FAST' as const,
+      policy: 'WHEN_AVAILABLE' as const,
+      reserved: '0.000800000000',
+    },
+  ]) {
+    await reset();
+    const f = await fixture();
+    await fund(f.ownerId, f.workspaceId);
+    const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+    const events: string[] = [];
+    let measuredRequest: LanguageModelRequest | undefined;
+    let generatedRequest: LanguageModelRequest | undefined;
+    let measurementCalls = 0;
+    let preflightCalls = 0;
+    const provider = model({
+      accounting: 'DOCUMENTED_NO_ADDITIONAL_CHARGE',
+      measure: async (request, identity) => {
+        events.push('measure');
+        measurementCalls++;
+        measuredRequest = request;
+        assert.deepEqual(
+          {
+            modelKey: identity.modelKey,
+            modelVersion: identity.modelVersion,
+            providerKey: identity.providerKey,
+          },
+          {
+            modelKey: provider.modelKey,
+            modelVersion: provider.modelVersion,
+            providerKey: provider.providerKey,
+          },
+        );
+        return bindAiProviderInputTokenMeasurement(
+          identity,
+          identity,
+          knownAiProviderInputTokenMeasurement(scenario.measured),
+        );
+      },
+      onRequest: (request) => {
+        events.push('generate');
+        generatedRequest = request;
+      },
+    });
+    const result = await submitAiChatMessage(
+      prisma,
+      dependencies(provider, {
+        capturePricingAt: () => new Date('2026-08-16T12:00:00.000Z'),
+        preflight: async (client, input) => {
+          events.push('preflight');
+          preflightCalls++;
+          assert.equal('runs' in input.executionPlan, true);
+          if (!('runs' in input.executionPlan)) assert.fail('Expected authoritative plan.');
+          assert.equal(input.executionPlan.runs[0]?.inputTokens, Math.max(100, scenario.measured));
+          assert.equal(input.executionPlan.runs[0]?.outputTokens, 20);
+          return preflightAiBudget(client, input);
+        },
+      }),
+      f.ownerId,
+      f.workspaceId,
+      conversation.id,
+      'Measured grounded question.',
+      {
+        budgetEnvironment: budgetEnvironment({
+          AI_INPUT_TOKEN_MEASUREMENT: scenario.policy,
+        }),
+        mode: scenario.mode,
+      },
+    );
+    assert.equal(result.mode, 'FAST');
+    assert.equal(measurementCalls, 1);
+    assert.equal(preflightCalls, 1);
+    assert.deepEqual(events, ['measure', 'preflight', 'generate']);
+    assert.deepEqual(generatedRequest, measuredRequest);
+    assert.deepEqual(generatedRequest?.executionLimits, { maxOutputTokens: 20 });
+    const reservation = await prisma.aiBudgetReservation.findFirstOrThrow();
+    const run = await prisma.aiRun.findFirstOrThrow();
+    assert.equal(reservation.reservedAmountUsd.toFixed(12), scenario.reserved);
+    assert.equal(reservation.status, AiBudgetReservationStatus.SETTLED);
+    assert.equal(run.inputTokens, 100);
+    assert.equal(run.outputTokens, 20);
+    assert.equal(run.providerKey, provider.providerKey);
+    assert.equal(run.modelKey, provider.modelKey);
+    assert.equal(run.modelVersion, provider.modelVersion);
+    assert.equal(run.providerAttempted, true);
+    assert.equal(await prisma.aiRun.count(), 1);
+    assert.equal(await prisma.aiOrchestration.count(), 0);
+  }
+});
+
+test('elevated measured input remains subject to unchanged hard-max and confirmation policy', async () => {
+  for (const scenario of [
+    {
+      code: 'budget_rejected',
+      environment: budgetEnvironment({
+        AI_BUDGET_TASK_HARD_MAX_USD: '0.000799999999',
+        AI_INPUT_TOKEN_MEASUREMENT: 'WHEN_AVAILABLE',
+      }),
+    },
+    {
+      code: 'budget_confirmation_required',
+      environment: budgetEnvironment({
+        AI_BUDGET_CONFIRMATION_THRESHOLD_USD: '0.000800000000',
+        AI_INPUT_TOKEN_MEASUREMENT: 'WHEN_AVAILABLE',
+      }),
+    },
+  ]) {
+    await reset();
+    const f = await fixture();
+    await fund(f.ownerId, f.workspaceId);
+    const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+    let generationCalls = 0;
+    let measurementCalls = 0;
+    await assert.rejects(
+      submitAiChatMessage(
+        prisma,
+        dependencies(
+          model({
+            accounting: 'DOCUMENTED_NO_ADDITIONAL_CHARGE',
+            measure: async (_request, identity) => {
+              measurementCalls++;
+              return bindAiProviderInputTokenMeasurement(
+                identity,
+                identity,
+                knownAiProviderInputTokenMeasurement(200),
+              );
+            },
+            onRequest: () => {
+              generationCalls++;
+            },
+          }),
+          { capturePricingAt: () => new Date('2026-08-16T12:00:00.000Z') },
+        ),
+        f.ownerId,
+        f.workspaceId,
+        conversation.id,
+        'Measured policy boundary.',
+        { budgetEnvironment: scenario.environment, mode: 'FAST' },
+      ),
+      (error: unknown) =>
+        error instanceof AiConversationBudgetError &&
+        error.code === scenario.code &&
+        error.proposedReserveUsd === '0.000800000000',
+    );
+    assert.equal(measurementCalls, 1);
+    assert.equal(generationCalls, 0);
+    assert.equal(await prisma.aiBudgetReservation.count(), 0);
+    assert.equal(await prisma.aiRun.count(), 0);
+  }
+});
+
+test('WHEN_AVAILABLE preserves planned cost for typed unavailable measurement', async () => {
+  const f = await fixture();
+  await fund(f.ownerId, f.workspaceId);
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+  let measurementCalls = 0;
+  const provider = model({
+    accounting: 'NO_PROVIDER_CALL',
+    identity: {
+      modelKey: 'gemini-3.6-flash',
+      modelVersion: 'interactions-json-schema-v1',
+      providerKey: 'gemini',
+    },
+    measure: async (_request, identity) => {
+      measurementCalls++;
+      return bindAiProviderInputTokenMeasurement(
+        identity,
+        identity,
+        unavailableAiProviderInputTokenMeasurement('EXACT_REQUEST_MEASUREMENT_UNAVAILABLE'),
+      );
+    },
+  });
+  await submitAiChatMessage(
+    prisma,
+    dependencies(provider, {
+      capturePricingAt: () => new Date('2026-08-16T12:00:00.000Z'),
+    }),
+    f.ownerId,
+    f.workspaceId,
+    conversation.id,
+    'Unavailable measurement may use the conservative plan.',
+    {
+      budgetEnvironment: budgetEnvironment({
+        AI_INPUT_TOKEN_MEASUREMENT: 'WHEN_AVAILABLE',
+      }),
+      mode: 'FAST',
+    },
+  );
+  assert.equal(measurementCalls, 1);
+  assert.equal(
+    (await prisma.aiBudgetReservation.findFirstOrThrow()).reservedAmountUsd.toFixed(12),
+    '0.000300000000',
+  );
+  assert.equal((await prisma.aiRun.findFirstOrThrow()).inputTokens, 100);
+});
+
+test('REQUIRED rejects absent or unavailable measurement before reservation and generation', async () => {
+  for (const provider of [
+    model(),
+    model({
+      accounting: 'NO_PROVIDER_CALL',
+      identity: {
+        modelKey: 'gemini-3.6-flash',
+        modelVersion: 'interactions-json-schema-v1',
+        providerKey: 'gemini',
+      },
+      measure: async (_request, identity) =>
+        bindAiProviderInputTokenMeasurement(
+          identity,
+          identity,
+          unavailableAiProviderInputTokenMeasurement('EXACT_REQUEST_MEASUREMENT_UNAVAILABLE'),
+        ),
+    }),
+  ]) {
+    await reset();
+    const f = await fixture();
+    await fund(f.ownerId, f.workspaceId);
+    const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+    await assert.rejects(
+      submitAiChatMessage(
+        prisma,
+        dependencies(provider),
+        f.ownerId,
+        f.workspaceId,
+        conversation.id,
+        'Required measurement.',
+        {
+          budgetEnvironment: budgetEnvironment({ AI_INPUT_TOKEN_MEASUREMENT: 'REQUIRED' }),
+          mode: 'FAST',
+        },
+      ),
+      (error: unknown) =>
+        error instanceof AiConversationBudgetError && error.code === 'input_measurement_required',
+    );
+    assert.equal(await prisma.aiBudgetReservation.count(), 0);
+    assert.equal(await prisma.aiRun.count(), 0);
+    assert.equal(await prisma.aiOrchestration.count(), 0);
+  }
+});
+
+test('operational, malformed, and identity measurement failures fail closed before financial state', async () => {
+  for (const measure of [
+    async () => {
+      throw new Error('Safe mocked count failure.');
+    },
+    async () => {
+      throw new AiInputTokenMeasurementError(
+        'Safe mocked malformed count.',
+        'input_token_measurement_invalid',
+      );
+    },
+    async (_request: LanguageModelRequest, identity: AiProviderInputTokenMeasurementIdentity) => {
+      const mismatched = { ...identity, modelVersion: 'other-version' };
+      return bindAiProviderInputTokenMeasurement(
+        mismatched,
+        mismatched,
+        knownAiProviderInputTokenMeasurement(100),
+      );
+    },
+  ]) {
+    await reset();
+    const f = await fixture();
+    await fund(f.ownerId, f.workspaceId);
+    const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+    let generationCalls = 0;
+    await assert.rejects(
+      submitAiChatMessage(
+        prisma,
+        dependencies(
+          model({
+            accounting: 'DOCUMENTED_NO_ADDITIONAL_CHARGE',
+            measure,
+            onRequest: () => {
+              generationCalls++;
+            },
+          }),
+        ),
+        f.ownerId,
+        f.workspaceId,
+        conversation.id,
+        'Measurement failure.',
+        {
+          budgetEnvironment: budgetEnvironment({
+            AI_INPUT_TOKEN_MEASUREMENT: 'WHEN_AVAILABLE',
+          }),
+          mode: 'FAST',
+        },
+      ),
+      (error: unknown) =>
+        error instanceof AiConversationBudgetError && error.code === 'input_measurement_failed',
+    );
+    assert.equal(generationCalls, 0);
+    assert.equal(await prisma.aiBudgetReservation.count(), 0);
+    assert.equal(await prisma.aiRun.count(), 0);
+  }
+});
+
+test('unresolved count-request accounting never performs the OpenAI measurement call', async () => {
+  for (const policy of ['WHEN_AVAILABLE', 'REQUIRED'] as const) {
+    await reset();
+    const f = await fixture();
+    await fund(f.ownerId, f.workspaceId);
+    const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+    let measurementCalls = 0;
+    const operation = submitAiChatMessage(
+      prisma,
+      dependencies(
+        model({
+          accounting: 'UNRESOLVED',
+          measure: async () => {
+            measurementCalls++;
+            throw new Error('Accounting-gated operation must not run.');
+          },
+        }),
+        { capturePricingAt: () => new Date('2026-08-16T12:00:00.000Z') },
+      ),
+      f.ownerId,
+      f.workspaceId,
+      conversation.id,
+      'Accounting-gated measurement.',
+      {
+        budgetEnvironment: budgetEnvironment({ AI_INPUT_TOKEN_MEASUREMENT: policy }),
+        mode: 'FAST',
+      },
+    );
+    if (policy === 'REQUIRED') {
+      await assert.rejects(
+        operation,
+        (error: unknown) =>
+          error instanceof AiConversationBudgetError && error.code === 'input_measurement_required',
+      );
+      assert.equal(await prisma.aiBudgetReservation.count(), 0);
+      assert.equal(await prisma.aiRun.count(), 0);
+    } else {
+      await operation;
+      assert.equal(await prisma.aiBudgetReservation.count(), 1);
+      assert.equal(await prisma.aiRun.count(), 1);
+    }
+    assert.equal(measurementCalls, 0);
   }
 });
 

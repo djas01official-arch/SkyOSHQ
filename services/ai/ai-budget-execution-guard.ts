@@ -44,6 +44,25 @@ export type AiBudgetContinuationDecision =
       reservedAmountUsd: FixedPrecisionUsd;
     }>;
 
+export type AiBudgetContinuationAccountingReadiness =
+  | Readonly<{
+      knownActualSpentUsd: FixedPrecisionUsd;
+      remainingReservedUsd: FixedPrecisionUsd;
+      status: 'READY';
+    }>
+  | Readonly<{
+      knownActualSpentUsd: FixedPrecisionUsd;
+      reason: 'RESERVATION_ALREADY_EXHAUSTED';
+      remainingReservedUsd: FixedPrecisionUsd;
+      status: 'BLOCKED';
+    }>
+  | Readonly<{
+      knownActualSpentUsd: FixedPrecisionUsd;
+      reason: 'UNKNOWN_ACTUAL_COST' | 'ACTUAL_COST_OVERRUN';
+      remainingReservedUsd: null;
+      status: 'BLOCKED';
+    }>;
+
 export type AiBudgetSettlementInput = Readonly<{
   completedRuns: readonly AiBudgetRunCostObservation[];
   executionTerminal: boolean;
@@ -140,6 +159,51 @@ function knownActualCost(completedRuns: readonly AiBudgetRunCostObservation[]): 
 }
 
 /**
+ * Classifies only persisted accounting state. This lets callers avoid optional
+ * pre-generation network work when prior provider accounting already requires
+ * a stop, without making a second continuation decision.
+ */
+export function inspectAiBudgetContinuationAccounting(
+  completedRunsInput: readonly AiBudgetRunCostObservation[],
+  reservedAmountUsd: FixedPrecisionUsd,
+): AiBudgetContinuationAccountingReadiness {
+  if (!isFixedPrecisionUsd(reservedAmountUsd)) invalid();
+  const completedRuns = validateObservations(completedRunsInput);
+  const { hasUnknownActualCost, knownActualSpentUsd } = knownActualCost(completedRuns);
+  if (hasUnknownActualCost) {
+    return Object.freeze({
+      knownActualSpentUsd,
+      reason: 'UNKNOWN_ACTUAL_COST' as const,
+      remainingReservedUsd: null,
+      status: 'BLOCKED' as const,
+    });
+  }
+  const spentComparison = compareFixedPrecisionUsd(knownActualSpentUsd, reservedAmountUsd);
+  if (spentComparison > 0) {
+    return Object.freeze({
+      knownActualSpentUsd,
+      reason: 'ACTUAL_COST_OVERRUN' as const,
+      remainingReservedUsd: null,
+      status: 'BLOCKED' as const,
+    });
+  }
+  const remainingReservedUsd = subtractFixedPrecisionUsd(reservedAmountUsd, knownActualSpentUsd);
+  if (spentComparison === 0) {
+    return Object.freeze({
+      knownActualSpentUsd,
+      reason: 'RESERVATION_ALREADY_EXHAUSTED' as const,
+      remainingReservedUsd,
+      status: 'BLOCKED' as const,
+    });
+  }
+  return Object.freeze({
+    knownActualSpentUsd,
+    remainingReservedUsd,
+    status: 'READY' as const,
+  });
+}
+
+/**
  * Decides whether the next planned call fits the remaining reservation according
  * to its estimate. CONTINUE does not make the provider call an enforced cost cap.
  */
@@ -154,56 +218,47 @@ export function evaluateAiBudgetContinuation(
   ) {
     invalid();
   }
-  const completedRuns = validateObservations(input.completedRuns);
-  const { hasUnknownActualCost, knownActualSpentUsd } = knownActualCost(completedRuns);
+  const accounting = inspectAiBudgetContinuationAccounting(
+    input.completedRuns,
+    input.reservedAmountUsd,
+  );
   const common = {
-    knownActualSpentUsd,
+    knownActualSpentUsd: accounting.knownActualSpentUsd,
     nextPlannedRunEstimateUsd: input.nextPlannedRunEstimateUsd,
     reservedAmountUsd: input.reservedAmountUsd,
   } as const;
 
-  if (hasUnknownActualCost) {
-    return Object.freeze({
-      ...common,
-      decision: 'STOP' as const,
-      reason: 'UNKNOWN_ACTUAL_COST' as const,
-      remainingReservedUsd: null,
-    });
-  }
-  const spentComparison = compareFixedPrecisionUsd(knownActualSpentUsd, input.reservedAmountUsd);
-  if (spentComparison > 0) {
-    return Object.freeze({
-      ...common,
-      decision: 'STOP' as const,
-      reason: 'ACTUAL_COST_OVERRUN' as const,
-      remainingReservedUsd: null,
-    });
-  }
-  const remainingReservedUsd = subtractFixedPrecisionUsd(
-    input.reservedAmountUsd,
-    knownActualSpentUsd,
-  );
-  if (spentComparison === 0) {
+  if (accounting.status === 'BLOCKED') {
+    if (accounting.remainingReservedUsd === null) {
+      return Object.freeze({
+        ...common,
+        decision: 'STOP' as const,
+        reason: accounting.reason as 'ACTUAL_COST_OVERRUN' | 'UNKNOWN_ACTUAL_COST',
+        remainingReservedUsd: null,
+      });
+    }
     return Object.freeze({
       ...common,
       decision: 'STOP' as const,
       reason: 'RESERVATION_ALREADY_EXHAUSTED' as const,
-      remainingReservedUsd,
+      remainingReservedUsd: accounting.remainingReservedUsd,
     });
   }
-  if (compareFixedPrecisionUsd(input.nextPlannedRunEstimateUsd, remainingReservedUsd) > 0) {
+  if (
+    compareFixedPrecisionUsd(input.nextPlannedRunEstimateUsd, accounting.remainingReservedUsd) > 0
+  ) {
     return Object.freeze({
       ...common,
       decision: 'STOP' as const,
       reason: 'NEXT_PLANNED_RUN_EXCEEDS_REMAINING_RESERVE' as const,
-      remainingReservedUsd,
+      remainingReservedUsd: accounting.remainingReservedUsd,
     });
   }
   return Object.freeze({
     ...common,
     decision: 'CONTINUE' as const,
     reason: 'WITHIN_RESERVED_PLAN' as const,
-    remainingReservedUsd,
+    remainingReservedUsd: accounting.remainingReservedUsd,
   });
 }
 

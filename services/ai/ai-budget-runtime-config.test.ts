@@ -38,7 +38,44 @@ test('ENABLED parses exact money and the existing complete token profile', () =>
   if (result.enforcement !== 'ENABLED') assert.fail('Expected enabled budget configuration.');
   assert.equal(result.taskHardMaxUsd, '1.000000000000');
   assert.equal(result.confirmationThresholdUsd, '0.100000000000');
+  assert.equal(result.inputTokenMeasurement, 'DISABLED');
   assert.deepEqual(result.plannedTokenBudget.fast, { inputTokens: 100, outputTokens: 20 });
+});
+
+test('enabled input measurement policy is explicit and defaults only missing or blank to DISABLED', () => {
+  for (const [value, expected] of [
+    [undefined, 'DISABLED'],
+    ['  ', 'DISABLED'],
+    ['disabled', 'DISABLED'],
+    ['when_available', 'WHEN_AVAILABLE'],
+    ['required', 'REQUIRED'],
+  ] as const) {
+    const result = parseAiBudgetRuntimeConfiguration({
+      ...enabled,
+      AI_INPUT_TOKEN_MEASUREMENT: value,
+    });
+    assert.equal(result.enforcement, 'ENABLED');
+    if (result.enforcement !== 'ENABLED') assert.fail('Expected enabled budget configuration.');
+    assert.equal(result.inputTokenMeasurement, expected);
+  }
+  assert.throws(
+    () =>
+      parseAiBudgetRuntimeConfiguration({
+        ...enabled,
+        AI_INPUT_TOKEN_MEASUREMENT: 'sometimes',
+      }),
+    AiBudgetRuntimeConfigurationError,
+  );
+});
+
+test('disabled budget enforcement ignores measurement policy entirely', () => {
+  assert.deepEqual(
+    parseAiBudgetRuntimeConfiguration({
+      AI_BUDGET_ENFORCEMENT: 'DISABLED',
+      AI_INPUT_TOKEN_MEASUREMENT: 'invalid-but-unused',
+    }),
+    { enforcement: 'DISABLED' },
+  );
 });
 
 test('enabled money configuration is required and fixed precision', () => {

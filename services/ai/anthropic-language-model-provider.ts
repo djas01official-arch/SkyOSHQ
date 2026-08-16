@@ -7,6 +7,14 @@ import {
   type LanguageModelRequest,
   type LanguageModelResponse,
 } from './language-model-provider';
+import { validateAiProviderExecutionLimits } from './ai-execution-limits';
+import {
+  AiInputTokenMeasurementError,
+  bindAiProviderInputTokenMeasurement,
+  knownAiProviderInputTokenMeasurement,
+  validateAiProviderInputTokenMeasurementIdentity,
+  type AiProviderInputTokenMeasurementIdentity,
+} from './ai-input-token-measurement';
 import {
   KnowledgeActionResponseError,
   groundedAnswerResponseSchema,
@@ -127,6 +135,21 @@ type AnthropicInvalidRequestDiagnosticCode =
 
 function anthropicTransportFormat(canonicalSchema: Record<string, unknown>) {
   return jsonSchemaOutputFormat(canonicalSchema as Parameters<typeof jsonSchemaOutputFormat>[0]);
+}
+
+function prepareAnthropicInputTokenRequest(request: LanguageModelRequest, model: string) {
+  const responseFormat = request.responseFormat ?? 'grounded_answer';
+  const actionSchema = knowledgeActionResponseSchema(responseFormat);
+  const canonicalSchema = (actionSchema ?? groundedAnswerResponseSchema) as Record<string, unknown>;
+  return {
+    body: {
+      messages: requestMessages(request),
+      model,
+      output_config: { format: anthropicTransportFormat(canonicalSchema) },
+      system: SYSTEM_PROMPT,
+    },
+    responseFormat,
+  } as const;
 }
 
 function anthropicErrorMessage(error: unknown): string {
@@ -387,6 +410,7 @@ function retryAfterMs(error: unknown, now: number): number | undefined {
 }
 
 export class AnthropicLanguageModelProvider implements LanguageModelProvider {
+  readonly inputTokenMeasurementAccounting = 'DOCUMENTED_NO_ADDITIONAL_CHARGE' as const;
   readonly providerKey = ANTHROPIC_PROVIDER_KEY;
   readonly modelVersion = ANTHROPIC_MODEL_POLICY_VERSION;
   readonly maxInputCharacters = MAX_INPUT_CHARACTERS;
@@ -429,18 +453,48 @@ export class AnthropicLanguageModelProvider implements LanguageModelProvider {
     });
   }
 
+  async measureInputTokens(
+    request: LanguageModelRequest,
+    identity: AiProviderInputTokenMeasurementIdentity,
+    options: Readonly<{ signal?: AbortSignal }> = {},
+  ) {
+    validateInput(request);
+    validateAiProviderInputTokenMeasurementIdentity(identity, this);
+    const prepared = prepareAnthropicInputTokenRequest(request, this.modelKey);
+    try {
+      const response = await this.#client.messages.countTokens(prepared.body, {
+        maxRetries: 0,
+        signal: options.signal,
+      });
+      return bindAiProviderInputTokenMeasurement(
+        identity,
+        this,
+        knownAiProviderInputTokenMeasurement(response.input_tokens),
+      );
+    } catch (error) {
+      if (error instanceof AiInputTokenMeasurementError) throw error;
+      if (options.signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        throw new AiInputTokenMeasurementError(
+          'The provider input-token measurement was cancelled.',
+          'input_token_measurement_timeout',
+        );
+      }
+      throw new AiInputTokenMeasurementError(
+        'The provider input-token measurement failed.',
+        'input_token_measurement_failed',
+      );
+    }
+  }
+
   async generate(
     request: LanguageModelRequest,
     options: Readonly<{ signal?: AbortSignal }> = {},
   ): Promise<LanguageModelResponse> {
     validateInput(request);
-    const responseFormat = request.responseFormat ?? 'grounded_answer';
-    const actionSchema = knowledgeActionResponseSchema(responseFormat);
-    const canonicalSchema = (actionSchema ?? groundedAnswerResponseSchema) as Record<
-      string,
-      unknown
-    >;
-    const outputFormat = anthropicTransportFormat(canonicalSchema);
+    if (request.executionLimits) validateAiProviderExecutionLimits(request.executionLimits);
+    const maxOutputTokens = request.executionLimits?.maxOutputTokens ?? this.#maxOutputTokens;
+    const prepared = prepareAnthropicInputTokenRequest(request, this.modelKey);
+    const responseFormat = prepared.responseFormat;
     const startedAt = this.#clock.now();
     const deadlineAt = startedAt + this.timeoutMs;
     const controller = new AbortController();
@@ -480,12 +534,9 @@ export class AnthropicLanguageModelProvider implements LanguageModelProvider {
         try {
           const response = await this.#client.messages.create(
             {
-              max_tokens: this.#maxOutputTokens,
-              messages: requestMessages(request),
-              model: this.modelKey,
-              output_config: { format: outputFormat },
+              ...prepared.body,
+              max_tokens: maxOutputTokens,
               service_tier: 'standard_only',
-              system: SYSTEM_PROMPT,
             },
             { maxRetries: 0, signal: controller.signal },
           );

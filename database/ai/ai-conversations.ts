@@ -27,13 +27,21 @@ import {
   LanguageModelProviderError,
   type LanguageModelProvider,
   type LanguageModelProviderRegistry,
+  type LanguageModelRequest,
   type LanguageModelResponseFormat,
   type LanguageModelResponse,
 } from '../../services/ai/language-model-provider';
 import {
+  AiExecutionLimitError,
+  getAiExecutionLimitsForCostPlanRun,
+  requireAiExecutionLimitsForProviderRun,
+  type AiProviderExecutionLimitBinding,
+} from '../../services/ai/ai-execution-limits';
+import {
   AiBudgetRuntimeConfigurationError,
   parseAiBudgetRuntimeConfiguration,
   type AiBudgetRuntimeEnvironment,
+  type AiInputTokenMeasurementPolicy,
 } from '../../services/ai/ai-budget-runtime-config';
 import type { AiCostEstimate } from '../../services/ai/ai-cost-estimator';
 import type { AiBudgetReason } from '../../services/ai/ai-budget-policy';
@@ -52,8 +60,21 @@ import {
   type CriticalAiRuntimeConfiguration,
   type DeepAiProviderAssignment,
   type DeepAiRuntimeConfiguration,
+  type AiOrchestrationRoleKey,
 } from '../../services/ai/ai-orchestration-policy';
-import { buildAiExecutionCostPlan } from '../../services/ai/ai-execution-cost-plan';
+import {
+  buildAiExecutionCostPlan,
+  type AiExecutionCostPlan,
+} from '../../services/ai/ai-execution-cost-plan';
+import {
+  applyAiResolvedInputBudgetsToExecutionCostPlan,
+  resolveAiInputTokenBudget,
+} from '../../services/ai/ai-input-token-budget';
+import {
+  bindAiProviderInputTokenMeasurement,
+  unavailableAiProviderInputTokenMeasurement,
+  type AiProviderInputTokenMeasurementIdentity,
+} from '../../services/ai/ai-input-token-measurement';
 import {
   AiTaskAnalyzerValidationError,
   routeAiTaskRequest,
@@ -436,6 +457,9 @@ function safeFailure(error: unknown): {
       providerRequestId: safeProviderRequestId(error.providerRequestId),
     };
   }
+  if (error instanceof AiExecutionLimitError) {
+    return { code: error.code, message: 'The AI execution limit could not be applied safely.' };
+  }
   if (error instanceof AiConversationError) return { code: error.code, message: error.message };
   return { code: 'generation_failed', message: 'The AI response could not be generated.' };
 }
@@ -444,6 +468,104 @@ type FailedRunAccounting = Readonly<{
   estimatedCostUsd: FixedPrecisionUsd;
   usage: ReturnType<typeof normalizeLanguageModelUsage>;
 }>;
+
+type LoadedGroundedContext = NonNullable<Awaited<ReturnType<typeof loadGroundedContext>>>;
+type BoundedHistory = Awaited<ReturnType<typeof loadBoundedHistory>>;
+
+function groundedLanguageModelRequest(
+  input: Readonly<{
+    executionLimits?: LanguageModelRequest['executionLimits'];
+    groundedContext: LoadedGroundedContext;
+    history: BoundedHistory;
+    responseFormat: LanguageModelResponseFormat;
+    userMessage: string;
+  }>,
+): LanguageModelRequest {
+  return Object.freeze({
+    citations: input.groundedContext.excerpts.map((excerpt) => ({
+      citationId: excerpt.citation.id,
+      text: excerpt.text,
+    })),
+    context: input.groundedContext.context,
+    ...(input.executionLimits ? { executionLimits: input.executionLimits } : {}),
+    history: input.history,
+    responseFormat: input.responseFormat,
+    userMessage: input.userMessage,
+  });
+}
+
+export type PreparedGroundedRunRequest = Readonly<{
+  actorUserId: string;
+  conversationId: string;
+  groundedContextId: string;
+  request: LanguageModelRequest;
+  responseFormat: LanguageModelResponseFormat;
+  userMessage: string;
+  userMessageId: string;
+  workspaceId: string;
+}>;
+
+const preparedGroundedRunRequests = new WeakSet<PreparedGroundedRunRequest>();
+
+/**
+ * Builds one exact grounded request before a budgeted orchestration step. The
+ * returned object is process-local and is reused verbatim by generation.
+ */
+export async function prepareGroundedRunRequest(
+  prisma: PrismaClient,
+  input: Readonly<{
+    actorUserId: string;
+    conversationId: string;
+    executionLimitBinding: AiProviderExecutionLimitBinding;
+    groundedContextId: string;
+    providerIdentity: AiProviderInputTokenMeasurementIdentity;
+    responseFormat: LanguageModelResponseFormat;
+    userMessage: string;
+    userMessageId: string;
+    workspaceId: string;
+  }>,
+): Promise<PreparedGroundedRunRequest> {
+  await requireAiAccess(prisma, input.actorUserId, input.workspaceId);
+  const groundedContext = await loadGroundedContext(
+    prisma,
+    input.workspaceId,
+    input.groundedContextId,
+  );
+  if (!groundedContext) {
+    throw new AiConversationAuthorizationError(
+      'GroundedContext does not belong to the selected workspace.',
+      'grounded_context_forbidden',
+    );
+  }
+  const history = await loadBoundedHistory(
+    prisma,
+    input.workspaceId,
+    input.conversationId,
+    input.userMessageId,
+  );
+  const executionLimits = requireAiExecutionLimitsForProviderRun(
+    input.executionLimitBinding,
+    input.providerIdentity,
+  );
+  const prepared = Object.freeze({
+    actorUserId: input.actorUserId,
+    conversationId: input.conversationId,
+    groundedContextId: input.groundedContextId,
+    request: groundedLanguageModelRequest({
+      executionLimits,
+      groundedContext,
+      history,
+      responseFormat: input.responseFormat,
+      userMessage: input.userMessage,
+    }),
+    responseFormat: input.responseFormat,
+    userMessage: input.userMessage,
+    userMessageId: input.userMessageId,
+    workspaceId: input.workspaceId,
+  });
+  preparedGroundedRunRequests.add(prepared);
+  return prepared;
+}
 
 async function failRun(
   prisma: PrismaClient,
@@ -488,7 +610,9 @@ export async function executeGroundedRun(
   dependencies: AiConversationDependencies,
   input: Readonly<{
     actorUserId: string;
+    executionLimitBinding?: AiProviderExecutionLimitBinding;
     groundedContextId: string;
+    preparedRequest?: PreparedGroundedRunRequest;
     responseFormat: LanguageModelResponseFormat;
     runId: string;
     startedAt?: number;
@@ -511,6 +635,22 @@ export async function executeGroundedRun(
     throw new AiConversationNotFoundError(
       'The AI run was not found in this workspace.',
       'run_not_found',
+    );
+  }
+  if (
+    input.preparedRequest &&
+    (!preparedGroundedRunRequests.has(input.preparedRequest) ||
+      input.preparedRequest.actorUserId !== input.actorUserId ||
+      input.preparedRequest.conversationId !== run.conversationId ||
+      input.preparedRequest.groundedContextId !== input.groundedContextId ||
+      input.preparedRequest.responseFormat !== input.responseFormat ||
+      input.preparedRequest.userMessage !== input.userMessage ||
+      input.preparedRequest.userMessageId !== run.userMessageId ||
+      input.preparedRequest.workspaceId !== input.workspaceId)
+  ) {
+    throw new AiConversationError(
+      'The prepared provider request does not match this grounded run.',
+      'prepared_request_mismatch',
     );
   }
   const groundedContext = await loadGroundedContext(
@@ -536,12 +676,41 @@ export async function executeGroundedRun(
         data: { groundedContextId: input.groundedContextId },
       });
     }
-    const history = await loadBoundedHistory(
-      prisma,
-      input.workspaceId,
-      run.conversationId,
-      run.userMessageId,
-    );
+    const identity = {
+      modelKey: run.modelKey,
+      modelVersion: run.modelVersion,
+      providerKey: run.providerKey,
+      role: (run.orchestrationRole ?? AiOrchestrationRole.CANDIDATE) as AiOrchestrationRoleKey,
+      step: run.orchestrationStep ?? 0,
+    } as const;
+    const executionLimits = input.executionLimitBinding
+      ? requireAiExecutionLimitsForProviderRun(input.executionLimitBinding, identity)
+      : undefined;
+    if (
+      input.preparedRequest &&
+      (!executionLimits ||
+        input.preparedRequest.request.executionLimits?.maxOutputTokens !==
+          executionLimits.maxOutputTokens)
+    ) {
+      throw new AiConversationError(
+        'The prepared provider request execution limit is invalid.',
+        'prepared_request_mismatch',
+      );
+    }
+    const request = input.preparedRequest
+      ? input.preparedRequest.request
+      : groundedLanguageModelRequest({
+          ...(executionLimits ? { executionLimits } : {}),
+          groundedContext,
+          history: await loadBoundedHistory(
+            prisma,
+            input.workspaceId,
+            run.conversationId,
+            run.userMessageId,
+          ),
+          responseFormat: input.responseFormat,
+          userMessage: input.userMessage,
+        });
     const attempt = await prisma.aiRun.updateMany({
       where: {
         id: run.id,
@@ -556,16 +725,7 @@ export async function executeGroundedRun(
         'provider_attempt_state_invalid',
       );
     }
-    const response = await generateWithTimeout(provider, {
-      citations: groundedContext.excerpts.map((excerpt) => ({
-        citationId: excerpt.citation.id,
-        text: excerpt.text,
-      })),
-      context: groundedContext.context,
-      history,
-      responseFormat: input.responseFormat,
-      userMessage: input.userMessage,
-    });
+    const response = await generateWithTimeout(provider, request);
     const usage = normalizeLanguageModelUsage(response);
     const estimatedCostUsd = estimateLanguageModelCostUsd(
       provider.providerKey,
@@ -635,6 +795,7 @@ async function executeRun(
   runId: string,
   userMessage: string,
   actionGrounding?: KnowledgeActionGrounding,
+  executionLimitBinding?: AiProviderExecutionLimitBinding,
 ) {
   const startedAt = Date.now();
   try {
@@ -666,6 +827,7 @@ async function executeRun(
     });
     return executeGroundedRun(prisma, dependencies, {
       actorUserId,
+      ...(executionLimitBinding ? { executionLimitBinding } : {}),
       groundedContextId: snapshot.id,
       responseFormat: actionGrounding
         ? KNOWLEDGE_ACTION_DEFINITIONS[actionGrounding.actionType].responseFormat
@@ -691,6 +853,7 @@ async function createRunForMessage(
   actionGrounding?: KnowledgeActionGrounding,
   routingDecisionId?: string,
   resolvedProvider?: LanguageModelProvider,
+  executionLimitBinding?: AiProviderExecutionLimitBinding,
 ) {
   const provider = resolvedProvider ?? dependencies.providers.getCurrent();
   const run = await prisma.aiRun.create({
@@ -715,7 +878,45 @@ async function createRunForMessage(
     run.id,
     content,
     actionGrounding,
+    executionLimitBinding,
   );
+}
+
+async function createRunForPreparedGroundedMessage(
+  prisma: PrismaClient,
+  dependencies: AiConversationDependencies,
+  actorUserId: string,
+  workspaceId: string,
+  conversationId: string,
+  userMessageId: string,
+  content: string,
+  routingDecisionId: string,
+  provider: LanguageModelProvider,
+  groundedContextId: string,
+  executionLimitBinding: AiProviderExecutionLimitBinding,
+) {
+  const run = await prisma.aiRun.create({
+    data: {
+      conversationId,
+      groundedContextId,
+      modelKey: provider.modelKey,
+      modelVersion: provider.modelVersion,
+      providerKey: provider.providerKey,
+      requestedByUserId: actorUserId,
+      routingDecisionId,
+      userMessageId,
+      workspaceId,
+    },
+  });
+  return executeGroundedRun(prisma, dependencies, {
+    actorUserId,
+    executionLimitBinding,
+    groundedContextId,
+    responseFormat: 'grounded_answer',
+    runId: run.id,
+    userMessage: content,
+    workspaceId,
+  });
 }
 
 function knowledgeActionMessage(
@@ -1013,6 +1214,47 @@ async function prepareOrchestratedChatRequest(
   return { groundedContextId: persistedContext.id };
 }
 
+async function prepareFastGroundedChatRequest(
+  prisma: PrismaClient,
+  dependencies: AiConversationDependencies,
+  actorUserId: string,
+  workspaceId: string,
+  conversationId: string,
+  userMessageId: string,
+  content: string,
+  executionLimits: LanguageModelRequest['executionLimits'],
+) {
+  const prepared = await prepareOrchestratedChatRequest(
+    prisma,
+    dependencies,
+    actorUserId,
+    workspaceId,
+    content,
+  );
+  const groundedContext = await loadGroundedContext(
+    prisma,
+    workspaceId,
+    prepared.groundedContextId,
+  );
+  if (!groundedContext) {
+    throw new AiConversationAuthorizationError(
+      'GroundedContext does not belong to the selected workspace.',
+      'grounded_context_forbidden',
+    );
+  }
+  const history = await loadBoundedHistory(prisma, workspaceId, conversationId, userMessageId);
+  return Object.freeze({
+    groundedContextId: prepared.groundedContextId,
+    providerRequest: groundedLanguageModelRequest({
+      executionLimits,
+      groundedContext,
+      history,
+      responseFormat: 'grounded_answer',
+      userMessage: content,
+    }),
+  });
+}
+
 function budgetErrorFromPreflight(
   result: Exclude<AiBudgetPreflightResult, { outcome: 'ALLOWED' }>,
   confirmationThresholdUsd: FixedPrecisionUsd,
@@ -1043,11 +1285,81 @@ function budgetErrorFromPreflight(
   );
 }
 
+function fastMeasurementIdentity(
+  provider: LanguageModelProvider,
+): AiProviderInputTokenMeasurementIdentity {
+  return Object.freeze({
+    modelKey: provider.modelKey,
+    modelVersion: provider.modelVersion,
+    providerKey: provider.providerKey,
+    role: 'CANDIDATE',
+    step: 0,
+  });
+}
+
+async function resolveFastMeasuredExecutionPlan(
+  input: Readonly<{
+    basePlan: AiExecutionCostPlan;
+    measurementPolicy: AiInputTokenMeasurementPolicy;
+    provider: LanguageModelProvider;
+    providerRequest: LanguageModelRequest;
+  }>,
+): Promise<AiExecutionCostPlan> {
+  if (input.measurementPolicy === 'DISABLED') return input.basePlan;
+  const identity = fastMeasurementIdentity(input.provider);
+  let measurement;
+  try {
+    if (!input.provider.measureInputTokens) {
+      measurement = bindAiProviderInputTokenMeasurement(
+        identity,
+        input.provider,
+        unavailableAiProviderInputTokenMeasurement('COUNTING_NOT_SUPPORTED'),
+      );
+    } else if (
+      !input.provider.inputTokenMeasurementAccounting ||
+      input.provider.inputTokenMeasurementAccounting === 'UNRESOLVED'
+    ) {
+      measurement = bindAiProviderInputTokenMeasurement(
+        identity,
+        input.provider,
+        unavailableAiProviderInputTokenMeasurement('PROVIDER_COUNT_ACCOUNTING_UNRESOLVED'),
+      );
+    } else {
+      measurement = await input.provider.measureInputTokens(input.providerRequest, identity, {
+        signal: AbortSignal.timeout(input.provider.timeoutMs),
+      });
+    }
+    const resolved = resolveAiInputTokenBudget({
+      measurement,
+      plannedRun: input.basePlan.runs[0]!,
+      step: 0,
+    });
+    if (resolved.status === 'MEASUREMENT_UNAVAILABLE' && input.measurementPolicy === 'REQUIRED') {
+      throw new AiConversationBudgetError(
+        'A reliable input-token measurement is required before execution.',
+        'input_measurement_required',
+      );
+    }
+    return applyAiResolvedInputBudgetsToExecutionCostPlan({
+      plan: input.basePlan,
+      resolvedInputs: [resolved],
+    }).adjustedPlan;
+  } catch (error) {
+    if (error instanceof AiConversationBudgetError) throw error;
+    throw new AiConversationBudgetError(
+      'The input-token measurement could not be completed safely.',
+      'input_measurement_failed',
+    );
+  }
+}
+
 function assertFastEstimateMatchesProvider(
   result: Extract<AiBudgetPreflightResult, { outcome: 'ALLOWED' }>,
   provider: LanguageModelProvider,
+  authoritativePlan: AiExecutionCostPlan,
 ): void {
   const estimate = result.estimate.runEstimates[0];
+  const authoritativeRun = authoritativePlan.runs[0];
   if (
     result.estimate.mode !== 'FAST' ||
     result.estimate.runEstimates.length !== 1 ||
@@ -1056,6 +1368,9 @@ function assertFastEstimateMatchesProvider(
     estimate.providerKey !== provider.providerKey ||
     estimate.modelKey !== provider.modelKey ||
     estimate.modelVersion !== provider.modelVersion ||
+    !authoritativeRun ||
+    estimate.assumedInputTokens !== authoritativeRun.inputTokens ||
+    estimate.assumedOutputTokens !== authoritativeRun.outputTokens ||
     result.reservation.amountUsd !== result.budgetDecision.proposedReserveUsd ||
     result.reservation.amountUsd !== result.estimate.knownEstimatedCostUsd
   ) {
@@ -1158,6 +1473,7 @@ function createMultiBudgetExecutionContext(
   assignment: MultiAiProviderAssignment,
   plannedTokenBudget: EnabledBudgetConfiguration['plannedTokenBudget'],
   routingDecisionId: string,
+  inputTokenMeasurement: AiInputTokenMeasurementPolicy,
 ): AiBudgetExecutionContext {
   const plan = buildAiExecutionCostPlan(
     multiExecutionPlanInput(mode, assignment, plannedTokenBudget),
@@ -1174,6 +1490,9 @@ function createMultiBudgetExecutionContext(
     );
   }
   const context = Object.freeze({
+    executionPlan: plan,
+    inputTokenMeasurement,
+    pricingEffectiveAt: result.estimate.pricingEffectiveAt,
     reservationId: result.reservation.id,
     reservedAmountUsd: result.reservation.amountUsd,
     routingDecisionId,
@@ -1262,6 +1581,43 @@ async function executeFastChatMessage(
     );
   }
 
+  const basePlan = buildAiExecutionCostPlan({
+    mode: 'FAST',
+    plannedTokenBudget: budgetConfiguration.plannedTokenBudget,
+    providerAssignment: {
+      modelKey: provider.modelKey,
+      modelVersion: provider.modelVersion,
+      providerKey: provider.providerKey,
+    },
+  });
+  const baseRun = basePlan.runs[0]!;
+  const baseExecutionLimitBinding = getAiExecutionLimitsForCostPlanRun(baseRun, 0);
+  const executionLimits = requireAiExecutionLimitsForProviderRun(
+    baseExecutionLimitBinding,
+    fastMeasurementIdentity(provider),
+  );
+  const prepared =
+    budgetConfiguration.inputTokenMeasurement === 'DISABLED'
+      ? undefined
+      : await prepareFastGroundedChatRequest(
+          prisma,
+          dependencies,
+          actorUserId,
+          workspaceId,
+          conversationId,
+          userMessageId,
+          content,
+          executionLimits,
+        );
+  const authoritativePlan = prepared
+    ? await resolveFastMeasuredExecutionPlan({
+        basePlan,
+        measurementPolicy: budgetConfiguration.inputTokenMeasurement,
+        provider,
+        providerRequest: prepared.providerRequest,
+      })
+    : basePlan;
+
   let pricingAt: string;
   try {
     pricingAt = (dependencies.budgetLifecycle?.capturePricingAt?.() ?? new Date()).toISOString();
@@ -1276,15 +1632,7 @@ async function executeFastChatMessage(
     preflight = await (dependencies.budgetLifecycle?.preflight ?? preflightAiBudget)(prisma, {
       actorUserId,
       confirmationThresholdUsd: budgetConfiguration.confirmationThresholdUsd,
-      executionPlan: {
-        mode: 'FAST',
-        plannedTokenBudget: budgetConfiguration.plannedTokenBudget,
-        providerAssignment: {
-          modelKey: provider.modelKey,
-          modelVersion: provider.modelVersion,
-          providerKey: provider.providerKey,
-        },
-      },
+      executionPlan: authoritativePlan,
       pricingAt,
       reservationIdempotencyKey: `fast-chat:${routingDecisionId}`,
       routingDecisionId,
@@ -1301,8 +1649,10 @@ async function executeFastChatMessage(
     throw budgetErrorFromPreflight(preflight, budgetConfiguration.confirmationThresholdUsd);
   }
 
+  let executionLimitBinding: AiProviderExecutionLimitBinding;
   try {
-    assertFastEstimateMatchesProvider(preflight, provider);
+    assertFastEstimateMatchesProvider(preflight, provider, authoritativePlan);
+    executionLimitBinding = getAiExecutionLimitsForCostPlanRun(authoritativePlan.runs[0]!, 0);
   } catch (error) {
     await reconcileFastBudget(
       prisma,
@@ -1317,18 +1667,33 @@ async function executeFastChatMessage(
 
   let run: AiRun;
   try {
-    run = await createRunForMessage(
-      prisma,
-      dependencies,
-      actorUserId,
-      workspaceId,
-      conversationId,
-      userMessageId,
-      content,
-      undefined,
-      routingDecisionId,
-      provider,
-    );
+    run = prepared
+      ? await createRunForPreparedGroundedMessage(
+          prisma,
+          dependencies,
+          actorUserId,
+          workspaceId,
+          conversationId,
+          userMessageId,
+          content,
+          routingDecisionId,
+          provider,
+          prepared.groundedContextId,
+          executionLimitBinding,
+        )
+      : await createRunForMessage(
+          prisma,
+          dependencies,
+          actorUserId,
+          workspaceId,
+          conversationId,
+          userMessageId,
+          content,
+          undefined,
+          routingDecisionId,
+          provider,
+          executionLimitBinding,
+        );
   } catch (error) {
     await reconcileFastBudget(
       prisma,
@@ -1415,6 +1780,7 @@ export async function submitAiChatMessage(
   }
   const {
     AiOrchestrationBudgetStoppedError,
+    AiOrchestrationInputMeasurementStoppedError,
     executeBalancedGroundedRequest,
     executeCriticalGroundedRequest,
     executeDeepGroundedRequest,
@@ -1477,6 +1843,7 @@ export async function submitAiChatMessage(
         assignment,
         budgetConfiguration.plannedTokenBudget,
         routingDecision.id,
+        budgetConfiguration.inputTokenMeasurement,
       );
     } catch (error) {
       await reconcileMultiBudget(
@@ -1557,7 +1924,10 @@ export async function submitAiChatMessage(
         reservationId,
         true,
       );
-      if (error instanceof AiOrchestrationBudgetStoppedError) {
+      if (
+        error instanceof AiOrchestrationBudgetStoppedError ||
+        error instanceof AiOrchestrationInputMeasurementStoppedError
+      ) {
         return { failureCode: error.code, mode, responseRun: null };
       }
       throw error;

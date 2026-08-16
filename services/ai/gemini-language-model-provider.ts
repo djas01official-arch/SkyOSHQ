@@ -6,6 +6,13 @@ import {
   type LanguageModelRequest,
   type LanguageModelResponse,
 } from './language-model-provider';
+import { validateAiProviderExecutionLimits } from './ai-execution-limits';
+import {
+  bindAiProviderInputTokenMeasurement,
+  unavailableAiProviderInputTokenMeasurement,
+  validateAiProviderInputTokenMeasurementIdentity,
+  type AiProviderInputTokenMeasurementIdentity,
+} from './ai-input-token-measurement';
 import {
   groundedAnswerResponseSchema,
   KnowledgeActionResponseError,
@@ -366,6 +373,7 @@ function normalizedProviderError(
 }
 
 export class GeminiLanguageModelProvider implements LanguageModelProvider {
+  readonly inputTokenMeasurementAccounting = 'NO_PROVIDER_CALL' as const;
   readonly providerKey = GEMINI_PROVIDER_KEY;
   readonly modelVersion = GEMINI_MODEL_POLICY_VERSION;
   readonly maxInputCharacters = MAX_INPUT_CHARACTERS;
@@ -405,11 +413,26 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
     }
   }
 
+  async measureInputTokens(
+    request: LanguageModelRequest,
+    identity: AiProviderInputTokenMeasurementIdentity,
+  ) {
+    validateInput(request);
+    validateAiProviderInputTokenMeasurementIdentity(identity, this);
+    return bindAiProviderInputTokenMeasurement(
+      identity,
+      this,
+      unavailableAiProviderInputTokenMeasurement('EXACT_REQUEST_MEASUREMENT_UNAVAILABLE'),
+    );
+  }
+
   async generate(
     request: LanguageModelRequest,
     options: Readonly<{ signal?: AbortSignal }> = {},
   ): Promise<LanguageModelResponse> {
     validateInput(request);
+    if (request.executionLimits) validateAiProviderExecutionLimits(request.executionLimits);
+    const maxOutputTokens = request.executionLimits?.maxOutputTokens ?? MAX_OUTPUT_TOKENS;
     const responseFormat = request.responseFormat ?? 'grounded_answer';
     const actionSchema = knowledgeActionResponseSchema(responseFormat);
     const canonicalSchema = (actionSchema ?? groundedAnswerResponseSchema) as Record<
@@ -421,7 +444,7 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
       unknown
     >;
     const interactionRequest: GeminiInteractionRequest = {
-      generation_config: { max_output_tokens: MAX_OUTPUT_TOKENS },
+      generation_config: { max_output_tokens: maxOutputTokens },
       input: requestInput(request),
       model: this.modelKey,
       response_format: {

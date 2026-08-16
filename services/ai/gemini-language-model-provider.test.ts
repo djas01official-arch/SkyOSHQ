@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  AiInputTokenMeasurementError,
+  type AiProviderInputTokenMeasurementIdentity,
+} from './ai-input-token-measurement';
+import {
   GeminiLanguageModelProvider,
   type GeminiInteractionClient,
   type GeminiInteractionRequest,
@@ -19,6 +23,13 @@ import { LanguageModelProviderError, type LanguageModelRequest } from './languag
 
 const TEST_API_KEY = 'offline-gemini-unit-test-key';
 const MODEL = 'gemini-3.6-flash';
+const measurementIdentity: AiProviderInputTokenMeasurementIdentity = {
+  modelKey: MODEL,
+  modelVersion: 'interactions-json-schema-v1',
+  providerKey: 'gemini',
+  role: 'SYNTHESIZER',
+  step: 6,
+};
 
 const baseRequest: LanguageModelRequest = {
   citations: [{ citationId: 'cite_allowed', text: 'SkyOS uses bounded evidence.' }],
@@ -134,6 +145,37 @@ function hasSchemaKeyword(value: unknown, keyword: string): boolean {
   );
 }
 
+test('reports exact Gemini Interactions measurement as unavailable without a provider call', async () => {
+  const transport = mockClient(() => interaction());
+  const adapter = provider(transport.client);
+  assert.equal(adapter.inputTokenMeasurementAccounting, 'NO_PROVIDER_CALL');
+  const result = await adapter.measureInputTokens!(baseRequest, measurementIdentity);
+
+  assert.deepEqual(result, {
+    identity: measurementIdentity,
+    measurement: {
+      reason: 'EXACT_REQUEST_MEASUREMENT_UNAVAILABLE',
+      status: 'UNAVAILABLE',
+    },
+  });
+  assert.equal(transport.requests.length, 0);
+  assert.equal(transport.options.length, 0);
+});
+
+test('Gemini measurement validates identity before reporting unavailability', async () => {
+  const transport = mockClient(() => interaction());
+  await assert.rejects(
+    provider(transport.client).measureInputTokens!(baseRequest, {
+      ...measurementIdentity,
+      modelVersion: 'generate-content-v1',
+    }),
+    (error: unknown) =>
+      error instanceof AiInputTokenMeasurementError &&
+      error.code === 'input_token_measurement_identity_mismatch',
+  );
+  assert.equal(transport.requests.length, 0);
+});
+
 test('uses one stateless Gemini Interactions request and maps safe usage metadata', async () => {
   const transport = mockClient(() =>
     interaction({ answer: 'Grounded answer.', citationIds: ['cite_allowed', 'cite_fabricated'] }),
@@ -184,6 +226,15 @@ test('uses one stateless Gemini Interactions request and maps safe usage metadat
   assert.equal(result.outputTokens, 20);
   assert.equal(result.reasoningTokens, 10);
   assert.equal(result.totalTokens, 130);
+});
+
+test('maps the provider-neutral output-token limit to Gemini generation_config', async () => {
+  const transport = mockClient(() => interaction());
+  await provider(transport.client).generate({
+    ...baseRequest,
+    executionLimits: { maxOutputTokens: 137 },
+  });
+  assert.equal(transport.requests[0]!.generation_config.max_output_tokens, 137);
 });
 
 test('normalizes only unsupported Gemini transport constraints and keeps canonical validation', async () => {

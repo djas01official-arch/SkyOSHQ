@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  AiInputTokenMeasurementError,
+  type AiProviderInputTokenMeasurementIdentity,
+} from './ai-input-token-measurement';
+import {
   groundedAnswerResponseSchema,
   knowledgeActionResponseSchema,
 } from './knowledge-action-response';
@@ -15,6 +19,13 @@ import {
 const TEST_API_KEY = 'offline-anthropic-unit-test-key';
 const MODEL = 'claude-sonnet-5';
 const LEGACY_MODEL = 'claude-sonnet-4-6';
+const measurementIdentity: AiProviderInputTokenMeasurementIdentity = {
+  modelKey: MODEL,
+  modelVersion: 'messages-json-schema-v1',
+  providerKey: 'anthropic',
+  role: 'VERIFIER',
+  step: 4,
+};
 
 const baseRequest: LanguageModelRequest = {
   citations: [{ citationId: 'cite_allowed', text: 'SkyOS uses bounded evidence.' }],
@@ -224,6 +235,75 @@ async function providerError(
   assert.fail(`Expected ${code}.`);
 }
 
+test('measures the exact prepared Anthropic input through countTokens only', async () => {
+  const transport = fakeFetch(() => jsonResponse({ input_tokens: 432 }));
+  const adapter = provider(transport.fetch);
+  assert.equal(adapter.inputTokenMeasurementAccounting, 'DOCUMENTED_NO_ADDITIONAL_CHARGE');
+  const result = await adapter.measureInputTokens!(baseRequest, measurementIdentity);
+
+  assert.equal(transport.calls.length, 1);
+  const sent = transport.calls[0]!;
+  assert.equal(new URL(sent.url).pathname, '/v1/messages/count_tokens');
+  const body = JSON.parse(await sent.text()) as Record<string, unknown>;
+  assert.equal(body.model, MODEL);
+  assert.equal('max_tokens' in body, false);
+  assert.equal('service_tier' in body, false);
+  assert.equal((body.output_config as { format: { type: string } }).format.type, 'json_schema');
+  const serialized = JSON.stringify(body);
+  assert.ok(serialized.includes('Earlier question'));
+  assert.ok(serialized.includes('Earlier grounded answer'));
+  assert.ok(serialized.includes('SKYOS_UNTRUSTED_KNOWLEDGE_CONTEXT_V1'));
+  assert.ok(serialized.includes(baseRequest.userMessage));
+  assert.deepEqual(result, {
+    identity: measurementIdentity,
+    measurement: { inputTokens: 432, method: 'PROVIDER_COUNT_API', status: 'KNOWN' },
+  });
+});
+
+test('Anthropic measurement rejects malformed counts, identity drift, and count failures safely', async () => {
+  for (const input_tokens of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, null, undefined]) {
+    const transport = fakeFetch(() => jsonResponse({ input_tokens }));
+    await assert.rejects(
+      provider(transport.fetch).measureInputTokens!(baseRequest, measurementIdentity),
+      (error: unknown) =>
+        error instanceof AiInputTokenMeasurementError &&
+        error.code === 'input_token_measurement_invalid',
+    );
+  }
+
+  const mismatch = fakeFetch(() => jsonResponse({ input_tokens: 1 }));
+  await assert.rejects(
+    provider(mismatch.fetch).measureInputTokens!(baseRequest, {
+      ...measurementIdentity,
+      providerKey: 'openai',
+    }),
+    (error: unknown) =>
+      error instanceof AiInputTokenMeasurementError &&
+      error.code === 'input_token_measurement_identity_mismatch',
+  );
+  assert.equal(mismatch.calls.length, 0);
+
+  const failure = fakeFetch(() => apiError(500, 'api_error'));
+  await assert.rejects(
+    provider(failure.fetch).measureInputTokens!(baseRequest, measurementIdentity),
+    (error: unknown) =>
+      error instanceof AiInputTokenMeasurementError &&
+      error.code === 'input_token_measurement_failed',
+  );
+
+  const cancelled = new AbortController();
+  cancelled.abort();
+  const timeout = fakeFetch(() => jsonResponse({ input_tokens: 1 }));
+  await assert.rejects(
+    provider(timeout.fetch).measureInputTokens!(baseRequest, measurementIdentity, {
+      signal: cancelled.signal,
+    }),
+    (error: unknown) =>
+      error instanceof AiInputTokenMeasurementError &&
+      error.code === 'input_token_measurement_timeout',
+  );
+});
+
 test('maps a stateless grounded Messages API request through the official SDK', async () => {
   const transport = fakeFetch(() =>
     jsonResponse(messageBody(), 200, { 'request-id': 'req_anthropic_123' }),
@@ -283,6 +363,16 @@ test('maps a stateless grounded Messages API request through the official SDK', 
   assert.equal(result.totalTokens, 190);
   assert.equal(result.providerRequestId, 'req_anthropic_123');
   assert.equal(result.modelKey, MODEL);
+});
+
+test('maps the provider-neutral output-token limit to max_tokens', async () => {
+  const transport = fakeFetch(() => jsonResponse(messageBody()));
+  await provider(transport.fetch).generate({
+    ...baseRequest,
+    executionLimits: { maxOutputTokens: 137 },
+  });
+  const body = JSON.parse(await transport.calls[0]!.text()) as Record<string, unknown>;
+  assert.equal(body.max_tokens, 137);
 });
 
 test('retains pinned Claude Sonnet 4.6 as an approved provider version', async () => {

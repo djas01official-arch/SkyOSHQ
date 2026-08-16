@@ -9,17 +9,21 @@ import {
 import {
   evaluateAiBudgetContinuation,
   evaluateAiBudgetSettlement,
+  inspectAiBudgetContinuationAccounting,
   type AiBudgetContinuationDecision,
   type AiBudgetRunCostObservation,
   type AiBudgetSettlementDecision,
 } from '../../services/ai/ai-budget-execution-guard';
 import type { AiCostRunEstimate } from '../../services/ai/ai-cost-estimator';
+import type { AiExecutionCostPlan } from '../../services/ai/ai-execution-cost-plan';
+import type { AiInputTokenMeasurementPolicy } from '../../services/ai/ai-budget-runtime-config';
 import {
   getAiOrchestrationPolicy,
   type AiOrchestrationModeKey,
   type AiOrchestrationRoleKey,
 } from '../../services/ai/ai-orchestration-policy';
 import {
+  compareFixedPrecisionUsd,
   isFixedPrecisionUsd,
   type FixedPrecisionUsd,
 } from '../../services/ai/language-model-pricing';
@@ -54,6 +58,9 @@ export type ReconcileAiBudgetReservationInput = Readonly<{
 }>;
 
 export type AiBudgetExecutionContext = Readonly<{
+  executionPlan?: AiExecutionCostPlan;
+  inputTokenMeasurement?: AiInputTokenMeasurementPolicy;
+  pricingEffectiveAt?: string;
   reservationId: string;
   reservedAmountUsd: FixedPrecisionUsd;
   routingDecisionId: string;
@@ -150,6 +157,25 @@ export function validateAiBudgetExecutionPlan(
       'budget_execution_context_invalid',
     );
   }
+  const hasDynamicMeasurementContext =
+    context.executionPlan !== undefined ||
+    context.inputTokenMeasurement !== undefined ||
+    context.pricingEffectiveAt !== undefined;
+  if (
+    hasDynamicMeasurementContext &&
+    (!context.executionPlan ||
+      !context.inputTokenMeasurement ||
+      !['DISABLED', 'WHEN_AVAILABLE', 'REQUIRED'].includes(context.inputTokenMeasurement) ||
+      typeof context.pricingEffectiveAt !== 'string' ||
+      !Number.isFinite(Date.parse(context.pricingEffectiveAt)) ||
+      new Date(context.pricingEffectiveAt).toISOString() !== context.pricingEffectiveAt ||
+      context.executionPlan.mode !== mode)
+  ) {
+    throw new AiBudgetAccountingError(
+      'The dynamic input measurement execution context is invalid.',
+      'budget_execution_context_invalid',
+    );
+  }
   const policy = getAiOrchestrationPolicy(mode);
   if (
     plannedRuns.length !== policy.steps.length ||
@@ -168,6 +194,23 @@ export function validateAiBudgetExecutionPlan(
       );
     }
     assertEstimateMatchesRun(context.runEstimates[step], plannedRun);
+    const executionPlanRun = context.executionPlan?.runs[step];
+    if (
+      context.executionPlan &&
+      (!executionPlanRun ||
+        context.executionPlan.runs.length !== plannedRuns.length ||
+        executionPlanRun.providerKey !== plannedRun.providerKey ||
+        executionPlanRun.modelKey !== plannedRun.modelKey ||
+        executionPlanRun.modelVersion !== plannedRun.modelVersion ||
+        executionPlanRun.role !== plannedRun.role ||
+        executionPlanRun.inputTokens !== context.runEstimates[step]?.assumedInputTokens ||
+        executionPlanRun.outputTokens !== context.runEstimates[step]?.assumedOutputTokens)
+    ) {
+      throw new AiBudgetAccountingError(
+        'The dynamic input measurement plan does not match the preflight estimate.',
+        'budget_execution_plan_mismatch',
+      );
+    }
   }
 }
 
@@ -182,6 +225,7 @@ export async function checkAiBudgetContinuation(
     context: AiBudgetExecutionContext;
     mode: Exclude<AiOrchestrationModeKey, 'FAST'>;
     nextRun: AiBudgetPlannedRun;
+    resolveNextRunEstimate?: (plannedEstimate: AiCostRunEstimate) => Promise<AiCostRunEstimate>;
     workspaceId: string;
   }>,
 ): Promise<AiBudgetContinuationResult> {
@@ -248,9 +292,26 @@ export async function checkAiBudgetContinuation(
   }
   const runs = await loadAccountingRuns(prisma, input.workspaceId, routingDecision.id);
   const observations = Object.freeze(runs.map(observationFromRun));
+  const accounting = inspectAiBudgetContinuationAccounting(observations, reservedAmountUsd);
+  let nextRunEstimate: AiCostRunEstimate = estimate;
+  if (accounting.status === 'READY' && input.resolveNextRunEstimate) {
+    nextRunEstimate = await input.resolveNextRunEstimate(estimate);
+    assertEstimateMatchesRun(nextRunEstimate, input.nextRun);
+    if (
+      nextRunEstimate.assumedInputTokens < estimate.assumedInputTokens ||
+      nextRunEstimate.assumedOutputTokens !== estimate.assumedOutputTokens ||
+      compareFixedPrecisionUsd(nextRunEstimate.estimatedCostUsd, estimate.estimatedCostUsd) < 0
+    ) {
+      throw new AiBudgetAccountingError(
+        'The adjusted AI budget estimate does not preserve the planned run limits.',
+        'budget_execution_plan_mismatch',
+      );
+    }
+  }
+  assertEstimateMatchesRun(nextRunEstimate, input.nextRun);
   const decision = evaluateAiBudgetContinuation({
     completedRuns: observations,
-    nextPlannedRunEstimateUsd: estimate.estimatedCostUsd,
+    nextPlannedRunEstimateUsd: nextRunEstimate.estimatedCostUsd,
     reservedAmountUsd,
   });
   return Object.freeze({ decision, observations });
