@@ -1,5 +1,6 @@
 import {
   AiBudgetConfirmationStatus,
+  AiBudgetExecutionClaimStatus,
   AiBudgetReservationStatus,
   AiRunStatus,
   type AiBudgetExecutionClaim,
@@ -44,6 +45,10 @@ import {
   AiBudgetConfirmationRevalidationError,
   revalidateAiBudgetConfirmation,
 } from './ai-budget-confirmation-revalidation';
+import {
+  approveAndReserveAiBudgetConfirmation,
+  type AiApprovedConfirmationReservationResult,
+} from './ai-budget-confirmation-reservation';
 import {
   beginAiBudgetExecutionClaim,
   createAiBudgetExecutionClaim,
@@ -197,7 +202,7 @@ function buildExecutionPlan(
   });
 }
 
-async function authoritativeState(
+async function authoritativeConfirmation(
   prisma: PrismaClient,
   input: ResumeApprovedAiBudgetExecutionInput,
 ) {
@@ -241,9 +246,18 @@ async function authoritativeState(
       'budget_confirmation_execution_forbidden',
     );
   }
+  return Object.freeze({ confirmation, routingDecision });
+}
+
+async function authoritativeState(
+  prisma: PrismaClient,
+  input: ResumeApprovedAiBudgetExecutionInput,
+  confirmationState?: Awaited<ReturnType<typeof authoritativeConfirmation>>,
+) {
+  const state = confirmationState ?? (await authoritativeConfirmation(prisma, input));
   const reservation = await prisma.aiBudgetReservation.findFirst({
     where: {
-      routingDecisionId: routingDecision.id,
+      routingDecisionId: state.routingDecision.id,
       workspaceId: input.workspaceId,
     },
   });
@@ -259,7 +273,34 @@ async function authoritativeState(
       'budget_confirmation_execution_reservation_not_reserved',
     );
   }
-  return Object.freeze({ confirmation, reservation, routingDecision });
+  return Object.freeze({ ...state, reservation });
+}
+
+/**
+ * Reconstructs the exact current plan from trusted runtime configuration and
+ * claims at most one reservation for an already-approved confirmation. The
+ * browser never supplies a plan, price, provider, or budget input.
+ */
+export async function reserveApprovedAiBudgetConfirmationForExecution(
+  prisma: PrismaClient,
+  dependencies: AiConversationDependencies,
+  input: ResumeApprovedAiBudgetExecutionInput,
+  runtime: ResumeApprovedAiBudgetExecutionRuntime = {},
+): Promise<AiApprovedConfirmationReservationResult> {
+  validateInput(input);
+  const state = await authoritativeConfirmation(prisma, input);
+  const mode = state.routingDecision.resolvedMode as 'FAST' | MultiMode;
+  const budget = requireEnabledBudgetConfiguration(runtime.budgetEnvironment ?? process.env);
+  const base = buildExecutionPlan(dependencies, mode, runtime, budget);
+  return approveAndReserveAiBudgetConfirmation(prisma, {
+    actorUserId: input.actorUserId,
+    confirmationId: input.confirmationId,
+    confirmationThresholdUsd: budget.confirmationThresholdUsd,
+    currentPricingAt: capturePricingAt(dependencies),
+    executionPlan: base.plan,
+    taskHardMaxUsd: budget.taskHardMaxUsd,
+    workspaceId: input.workspaceId,
+  });
 }
 
 async function reconcileAndFinish(
@@ -317,7 +358,17 @@ export async function resumeApprovedAiBudgetExecution(
   runtime: ResumeApprovedAiBudgetExecutionRuntime = {},
 ): Promise<ResumeApprovedAiBudgetExecutionResult> {
   validateInput(input);
-  const state = await authoritativeState(prisma, input);
+  const confirmationState = await authoritativeConfirmation(prisma, input);
+  const existingClaim = await prisma.aiBudgetExecutionClaim.findUnique({
+    where: { confirmationId: confirmationState.confirmation.id },
+  });
+  if (existingClaim?.status === AiBudgetExecutionClaimStatus.STARTED) {
+    return Object.freeze({ claim: existingClaim, outcome: 'EXECUTION_ALREADY_STARTED' as const });
+  }
+  if (existingClaim?.status === AiBudgetExecutionClaimStatus.FINISHED) {
+    return Object.freeze({ claim: existingClaim, outcome: 'EXECUTION_ALREADY_FINISHED' as const });
+  }
+  const state = await authoritativeState(prisma, input, confirmationState);
   const mode = state.routingDecision.resolvedMode as 'FAST' | MultiMode;
   const budget = requireEnabledBudgetConfiguration(runtime.budgetEnvironment ?? process.env);
   const base = buildExecutionPlan(dependencies, mode, runtime, budget);

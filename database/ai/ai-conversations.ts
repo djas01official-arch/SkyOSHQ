@@ -398,6 +398,18 @@ export async function getAiConversation(
               retrievalSnapshot: { include: { citations: true } },
             },
           },
+          routingDecision: {
+            include: {
+              budgetConfirmation: {
+                select: {
+                  executionClaim: { select: { status: true } },
+                  id: true,
+                  proposedReserveUsd: true,
+                  status: true,
+                },
+              },
+            },
+          },
         },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       },

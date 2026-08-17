@@ -7,6 +7,7 @@ import {
 } from '../../../../../database/ai/ai-conversations';
 
 import { retryRunAction, setConversationArchivedAction } from '@/app/ai/actions';
+import { AiBudgetConfirmationCard } from '@/components/ai/ai-budget-confirmation-card';
 import { AiMessageComposer } from '@/components/ai/ai-message-composer';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -60,33 +61,44 @@ export default async function ConversationPage({ params }: ConversationPageProps
           const citations = snapshot?.citations.filter((citation) =>
             message.generatedByRun?.referencedCitationIds.includes(citation.citationId),
           );
+          const confirmation = message.routingDecision?.budgetConfirmation;
           return (
-            <Card
-              className={
-                message.role === 'USER' ? 'ml-auto max-w-2xl bg-accent-soft' : 'mr-auto max-w-3xl'
-              }
-              key={message.id}
-            >
-              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                {message.role === 'USER' ? 'You' : 'SkyOS'}
-              </p>
-              <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-foreground">
-                {message.content}
-              </p>
-              {citations?.length ? (
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {citations.map((citation) => (
-                    <Link
-                      className="rounded-full bg-surface px-2 py-1 text-xs text-accent"
-                      href={`/knowledge/${citation.documentSlug}${citation.attachmentId ? `#attachment-${citation.attachmentId}` : `/history/${citation.documentVersion}`}`}
-                      key={citation.id}
-                    >
-                      {citation.filename ?? `${citation.documentSlug} v${citation.documentVersion}`}
-                    </Link>
-                  ))}
-                </div>
+            <div key={message.id}>
+              <Card
+                className={
+                  message.role === 'USER' ? 'ml-auto max-w-2xl bg-accent-soft' : 'mr-auto max-w-3xl'
+                }
+              >
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  {message.role === 'USER' ? 'You' : 'SkyOS'}
+                </p>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-foreground">
+                  {message.content}
+                </p>
+                {citations?.length ? (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {citations.map((citation) => (
+                      <Link
+                        className="rounded-full bg-surface px-2 py-1 text-xs text-accent"
+                        href={`/knowledge/${citation.documentSlug}${citation.attachmentId ? `#attachment-${citation.attachmentId}` : `/history/${citation.documentVersion}`}`}
+                        key={citation.id}
+                      >
+                        {citation.filename ??
+                          `${citation.documentSlug} v${citation.documentVersion}`}
+                      </Link>
+                    ))}
+                  </div>
+                ) : null}
+              </Card>
+              {confirmation ? (
+                <AiBudgetConfirmationCard
+                  confirmationId={confirmation.id}
+                  executionState={confirmation.executionClaim?.status ?? 'NOT_STARTED'}
+                  proposedReserveUsd={confirmation.proposedReserveUsd.toFixed(12)}
+                  status={confirmation.status}
+                />
               ) : null}
-            </Card>
+            </div>
           );
         })}
         {!conversation.messages.length ? (

@@ -5,9 +5,19 @@ import type { TestContext } from 'node:test';
 import { createAiConversation } from '../../../database/ai/ai-conversations';
 import { createWorkspaceForOrganization } from '../../../database/context/workspace-creation';
 import {
+  AiBudgetConfirmationStatus,
   AiKnowledgeActionType,
   AiMessageRole,
+  AiOrchestrationMode,
   AiRunStatus,
+  AiRoutingConfiguredMode,
+  AiTaskAmbiguity,
+  AiTaskAnalysisSignal,
+  AiTaskComplexity,
+  AiTaskExpectedEffort,
+  AiTaskRisk,
+  AiTaskRoutingReason,
+  AiTaskVerificationNeed,
   MembershipStatus,
   OrganizationRole,
   OrganizationStatus,
@@ -27,6 +37,7 @@ import {
 import {
   assertAppRouterNotFound,
   assertStreamedRedirectTo,
+  findServerActionForm,
   submitServerActionForm,
   type ServerActionCookieJar,
 } from './server-action-form';
@@ -162,6 +173,62 @@ async function readAiPersistence(prisma: PrismaClient) {
   ]);
 }
 
+async function createBudgetConfirmationFixture(
+  prisma: PrismaClient,
+  ownerUserId: string,
+  workspaceId: string,
+  conversationId: string,
+) {
+  const userMessage = await prisma.aiMessage.create({
+    data: {
+      authorUserId: ownerUserId,
+      content: `Confirmation fixture ${randomUUID()}`,
+      conversationId,
+      role: AiMessageRole.USER,
+      workspaceId,
+    },
+  });
+  const routingDecision = await prisma.aiRoutingDecision.create({
+    data: {
+      ambiguity: AiTaskAmbiguity.NOT_ANALYZED,
+      complexity: AiTaskComplexity.NOT_ANALYZED,
+      configuredMode: AiRoutingConfiguredMode.FAST,
+      conversationId,
+      expectedEffort: AiTaskExpectedEffort.NOT_ANALYZED,
+      reason: AiTaskRoutingReason.EXPLICIT_MODE,
+      resolvedMode: AiOrchestrationMode.FAST,
+      risk: AiTaskRisk.NOT_ANALYZED,
+      signals: [AiTaskAnalysisSignal.EXPLICIT_MODE],
+      userMessageId: userMessage.id,
+      verificationNeed: AiTaskVerificationNeed.NOT_ANALYZED,
+      workspaceId,
+    },
+  });
+  return prisma.aiBudgetConfirmation.create({
+    data: {
+      estimateFingerprint: 'a'.repeat(64),
+      executionPlanFingerprint: 'b'.repeat(64),
+      pricingAt: new Date(),
+      proposedReserveUsd: '0.004900000000',
+      requestedByUserId: ownerUserId,
+      routingDecisionId: routingDecision.id,
+      workspaceId,
+    },
+  });
+}
+
+async function readBudgetSideEffects(prisma: PrismaClient) {
+  const [reservations, ledgerEntries, executionClaims, runs, orchestrations] =
+    await prisma.$transaction([
+      prisma.aiBudgetReservation.count(),
+      prisma.aiBudgetLedgerEntry.count(),
+      prisma.aiBudgetExecutionClaim.count(),
+      prisma.aiRun.count(),
+      prisma.aiOrchestration.count(),
+    ]);
+  return { executionClaims, ledgerEntries, orchestrations, reservations, runs };
+}
+
 export async function runAiMvpE2eScenario(
   context: TestContext,
   harness: AiE2eHarness,
@@ -213,6 +280,144 @@ export async function runAiMvpE2eScenario(
     const emptyConversation = await loadHtml(ownerJar, conversationUrl.pathname);
     assert.match(emptyConversation, /Ask the first grounded question/u);
     assert.ok(emptyConversation.includes('data-ai-message-form="message"'));
+
+    const pendingConfirmation = await createBudgetConfirmationFixture(
+      harness.prisma,
+      owner.id,
+      workspaceAId,
+      conversationId,
+    );
+    const pendingConfirmationPage = await loadHtml(ownerJar, conversationUrl.pathname);
+    assert.ok(
+      pendingConfirmationPage.includes(`data-ai-budget-confirmation="${pendingConfirmation.id}"`),
+    );
+    assert.match(pendingConfirmationPage, /Confirmation required/u);
+    assert.match(pendingConfirmationPage, /Estimated maximum/u);
+    assert.match(pendingConfirmationPage, /\$0\.0049/u);
+    assert.ok(pendingConfirmationPage.includes('>Approve<'));
+    assert.ok(pendingConfirmationPage.includes('>Reject<'));
+    assert.equal(
+      pendingConfirmationPage.includes('The AI request could not be completed in this workspace.'),
+      false,
+    );
+
+    const confirmationMember = await harness.createIdentity('ai-confirmation-member');
+    await addWorkspaceMember(
+      harness.prisma,
+      confirmationMember,
+      organizationId,
+      workspaceAId,
+      WorkspaceRole.MEMBER,
+    );
+    const confirmationMemberJar = harness.createJar();
+    harness.assertRedirectsTo(
+      await harness.login(confirmationMemberJar, confirmationMember),
+      '/ai',
+    );
+    const unauthorizedApproval = await submitServerActionForm(
+      confirmationMemberJar,
+      harness.baseUrl,
+      conversationUrl.pathname,
+      pendingConfirmationPage,
+      { markerName: 'data-ai-budget-confirmation-action', markerValue: 'approve' },
+    );
+    assert.equal(unauthorizedApproval.status, 200);
+    assert.equal(
+      (
+        await harness.prisma.aiBudgetConfirmation.findUniqueOrThrow({
+          where: { id: pendingConfirmation.id },
+        })
+      ).status,
+      AiBudgetConfirmationStatus.PENDING,
+    );
+
+    const crossWorkspaceConfirmation = await createBudgetConfirmationFixture(
+      harness.prisma,
+      owner.id,
+      workspaceBId,
+      workspaceBConversation.id,
+    );
+    const crossWorkspaceApproval = await submitServerActionForm(
+      ownerJar,
+      harness.baseUrl,
+      conversationUrl.pathname,
+      pendingConfirmationPage,
+      { markerName: 'data-ai-budget-confirmation-action', markerValue: 'approve' },
+      { confirmationId: crossWorkspaceConfirmation.id },
+    );
+    assert.equal(crossWorkspaceApproval.status, 200);
+    assert.equal(
+      (
+        await harness.prisma.aiBudgetConfirmation.findUniqueOrThrow({
+          where: { id: crossWorkspaceConfirmation.id },
+        })
+      ).status,
+      AiBudgetConfirmationStatus.PENDING,
+    );
+
+    const budgetSideEffectsBeforeApproval = await readBudgetSideEffects(harness.prisma);
+    const approvalResponse = await submitServerActionForm(
+      ownerJar,
+      harness.baseUrl,
+      conversationUrl.pathname,
+      pendingConfirmationPage,
+      { markerName: 'data-ai-budget-confirmation-action', markerValue: 'approve' },
+    );
+    assert.equal(approvalResponse.status, 200);
+    assert.equal(
+      (
+        await harness.prisma.aiBudgetConfirmation.findUniqueOrThrow({
+          where: { id: pendingConfirmation.id },
+        })
+      ).status,
+      AiBudgetConfirmationStatus.APPROVED,
+    );
+    assert.deepEqual(await readBudgetSideEffects(harness.prisma), budgetSideEffectsBeforeApproval);
+    const approvedConfirmationPage = await loadHtml(ownerJar, conversationUrl.pathname);
+    assert.match(approvedConfirmationPage, /This exact budget proposal has been approved/u);
+    assert.equal(approvedConfirmationPage.includes('>Approve<'), false);
+    assert.equal(approvedConfirmationPage.includes('>Reject<'), false);
+    assert.ok(approvedConfirmationPage.includes('>Continue<'));
+    assert.deepEqual(
+      findServerActionForm(approvedConfirmationPage, {
+        markerName: 'data-ai-budget-confirmation-action',
+        markerValue: 'continue',
+      }).filter(([name]) => !name.startsWith('$ACTION_')),
+      [['confirmationId', pendingConfirmation.id]],
+    );
+
+    const rejectedConfirmation = await createBudgetConfirmationFixture(
+      harness.prisma,
+      owner.id,
+      workspaceAId,
+      conversationId,
+    );
+    const rejectedConfirmationPage = await loadHtml(ownerJar, conversationUrl.pathname);
+    const budgetSideEffectsBeforeRejection = await readBudgetSideEffects(harness.prisma);
+    const rejectionResponse = await submitServerActionForm(
+      ownerJar,
+      harness.baseUrl,
+      conversationUrl.pathname,
+      rejectedConfirmationPage,
+      {
+        markerName: 'data-ai-budget-confirmation-action',
+        markerValue: 'reject',
+        requiredFields: { confirmationId: rejectedConfirmation.id },
+      },
+    );
+    assert.equal(rejectionResponse.status, 200);
+    assert.equal(
+      (
+        await harness.prisma.aiBudgetConfirmation.findUniqueOrThrow({
+          where: { id: rejectedConfirmation.id },
+        })
+      ).status,
+      AiBudgetConfirmationStatus.REJECTED,
+    );
+    assert.deepEqual(await readBudgetSideEffects(harness.prisma), budgetSideEffectsBeforeRejection);
+    const rejectedConfirmationReload = await loadHtml(ownerJar, conversationUrl.pathname);
+    assert.match(rejectedConfirmationReload, /This request will not continue/u);
+
     const groundedResponse = await submitServerActionForm(
       ownerJar,
       harness.baseUrl,

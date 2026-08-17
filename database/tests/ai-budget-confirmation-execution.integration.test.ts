@@ -20,10 +20,14 @@ import {
 import { getOrCreateAiBudgetAccount, recordAiBudgetCredit } from '../ai/ai-budget';
 import {
   resumeApprovedAiBudgetExecution,
+  reserveApprovedAiBudgetConfirmationForExecution,
   type ResumeApprovedAiBudgetExecutionRuntime,
 } from '../ai/ai-budget-confirmation-execution';
 import { approveAndReserveAiBudgetConfirmation } from '../ai/ai-budget-confirmation-reservation';
-import { createAiBudgetConfirmationRequest } from '../ai/ai-budget-confirmations';
+import {
+  approveAiBudgetConfirmation,
+  createAiBudgetConfirmationRequest,
+} from '../ai/ai-budget-confirmations';
 import {
   beginAiBudgetExecutionClaim,
   createAiBudgetExecutionClaim,
@@ -181,10 +185,37 @@ async function fixture() {
   return { memberId: member.id, ownerId: owner.id, workspaceId: workspace.id };
 }
 
+type ApprovedRequestOptions = Readonly<{
+  mode?: 'BALANCED' | 'FAST';
+  reserve?: boolean;
+  snapshot?: boolean;
+}>;
+type ApprovedReservedRequestOptions = Omit<ApprovedRequestOptions, 'reserve'> &
+  Readonly<{ reserve?: true }>;
+
+type ApprovedRequest = Readonly<{
+  confirmation: Awaited<ReturnType<typeof createAiBudgetConfirmationRequest>>;
+  content: string;
+  conversation: { id: string };
+  message: { id: string };
+  routing: { id: string };
+}>;
+
+type ApprovedReservedRequest = ApprovedRequest & Readonly<{ reservationId: string }>;
+
+function approvedReservedRequest(
+  f: Awaited<ReturnType<typeof fixture>>,
+  options: ApprovedRequestOptions & Readonly<{ reserve: false }>,
+): Promise<ApprovedRequest>;
+function approvedReservedRequest(
+  f: Awaited<ReturnType<typeof fixture>>,
+  options?: ApprovedReservedRequestOptions,
+): Promise<ApprovedReservedRequest>;
 async function approvedReservedRequest(
   f: Awaited<ReturnType<typeof fixture>>,
-  options: Readonly<{ mode?: 'BALANCED' | 'FAST'; snapshot?: boolean }> = {},
-) {
+  options:
+    ApprovedReservedRequestOptions | (ApprovedRequestOptions & Readonly<{ reserve: false }>) = {},
+): Promise<ApprovedRequest | ApprovedReservedRequest> {
   const mode = options.mode ?? 'FAST';
   const conversation = await prisma.aiConversation.create({
     data: { ownerUserId: f.ownerId, title: randomUUID(), workspaceId: f.workspaceId },
@@ -279,6 +310,14 @@ async function approvedReservedRequest(
     routingDecisionId: routing.id,
     workspaceId: f.workspaceId,
   });
+  if (options.reserve === false) {
+    await approveAiBudgetConfirmation(prisma, {
+      actorUserId: f.ownerId,
+      confirmationId: confirmation.id,
+      workspaceId: f.workspaceId,
+    });
+    return { confirmation, content, conversation, message, routing };
+  }
   const reserved = await approveAndReserveAiBudgetConfirmation(prisma, {
     actorUserId: f.ownerId,
     confirmationId: confirmation.id,
@@ -373,6 +412,87 @@ test('approved RESERVED FAST confirmation resumes once from its exact route snap
       .status,
     AiBudgetReservationStatus.SETTLED,
   );
+  const repeated = await resumeApprovedAiBudgetExecution(
+    prisma,
+    dependencies(() => generated++),
+    {
+      actorUserId: f.ownerId,
+      confirmationId: request.confirmation.id,
+      workspaceId: f.workspaceId,
+    },
+    runtime(),
+  );
+  assert.equal(repeated.outcome, 'EXECUTION_ALREADY_FINISHED');
+  assert.equal(generated, 1);
+});
+
+test('the server-side reserve bridge reconstructs an approved request once before resuming it', async () => {
+  const f = await fixture();
+  const request = await approvedReservedRequest(f, { reserve: false });
+  let generated = 0;
+  const deps = dependencies(() => generated++);
+  const input = {
+    actorUserId: f.ownerId,
+    confirmationId: request.confirmation.id,
+    workspaceId: f.workspaceId,
+  };
+  const first = await reserveApprovedAiBudgetConfirmationForExecution(
+    prisma,
+    deps,
+    input,
+    runtime(),
+  );
+  const second = await reserveApprovedAiBudgetConfirmationForExecution(
+    prisma,
+    deps,
+    input,
+    runtime(),
+  );
+  assert.equal(first.outcome, 'RESERVED');
+  assert.equal(second.outcome, 'RESERVED');
+  if (first.outcome !== 'RESERVED' || second.outcome !== 'RESERVED') {
+    throw new Error('Expected the approved confirmation to reserve exactly once.');
+  }
+  assert.equal(first.reservationId, second.reservationId);
+  assert.equal(await prisma.aiBudgetReservation.count(), 1);
+  const resumed = await resumeApprovedAiBudgetExecution(prisma, deps, input, runtime());
+  assert.equal(resumed.outcome, 'EXECUTED');
+  assert.equal(generated, 1);
+  assert.equal(await prisma.aiMessage.count({ where: { role: AiMessageRole.USER } }), 1);
+  assert.equal(await prisma.aiRoutingDecision.count(), 1);
+});
+
+test('the server-side reserve bridge rejects another user or workspace before reservation', async () => {
+  const f = await fixture();
+  const request = await approvedReservedRequest(f, { reserve: false });
+  const deps = dependencies(() => undefined);
+  await assert.rejects(
+    reserveApprovedAiBudgetConfirmationForExecution(
+      prisma,
+      deps,
+      {
+        actorUserId: f.memberId,
+        confirmationId: request.confirmation.id,
+        workspaceId: f.workspaceId,
+      },
+      runtime(),
+    ),
+  );
+  await assert.rejects(
+    reserveApprovedAiBudgetConfirmationForExecution(
+      prisma,
+      deps,
+      {
+        actorUserId: f.ownerId,
+        confirmationId: request.confirmation.id,
+        workspaceId: randomUUID(),
+      },
+      runtime(),
+    ),
+  );
+  assert.equal(await prisma.aiBudgetReservation.count(), 0);
+  assert.equal(await prisma.aiBudgetExecutionClaim.count(), 0);
+  assert.equal(await prisma.aiRun.count(), 0);
 });
 
 test('a missing FAST route snapshot fails closed, releases zero spend, and finishes the claim', async () => {
