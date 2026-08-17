@@ -252,6 +252,18 @@ enum AiBudgetReservationStatus {
   RELEASED
 }
 
+enum AiBudgetConfirmationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AiBudgetExecutionClaimStatus {
+  READY
+  STARTED
+  FINISHED
+}
+
 enum TaskStatus {
   TODO
   IN_PROGRESS
@@ -265,39 +277,42 @@ enum TaskPriority {
 }
 
 model User {
-  id                        String                     @id @default(uuid()) @db.Uuid
-  name                      String?
-  email                     String?                    @unique
-  emailVerified             DateTime?                  @db.Timestamptz(6)
-  image                     String?
-  passwordHash              String?                    @db.Text
-  identitySubject           String?                    @unique
-  displayName               String?
-  status                    UserStatus                 @default(ACTIVE)
-  deletedAt                 DateTime?                  @db.Timestamptz(6)
-  createdAt                 DateTime                   @default(now()) @db.Timestamptz(6)
-  updatedAt                 DateTime                   @updatedAt @db.Timestamptz(6)
-  createdOrganizations      Organization[]             @relation("OrganizationCreator")
-  createdWorkspaces         Workspace[]                @relation("WorkspaceCreator")
-  accounts                  Account[]
-  auditEvents               AuditEvent[]               @relation("AuditActor")
-  knowledgeDocuments        KnowledgeDocument[]        @relation("KnowledgeDocumentAuthor")
-  knowledgeDocumentVersions KnowledgeDocumentVersion[] @relation("KnowledgeDocumentVersionAuthor")
-  knowledgeAttachments      KnowledgeAttachment[]      @relation("KnowledgeAttachmentUploader")
-  documentProcessingJobs    DocumentProcessingJob[]    @relation("DocumentProcessingJobRequester")
-  knowledgeChunkingJobs     KnowledgeChunkingJob[]     @relation("KnowledgeChunkingJobRequester")
-  backgroundJobs            BackgroundJob[]            @relation("BackgroundJobRequester")
-  knowledgeEmbeddingJobs    KnowledgeEmbeddingJob[]    @relation("KnowledgeEmbeddingJobRequester")
-  aiConversations           AiConversation[]           @relation("AiConversationOwner")
-  aiMessages                AiMessage[]                @relation("AiMessageAuthor")
-  aiRuns                    AiRun[]                    @relation("AiRunRequester")
-  aiGroundedContexts        AiRetrievalSnapshot[]      @relation("AiGroundedContextCreator")
-  aiOrchestrations          AiOrchestration[]          @relation("AiOrchestrationCreator")
-  createdTasks              Task[]                     @relation("TaskCreator")
-  assignedTasks             Task[]                     @relation("TaskAssignee")
-  organizationMemberships   OrganizationMembership[]
-  sessions                  Session[]
-  workspaceMemberships      WorkspaceMembership[]
+  id                             String                     @id @default(uuid()) @db.Uuid
+  name                           String?
+  email                          String?                    @unique
+  emailVerified                  DateTime?                  @db.Timestamptz(6)
+  image                          String?
+  passwordHash                   String?                    @db.Text
+  identitySubject                String?                    @unique
+  displayName                    String?
+  status                         UserStatus                 @default(ACTIVE)
+  deletedAt                      DateTime?                  @db.Timestamptz(6)
+  createdAt                      DateTime                   @default(now()) @db.Timestamptz(6)
+  updatedAt                      DateTime                   @updatedAt @db.Timestamptz(6)
+  createdOrganizations           Organization[]             @relation("OrganizationCreator")
+  createdWorkspaces              Workspace[]                @relation("WorkspaceCreator")
+  accounts                       Account[]
+  auditEvents                    AuditEvent[]               @relation("AuditActor")
+  knowledgeDocuments             KnowledgeDocument[]        @relation("KnowledgeDocumentAuthor")
+  knowledgeDocumentVersions      KnowledgeDocumentVersion[] @relation("KnowledgeDocumentVersionAuthor")
+  knowledgeAttachments           KnowledgeAttachment[]      @relation("KnowledgeAttachmentUploader")
+  documentProcessingJobs         DocumentProcessingJob[]    @relation("DocumentProcessingJobRequester")
+  knowledgeChunkingJobs          KnowledgeChunkingJob[]     @relation("KnowledgeChunkingJobRequester")
+  backgroundJobs                 BackgroundJob[]            @relation("BackgroundJobRequester")
+  knowledgeEmbeddingJobs         KnowledgeEmbeddingJob[]    @relation("KnowledgeEmbeddingJobRequester")
+  aiConversations                AiConversation[]           @relation("AiConversationOwner")
+  aiMessages                     AiMessage[]                @relation("AiMessageAuthor")
+  aiRuns                         AiRun[]                    @relation("AiRunRequester")
+  aiGroundedContexts             AiRetrievalSnapshot[]      @relation("AiGroundedContextCreator")
+  aiOrchestrations               AiOrchestration[]          @relation("AiOrchestrationCreator")
+  aiBudgetConfirmationsRequested AiBudgetConfirmation[]     @relation("AiBudgetConfirmationRequester")
+  aiBudgetConfirmationsDecided   AiBudgetConfirmation[]     @relation("AiBudgetConfirmationDecider")
+  aiBudgetExecutionClaims        AiBudgetExecutionClaim[]   @relation("AiBudgetExecutionClaimant")
+  createdTasks                   Task[]                     @relation("TaskCreator")
+  assignedTasks                  Task[]                     @relation("TaskAssignee")
+  organizationMemberships        OrganizationMembership[]
+  sessions                       Session[]
+  workspaceMemberships           WorkspaceMembership[]
 
   @@index([status])
   @@index([deletedAt])
@@ -438,6 +453,8 @@ model Workspace {
   aiBudgetAccount        AiBudgetAccount?
   aiBudgetLedgerEntries  AiBudgetLedgerEntry[]
   aiBudgetReservations   AiBudgetReservation[]
+  aiBudgetConfirmations  AiBudgetConfirmation[]
+  aiBudgetExecutionClaims AiBudgetExecutionClaim[]
   tasks                  Task[]
 
   @@unique([organizationId, slug], map: "workspaces_active_organization_slug_key", where: raw("((status = 'ACTIVE'::\"WorkspaceStatus\") AND (\"deletedAt\" IS NULL))"))
@@ -859,25 +876,28 @@ model AiMessage {
 }
 
 model AiRoutingDecision {
-  id                String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  workspaceId       String                  @db.Uuid
-  conversationId    String                  @db.Uuid
-  userMessageId     String                  @unique @db.Uuid
-  configuredMode    AiRoutingConfiguredMode
-  resolvedMode      AiOrchestrationMode
-  reason            AiTaskRoutingReason
-  signals           AiTaskAnalysisSignal[]
-  complexity        AiTaskComplexity
-  risk              AiTaskRisk
-  ambiguity         AiTaskAmbiguity
-  verificationNeed  AiTaskVerificationNeed
-  expectedEffort    AiTaskExpectedEffort
-  createdAt         DateTime                @default(now()) @db.Timestamptz(6)
-  workspace         Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  conversation      AiConversation          @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_routing_decisions_conversation_workspace_fkey")
-  userMessage       AiMessage               @relation(fields: [userMessageId, conversationId, workspaceId], references: [id, conversationId, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_routing_decisions_message_conversation_workspace_fkey")
-  budgetReservation AiBudgetReservation?
-  runs              AiRun[]                 @relation("AiRunRoutingDecision")
+  id                 String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId        String                  @db.Uuid
+  conversationId     String                  @db.Uuid
+  userMessageId      String                  @unique @db.Uuid
+  configuredMode     AiRoutingConfiguredMode
+  resolvedMode       AiOrchestrationMode
+  reason             AiTaskRoutingReason
+  signals            AiTaskAnalysisSignal[]
+  complexity         AiTaskComplexity
+  risk               AiTaskRisk
+  ambiguity          AiTaskAmbiguity
+  verificationNeed   AiTaskVerificationNeed
+  expectedEffort     AiTaskExpectedEffort
+  createdAt          DateTime                @default(now()) @db.Timestamptz(6)
+  workspace          Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  conversation       AiConversation          @relation(fields: [conversationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_routing_decisions_conversation_workspace_fkey")
+  userMessage        AiMessage               @relation(fields: [userMessageId, conversationId, workspaceId], references: [id, conversationId, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_routing_decisions_message_conversation_workspace_fkey")
+  budgetReservation  AiBudgetReservation?
+  budgetConfirmation AiBudgetConfirmation?
+  executionClaim     AiBudgetExecutionClaim?
+  groundedContext    AiRetrievalSnapshot?
+  runs               AiRun[]                 @relation("AiRunRoutingDecision")
 
   @@unique([id, workspaceId])
   @@unique([id, userMessageId, conversationId, workspaceId], map: "ai_routing_decisions_run_scope_key")
@@ -886,6 +906,59 @@ model AiRoutingDecision {
   @@index([conversationId, createdAt])
   @@index([resolvedMode, createdAt])
   @@map("ai_routing_decisions")
+}
+
+model AiBudgetConfirmation {
+  id                       String                     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId              String                     @db.Uuid
+  routingDecisionId        String                     @unique @db.Uuid
+  requestedByUserId        String                     @db.Uuid
+  status                   AiBudgetConfirmationStatus @default(PENDING)
+  proposedReserveUsd       Decimal                    @db.Decimal(65, 12)
+  pricingAt                DateTime                   @db.Timestamptz(6)
+  executionPlanFingerprint String                     @db.VarChar(64)
+  estimateFingerprint      String                     @db.VarChar(64)
+  requestedAt              DateTime                   @default(now()) @db.Timestamptz(6)
+  decidedAt                DateTime?                  @db.Timestamptz(6)
+  decidedByUserId          String?                    @db.Uuid
+  workspace                Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  routingDecision          AiRoutingDecision          @relation(fields: [routingDecisionId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_budget_confirmations_routing_decision_workspace_fkey")
+  requestedBy              User                       @relation("AiBudgetConfirmationRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "ai_budget_confirmations_requested_by_user_fkey")
+  decidedBy                User?                      @relation("AiBudgetConfirmationDecider", fields: [decidedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "ai_budget_confirmations_decided_by_user_fkey")
+  executionClaim           AiBudgetExecutionClaim?
+
+  @@unique([id, workspaceId])
+  @@unique([routingDecisionId, workspaceId], map: "ai_budget_confirmation_routing_scope_key")
+  @@index([workspaceId, status, requestedAt])
+  @@index([requestedByUserId, requestedAt])
+  @@index([decidedByUserId])
+  @@map("ai_budget_confirmations")
+}
+
+model AiBudgetExecutionClaim {
+  id                String                       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId       String                       @db.Uuid
+  confirmationId    String                       @unique @db.Uuid
+  routingDecisionId String                       @unique @db.Uuid
+  reservationId     String                       @unique @db.Uuid
+  claimedByUserId   String                       @db.Uuid
+  status            AiBudgetExecutionClaimStatus @default(READY)
+  createdAt         DateTime                     @default(now()) @db.Timestamptz(6)
+  startedAt         DateTime?                    @db.Timestamptz(6)
+  finishedAt        DateTime?                    @db.Timestamptz(6)
+  workspace         Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  confirmation      AiBudgetConfirmation         @relation(fields: [confirmationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_budget_execution_claims_confirmation_workspace_fkey")
+  routingDecision   AiRoutingDecision            @relation(fields: [routingDecisionId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_budget_execution_claims_routing_workspace_fkey")
+  reservation       AiBudgetReservation          @relation(fields: [reservationId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_budget_execution_claims_reservation_workspace_fkey")
+  claimedBy         User                         @relation("AiBudgetExecutionClaimant", fields: [claimedByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "ai_budget_execution_claims_claimed_by_user_fkey")
+
+  @@unique([id, workspaceId])
+  @@unique([confirmationId, workspaceId], map: "ai_budget_execution_claim_confirmation_scope_key")
+  @@unique([routingDecisionId, workspaceId], map: "ai_budget_execution_claim_routing_scope_key")
+  @@unique([reservationId, workspaceId], map: "ai_budget_execution_claim_reservation_scope_key")
+  @@index([workspaceId, status, createdAt])
+  @@index([claimedByUserId, createdAt])
+  @@map("ai_budget_execution_claims")
 }
 
 model AiBudgetAccount {
@@ -936,8 +1009,10 @@ model AiBudgetReservation {
   workspace             Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   routingDecision       AiRoutingDecision?        @relation(fields: [routingDecisionId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_budget_reservations_routing_decision_workspace_fkey")
   settlementLedgerEntry AiBudgetLedgerEntry?      @relation("AiBudgetSettlementLedgerEntry")
+  executionClaim        AiBudgetExecutionClaim?
 
   @@unique([id, accountId, workspaceId])
+  @@unique([id, workspaceId], map: "ai_budget_reservation_id_workspace_key")
   @@unique([accountId, idempotencyKey])
   @@unique([routingDecisionId, workspaceId], map: "ai_budget_reservation_routing_scope_key")
   @@index([workspaceId, status, createdAt])
@@ -1007,6 +1082,7 @@ model AiRun {
 model AiRetrievalSnapshot {
   id                         String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   runId                      String?                     @unique @db.Uuid
+  routingDecisionId          String?                     @unique @db.Uuid
   workspaceId                String                      @db.Uuid
   createdByUserId            String                      @db.Uuid
   sourceType                 AiGroundedContextSourceType
@@ -1020,6 +1096,7 @@ model AiRetrievalSnapshot {
   characterCount             Int
   createdAt                  DateTime                    @default(now()) @db.Timestamptz(6)
   run                        AiRun?                      @relation(fields: [runId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_retrieval_snapshots_run_workspace_fkey")
+  routingDecision            AiRoutingDecision?          @relation(fields: [routingDecisionId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_retrieval_snapshots_routing_decision_workspace_fkey")
   workspace                  Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   createdBy                  User                        @relation("AiGroundedContextCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   knowledgeDocumentVersion   KnowledgeDocumentVersion?   @relation("AiGroundedContextKnowledgeDocumentVersion", fields: [knowledgeDocumentVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
@@ -1028,6 +1105,7 @@ model AiRetrievalSnapshot {
   citations                  AiRunCitation[]
 
   @@unique([runId, workspaceId])
+  @@unique([routingDecisionId, workspaceId], map: "ai_retrieval_snapshots_routing_workspace_key")
   @@index([workspaceId, createdAt])
   @@index([createdByUserId, createdAt])
   @@index([knowledgeDocumentVersionId, createdAt])

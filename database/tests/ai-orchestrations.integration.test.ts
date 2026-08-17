@@ -7,6 +7,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 
 import {
   AiGroundedContextSourceType,
+  AiBudgetConfirmationStatus,
   AiBudgetReservationStatus,
   AiKnowledgeActionType,
   AiMessageRole,
@@ -58,7 +59,11 @@ import {
   getAiOrchestrationAggregate,
   startAiOrchestration,
 } from '../ai/ai-orchestrations';
-import { createGroundedContext, persistGroundedContext } from '../ai/grounded-context';
+import {
+  createGroundedContext,
+  getAiRetrievalSnapshotForRoutingDecision,
+  persistGroundedContext,
+} from '../ai/grounded-context';
 import { retrieveKnowledgeDocumentVersionContext } from '../ai/knowledge-retrieval';
 import { getAiRoutingDecision } from '../ai/ai-routing-decisions';
 import { preflightAiBudget } from '../ai/ai-budget-preflight';
@@ -92,6 +97,7 @@ import {
   routeAiTaskRequest,
 } from '../../services/ai/ai-task-analyzer';
 import { estimateAiExecutionCost } from '../../services/ai/ai-cost-estimator';
+import { fingerprintAiBudgetProposal } from '../../services/ai/ai-budget-proposal-fingerprint';
 import {
   estimateLanguageModelCostUsd,
   sumLanguageModelCostUsd,
@@ -119,7 +125,7 @@ const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: test
 
 async function reset(): Promise<void> {
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE "ai_run_citations", "ai_routing_decisions", "ai_orchestrations", "ai_retrieval_snapshots", "ai_messages", "ai_runs", "ai_conversations", "knowledge_document_versions", "knowledge_documents", "workspace_memberships", "organization_memberships", "workspaces", "organizations", "users" CASCADE;',
+    'TRUNCATE TABLE "ai_budget_confirmations", "ai_run_citations", "ai_routing_decisions", "ai_orchestrations", "ai_retrieval_snapshots", "ai_messages", "ai_runs", "ai_conversations", "knowledge_document_versions", "knowledge_documents", "workspace_memberships", "organization_memberships", "workspaces", "organizations", "users" CASCADE;',
   );
 }
 
@@ -552,6 +558,24 @@ async function assertAutomaticRoutingDecision(content: string) {
     expected.analysis.routingInput,
   );
   return decision;
+}
+
+async function assertRouteBoundGroundedContext(
+  f: Awaited<ReturnType<typeof fixture>>,
+  routingDecisionId: string,
+) {
+  const snapshot = await prisma.aiRetrievalSnapshot.findUniqueOrThrow({
+    where: { routingDecisionId },
+  });
+  const loaded = await getAiRetrievalSnapshotForRoutingDecision(prisma, {
+    actorUserId: f.ownerId,
+    routingDecisionId,
+    workspaceId: f.workspaceId,
+  });
+  assert.equal(snapshot.id, loaded.id);
+  assert.equal(snapshot.routingDecisionId, routingDecisionId);
+  assert.equal(snapshot.workspaceId, f.workspaceId);
+  return snapshot;
 }
 
 async function orchestration(
@@ -2150,6 +2174,8 @@ test('explicit BALANCED Chat returns only the successful synthesizer response', 
     });
     assert.equal(linkedRuns.length, 3);
     assert.ok(linkedRuns.every(({ providerAttempted }) => providerAttempted === true));
+    const snapshot = await assertRouteBoundGroundedContext(f, decision.id);
+    assert.equal(snapshot.runId, null);
   } finally {
     if (previousMode === undefined) delete process.env.AI_CHAT_MODE;
     else process.env.AI_CHAT_MODE = previousMode;
@@ -2293,6 +2319,8 @@ test('DEEP Chat returns only its grounded synthesizer and excludes intermediates
   const decision = await assertExplicitRoutingDecision('What is the approved control?', 'DEEP');
   assert.ok(orchestration.runs.every(({ routingDecisionId }) => routingDecisionId === decision.id));
   assert.ok(orchestration.runs.every(({ providerAttempted }) => providerAttempted === true));
+  const deepSnapshot = await assertRouteBoundGroundedContext(f, decision.id);
+  assert.equal(deepSnapshot.id, orchestration.groundedContextId);
 
   let followUpRequest: LanguageModelRequest | undefined;
   const followUp = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
@@ -2478,6 +2506,8 @@ test('CRITICAL Chat returns only its grounded synthesizer and excludes all inter
   const decision = await assertExplicitRoutingDecision('What is the approved control?', 'CRITICAL');
   assert.ok(orchestration.runs.every(({ routingDecisionId }) => routingDecisionId === decision.id));
   assert.ok(orchestration.runs.every(({ providerAttempted }) => providerAttempted === true));
+  const criticalSnapshot = await assertRouteBoundGroundedContext(f, decision.id);
+  assert.equal(criticalSnapshot.id, orchestration.groundedContextId);
 
   let followUpRequest: LanguageModelRequest | undefined;
   const followUp = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
@@ -2635,6 +2665,8 @@ test('AUTO routes a moderate request to BALANCED and exposes only its synthesize
     'Please deliver:\n- Update the dashboard title\n- Refresh the empty-state copy',
   );
   assert.equal(decision.resolvedMode, result.mode);
+  const balancedSnapshot = await assertRouteBoundGroundedContext(f, decision.id);
+  assert.equal(balancedSnapshot.id, result.responseRun?.groundedContextId);
   const historical = await getAiRoutingDecision(
     prisma,
     f.ownerId,
@@ -2716,6 +2748,8 @@ test('AUTO routes a complex verified request to DEEP with grounded citations and
     'Verify and prove that the approved control is supported by the source.',
   );
   assert.equal(decision.resolvedMode, result.mode);
+  const deepSnapshot = await assertRouteBoundGroundedContext(f, decision.id);
+  assert.equal(deepSnapshot.id, orchestration.groundedContextId);
 
   let followUpRequest: LanguageModelRequest | undefined;
   const followUp = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
@@ -2902,6 +2936,10 @@ test('Knowledge Actions remain single-provider and outside Chat budget enforceme
   assert.equal(result.run.knowledgeActionType, AiKnowledgeActionType.SUMMARIZE);
   assert.equal(result.run.routingDecisionId, null);
   assert.equal(result.run.providerAttempted, true);
+  const actionSnapshot = await prisma.aiRetrievalSnapshot.findUniqueOrThrow({
+    where: { runId: result.run.id },
+  });
+  assert.equal(actionSnapshot.routingDecisionId, null);
   assert.equal(calls, 1);
   assert.equal(await prisma.aiRoutingDecision.count(), 0);
   assert.equal(await prisma.aiBudgetReservation.count(), 0);
@@ -3651,6 +3689,103 @@ test('multi-model malformed config, rejection, and confirmation stop before any 
     assert.equal(await prisma.aiRun.count(), 0);
     assert.equal(await prisma.aiOrchestration.count(), 0);
     assert.equal(await prisma.aiBudgetReservation.count(), 0);
+  }
+});
+
+test('explicit and AUTO-resolved multi-model confirmation requests persist the exact pending proposal', async () => {
+  for (const scenario of [
+    { content: 'Explicit BALANCED confirmation.', expectedMode: 'BALANCED', mode: 'BALANCED' },
+    { content: 'Explicit DEEP confirmation.', expectedMode: 'DEEP', mode: 'DEEP' },
+    { content: 'Explicit CRITICAL confirmation.', expectedMode: 'CRITICAL', mode: 'CRITICAL' },
+    { content: 'Compare alternatives for confirmation.', expectedMode: 'BALANCED', mode: 'AUTO' },
+    { content: 'Perform a deep analysis for confirmation.', expectedMode: 'DEEP', mode: 'AUTO' },
+    {
+      content: 'Critical infrastructure emergency confirmation.',
+      expectedMode: 'CRITICAL',
+      mode: 'AUTO',
+    },
+  ] as const) {
+    await reset();
+    const f = await fixture();
+    await fundAiBudget(f.ownerId, f.workspaceId);
+    let generationCalls = 0;
+    let confirmationPlan: AiExecutionCostPlan | undefined;
+    let confirmationError: AiConversationBudgetError | undefined;
+    const registry = new LanguageModelProviderRegistry(
+      model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', {
+        onRequest: () => generationCalls++,
+      }),
+      [
+        model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', {
+          onRequest: () => generationCalls++,
+        }),
+        model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', {
+          onRequest: () => generationCalls++,
+        }),
+      ],
+    );
+    await assert.rejects(
+      submitAiChatMessage(
+        prisma,
+        dependencies(registry, undefined, {
+          capturePricingAt: () => new Date('2026-08-16T12:00:00.000Z'),
+          preflight: async (client, input) => {
+            const outcome = await preflightAiBudget(client, input);
+            if (outcome.outcome === 'CONFIRMATION_REQUIRED') {
+              confirmationPlan = outcome.executionPlan;
+            }
+            return outcome;
+          },
+        }),
+        f.ownerId,
+        f.workspaceId,
+        f.conversationId,
+        scenario.content,
+        {
+          budgetEnvironment: budgetRuntimeEnvironment({
+            AI_BUDGET_CONFIRMATION_THRESHOLD_USD: '0.000000000000',
+          }),
+          ...multiModeRuntimeConfiguration(scenario.expectedMode),
+          mode: scenario.mode,
+        },
+      ),
+      (candidate: unknown) => {
+        if (!(candidate instanceof AiConversationBudgetError)) return false;
+        if (candidate.code !== 'budget_confirmation_required' || !candidate.confirmationId) {
+          return false;
+        }
+        confirmationError = candidate;
+        return true;
+      },
+    );
+    assert.ok(confirmationError);
+    const confirmationId = confirmationError.confirmationId;
+    assert.ok(confirmationId);
+    const routingDecision = await routingDecisionForMessage(scenario.content);
+    assert.equal(routingDecision.resolvedMode, scenario.expectedMode);
+    assert.equal(confirmationError.routingDecisionId, routingDecision.id);
+    const confirmation = await prisma.aiBudgetConfirmation.findUniqueOrThrow({
+      where: { id: confirmationId },
+    });
+    assert.equal(confirmation.status, AiBudgetConfirmationStatus.PENDING);
+    assert.equal(confirmation.routingDecisionId, routingDecision.id);
+    assert.equal(confirmation.requestedByUserId, f.ownerId);
+    assert.equal(confirmation.proposedReserveUsd.toFixed(12), confirmationError.proposedReserveUsd);
+    assert.equal(confirmation.pricingAt.toISOString(), '2026-08-16T12:00:00.000Z');
+    assert.ok(confirmationError.estimate);
+    const fingerprints = fingerprintAiBudgetProposal({
+      estimate: confirmationError.estimate,
+      executionPlan: confirmationPlan!,
+    });
+    assert.equal(confirmation.executionPlanFingerprint, fingerprints.executionPlanFingerprint);
+    assert.equal(confirmation.estimateFingerprint, fingerprints.estimateFingerprint);
+    assert.equal(confirmationPlan?.mode, scenario.expectedMode);
+    assert.equal(generationCalls, 0);
+    assert.equal(await prisma.aiBudgetConfirmation.count(), 1);
+    assert.equal(await prisma.aiBudgetReservation.count(), 0);
+    assert.equal(await prisma.aiBudgetLedgerEntry.count({ where: { type: 'DEBIT' } }), 0);
+    assert.equal(await prisma.aiRun.count(), 0);
+    assert.equal(await prisma.aiOrchestration.count(), 0);
   }
 });
 

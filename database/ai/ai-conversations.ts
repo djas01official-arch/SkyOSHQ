@@ -9,6 +9,7 @@ import {
   type PrismaClient,
 } from '../generated/client/client';
 import {
+  getAiRetrievalSnapshotForRoutingDecision,
   createGroundedContext,
   loadGroundedContext,
   persistGroundedContext,
@@ -86,6 +87,7 @@ import {
   type CreateAiRoutingDecisionInput,
 } from './ai-routing-decisions';
 import { preflightAiBudget, type AiBudgetPreflightResult } from './ai-budget-preflight';
+import { createAiBudgetConfirmationRequest } from './ai-budget-confirmations';
 import {
   reconcileAiBudgetReservation,
   validateAiBudgetExecutionPlan,
@@ -142,6 +144,7 @@ type KnowledgeActionGrounding = Readonly<{
 export type AiConversationDependencies = Readonly<{
   budgetLifecycle?: Readonly<{
     capturePricingAt?: () => Date;
+    createConfirmation?: typeof createAiBudgetConfirmationRequest;
     preflight?: typeof preflightAiBudget;
     reconcile?: typeof reconcileAiBudgetReservation;
   }>;
@@ -175,26 +178,32 @@ export class AiConversationNotFoundError extends AiConversationError {}
 export class AiConversationValidationError extends AiConversationError {}
 export class AiConversationRateLimitError extends AiConversationError {}
 export class AiConversationBudgetError extends AiConversationError {
+  readonly confirmationId: string | null;
   readonly confirmationThresholdUsd: FixedPrecisionUsd | null;
   readonly estimate: AiCostEstimate | null;
   readonly proposedReserveUsd: FixedPrecisionUsd | null;
   readonly reason: AiBudgetReason | 'SPENDABLE_BALANCE_CHANGED' | null;
+  readonly routingDecisionId: string | null;
 
   constructor(
     message: string,
     code: string,
     details: Readonly<{
+      confirmationId?: string;
       confirmationThresholdUsd?: FixedPrecisionUsd;
       estimate?: AiCostEstimate;
       proposedReserveUsd?: FixedPrecisionUsd | null;
       reason?: AiBudgetReason | 'SPENDABLE_BALANCE_CHANGED';
+      routingDecisionId?: string;
     }> = {},
   ) {
     super(message, code);
+    this.confirmationId = details.confirmationId ?? null;
     this.confirmationThresholdUsd = details.confirmationThresholdUsd ?? null;
     this.estimate = details.estimate ?? null;
     this.proposedReserveUsd = details.proposedReserveUsd ?? null;
     this.reason = details.reason ?? null;
+    this.routingDecisionId = details.routingDecisionId ?? null;
   }
 }
 
@@ -795,6 +804,7 @@ async function executeRun(
   runId: string,
   userMessage: string,
   actionGrounding?: KnowledgeActionGrounding,
+  routingDecisionId?: string,
   executionLimitBinding?: AiProviderExecutionLimitBinding,
 ) {
   const startedAt = Date.now();
@@ -823,6 +833,7 @@ async function executeRun(
       actorUserId,
       context: groundedContext,
       query: userMessage,
+      routingDecisionId,
       runId,
     });
     return executeGroundedRun(prisma, dependencies, {
@@ -878,11 +889,17 @@ async function createRunForMessage(
     run.id,
     content,
     actionGrounding,
+    routingDecisionId,
     executionLimitBinding,
   );
 }
 
-async function createRunForPreparedGroundedMessage(
+/**
+ * Executes one FAST Chat run against a caller-supplied, already persisted
+ * GroundedContext. Callers must have obtained the context through an
+ * authoritative route binding; this helper never performs retrieval.
+ */
+export async function createRunForPreparedGroundedMessage(
   prisma: PrismaClient,
   dependencies: AiConversationDependencies,
   actorUserId: string,
@@ -893,7 +910,8 @@ async function createRunForPreparedGroundedMessage(
   routingDecisionId: string,
   provider: LanguageModelProvider,
   groundedContextId: string,
-  executionLimitBinding: AiProviderExecutionLimitBinding,
+  executionLimitBinding?: AiProviderExecutionLimitBinding,
+  preparedRequest?: PreparedGroundedRunRequest,
 ) {
   const run = await prisma.aiRun.create({
     data: {
@@ -910,8 +928,9 @@ async function createRunForPreparedGroundedMessage(
   });
   return executeGroundedRun(prisma, dependencies, {
     actorUserId,
-    executionLimitBinding,
+    ...(executionLimitBinding ? { executionLimitBinding } : {}),
     groundedContextId,
+    ...(preparedRequest ? { preparedRequest } : {}),
     responseFormat: 'grounded_answer',
     runId: run.id,
     userMessage: content,
@@ -1189,12 +1208,18 @@ async function persistChatUserMessage(
   return { content, messageId: message.id };
 }
 
-async function prepareOrchestratedChatRequest(
+/**
+ * Creates the one route-bound workspace retrieval context used by a
+ * multi-model Chat request. It is intentionally not used by FAST retry or
+ * confirmation-resume paths, which must load their existing exact snapshot.
+ */
+export async function prepareOrchestratedChatRequest(
   prisma: PrismaClient,
   dependencies: AiConversationDependencies,
   actorUserId: string,
   workspaceId: string,
   content: string,
+  routingDecisionId: string,
 ) {
   const retrieval = await retrieveKnowledgeContext(
     prisma,
@@ -1210,6 +1235,7 @@ async function prepareOrchestratedChatRequest(
     actorUserId,
     context: groundedContext,
     query: content,
+    routingDecisionId,
   });
   return { groundedContextId: persistedContext.id };
 }
@@ -1222,6 +1248,7 @@ async function prepareFastGroundedChatRequest(
   conversationId: string,
   userMessageId: string,
   content: string,
+  routingDecisionId: string,
   executionLimits: LanguageModelRequest['executionLimits'],
 ) {
   const prepared = await prepareOrchestratedChatRequest(
@@ -1230,6 +1257,7 @@ async function prepareFastGroundedChatRequest(
     actorUserId,
     workspaceId,
     content,
+    routingDecisionId,
   );
   const groundedContext = await loadGroundedContext(
     prisma,
@@ -1256,21 +1284,8 @@ async function prepareFastGroundedChatRequest(
 }
 
 function budgetErrorFromPreflight(
-  result: Exclude<AiBudgetPreflightResult, { outcome: 'ALLOWED' }>,
-  confirmationThresholdUsd: FixedPrecisionUsd,
+  result: Exclude<AiBudgetPreflightResult, { outcome: 'ALLOWED' | 'CONFIRMATION_REQUIRED' }>,
 ): AiConversationBudgetError {
-  if (result.outcome === 'CONFIRMATION_REQUIRED') {
-    return new AiConversationBudgetError(
-      'This AI request requires budget confirmation before execution.',
-      'budget_confirmation_required',
-      {
-        confirmationThresholdUsd,
-        estimate: result.estimate,
-        proposedReserveUsd: result.budgetDecision.proposedReserveUsd,
-        reason: result.budgetDecision.reason,
-      },
-    );
-  }
   return new AiConversationBudgetError(
     'This AI request was rejected by the workspace budget policy.',
     'budget_rejected',
@@ -1285,7 +1300,71 @@ function budgetErrorFromPreflight(
   );
 }
 
-function fastMeasurementIdentity(
+async function confirmationErrorFromPreflight(
+  prisma: PrismaClient,
+  dependencies: AiConversationDependencies,
+  actorUserId: string,
+  workspaceId: string,
+  routingDecisionId: string,
+  confirmationThresholdUsd: FixedPrecisionUsd,
+  result: Extract<AiBudgetPreflightResult, { outcome: 'CONFIRMATION_REQUIRED' }>,
+): Promise<AiConversationBudgetError> {
+  let confirmation;
+  try {
+    confirmation = await (
+      dependencies.budgetLifecycle?.createConfirmation ?? createAiBudgetConfirmationRequest
+    )(prisma, {
+      actorUserId,
+      budgetDecision: result.budgetDecision,
+      estimate: result.estimate,
+      executionPlan: result.executionPlan,
+      routingDecisionId,
+      workspaceId,
+    });
+  } catch {
+    throw new AiConversationBudgetError(
+      'The AI budget confirmation could not be persisted safely.',
+      'budget_confirmation_persistence_failed',
+      {
+        confirmationThresholdUsd,
+        estimate: result.estimate,
+        proposedReserveUsd: result.budgetDecision.proposedReserveUsd,
+        reason: result.budgetDecision.reason,
+        routingDecisionId,
+      },
+    );
+  }
+
+  if (confirmation.status !== 'PENDING') {
+    return new AiConversationBudgetError(
+      'The existing AI budget confirmation requires a separate continuation flow.',
+      'budget_confirmation_terminal',
+      {
+        confirmationId: confirmation.id,
+        confirmationThresholdUsd,
+        estimate: result.estimate,
+        proposedReserveUsd: result.budgetDecision.proposedReserveUsd,
+        reason: result.budgetDecision.reason,
+        routingDecisionId,
+      },
+    );
+  }
+
+  return new AiConversationBudgetError(
+    'This AI request requires budget confirmation before execution.',
+    'budget_confirmation_required',
+    {
+      confirmationId: confirmation.id,
+      confirmationThresholdUsd,
+      estimate: result.estimate,
+      proposedReserveUsd: result.budgetDecision.proposedReserveUsd,
+      reason: result.budgetDecision.reason,
+      routingDecisionId,
+    },
+  );
+}
+
+export function fastMeasurementIdentity(
   provider: LanguageModelProvider,
 ): AiProviderInputTokenMeasurementIdentity {
   return Object.freeze({
@@ -1297,7 +1376,7 @@ function fastMeasurementIdentity(
   });
 }
 
-async function resolveFastMeasuredExecutionPlan(
+export async function resolveFastMeasuredExecutionPlan(
   input: Readonly<{
     basePlan: AiExecutionCostPlan;
     measurementPolicy: AiInputTokenMeasurementPolicy;
@@ -1607,6 +1686,7 @@ async function executeFastChatMessage(
           conversationId,
           userMessageId,
           content,
+          routingDecisionId,
           executionLimits,
         );
   const authoritativePlan = prepared
@@ -1645,8 +1725,19 @@ async function executeFastChatMessage(
       'budget_preflight_failed',
     );
   }
+  if (preflight.outcome === 'CONFIRMATION_REQUIRED') {
+    throw await confirmationErrorFromPreflight(
+      prisma,
+      dependencies,
+      actorUserId,
+      workspaceId,
+      routingDecisionId,
+      budgetConfiguration.confirmationThresholdUsd,
+      preflight,
+    );
+  }
   if (preflight.outcome !== 'ALLOWED') {
-    throw budgetErrorFromPreflight(preflight, budgetConfiguration.confirmationThresholdUsd);
+    throw budgetErrorFromPreflight(preflight);
   }
 
   let executionLimitBinding: AiProviderExecutionLimitBinding;
@@ -1833,8 +1924,19 @@ export async function submitAiChatMessage(
         'budget_preflight_failed',
       );
     }
+    if (preflight.outcome === 'CONFIRMATION_REQUIRED') {
+      throw await confirmationErrorFromPreflight(
+        prisma,
+        dependencies,
+        actorUserId,
+        workspaceId,
+        routingDecision.id,
+        budgetConfiguration.confirmationThresholdUsd,
+        preflight,
+      );
+    }
     if (preflight.outcome !== 'ALLOWED') {
-      throw budgetErrorFromPreflight(preflight, budgetConfiguration.confirmationThresholdUsd);
+      throw budgetErrorFromPreflight(preflight);
     }
     try {
       executionContext = createMultiBudgetExecutionContext(
@@ -1868,6 +1970,7 @@ export async function submitAiChatMessage(
       actorUserId,
       workspaceId,
       persisted.content,
+      routingDecision.id,
     );
   } catch (error) {
     if (reservationId) {
@@ -2016,6 +2119,25 @@ export async function retryAiRun(
   }
   await findOwnedConversation(prisma, actorUserId, workspaceId, failed.conversationId);
   await enforceRateLimit(prisma, actorUserId, workspaceId);
+  if (failed.routingDecisionId && !failed.knowledgeActionType) {
+    const groundedContext = await getAiRetrievalSnapshotForRoutingDecision(prisma, {
+      actorUserId,
+      routingDecisionId: failed.routingDecisionId,
+      workspaceId,
+    });
+    return createRunForPreparedGroundedMessage(
+      prisma,
+      dependencies,
+      actorUserId,
+      workspaceId,
+      failed.conversationId,
+      failed.userMessageId,
+      failed.userMessage.content,
+      failed.routingDecisionId,
+      dependencies.providers.getCurrent(),
+      groundedContext.id,
+    );
+  }
   return createRunForMessage(
     prisma,
     dependencies,

@@ -48,6 +48,7 @@ export type AiBudgetPreflightResult =
   | Readonly<{
       budgetDecision: ConfirmationBudgetDecision;
       estimate: AiCostEstimate;
+      executionPlan: AiExecutionCostPlan;
       outcome: 'CONFIRMATION_REQUIRED';
       reservation: null;
     }>
@@ -161,6 +162,7 @@ export function createAiBudgetPreflightService(dependencies: AiBudgetPreflightDe
       return Object.freeze({
         budgetDecision,
         estimate,
+        executionPlan,
         outcome: 'CONFIRMATION_REQUIRED' as const,
         reservation: null,
       });

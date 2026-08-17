@@ -464,8 +464,6 @@ async function executionIsTerminal(
   executionAbortedBeforeProvider: boolean,
 ): Promise<boolean> {
   const runsAreTerminal = runs.every(({ status }) => status !== AiRunStatus.PROCESSING);
-  if (routingDecision.resolvedMode === 'FAST') return runs.length > 0 && runsAreTerminal;
-
   const orchestrations = await prisma.aiOrchestration.findMany({
     where: {
       conversationId: routingDecision.conversationId,
@@ -478,6 +476,7 @@ async function executionIsTerminal(
   if (executionAbortedBeforeProvider && runs.length === 0 && orchestrations.length === 0) {
     return true;
   }
+  if (routingDecision.resolvedMode === 'FAST') return runs.length > 0 && runsAreTerminal;
   return (
     orchestrations.length === 1 &&
     TERMINAL_ORCHESTRATION_STATUSES.has(orchestrations[0]!.status) &&

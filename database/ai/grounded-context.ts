@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import {
   AiGroundedContextSourceType,
   KnowledgeChunkSourceType,
+  type Prisma,
   type PrismaClient,
 } from '../generated/client/client';
 import type { KnowledgeRetrievalCitation, KnowledgeRetrievalResult } from './knowledge-retrieval';
@@ -25,6 +26,18 @@ export type GroundedContext = Readonly<{
   version: string;
   workspaceId: string;
 }>;
+
+export class AiGroundedContextRoutingDecisionError extends Error {
+  readonly code: string;
+
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = new.target.name;
+    this.code = code;
+  }
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -81,6 +94,7 @@ export async function persistGroundedContext(
     actorUserId: string;
     context: GroundedContext;
     query: string;
+    routingDecisionId?: string;
     runId?: string;
   }>,
 ) {
@@ -99,6 +113,7 @@ export async function persistGroundedContext(
         knowledgeDocumentVersionId: input.context.knowledgeDocumentVersionId,
         queryChecksum: sha256(input.query),
         resultCount: input.context.excerpts.length,
+        routingDecisionId: input.routingDecisionId,
         runId: input.runId,
         sourceType: input.context.sourceType,
         workspaceId: input.context.workspaceId,
@@ -132,16 +147,12 @@ export async function persistGroundedContext(
   });
 }
 
-export async function loadGroundedContext(
-  prisma: PrismaClient,
+function groundedContextFromSnapshot(
+  snapshot: Prisma.AiRetrievalSnapshotGetPayload<{
+    include: { citations: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } };
+  }>,
   workspaceId: string,
-  groundedContextId: string,
-): Promise<GroundedContext | null> {
-  const snapshot = await prisma.aiRetrievalSnapshot.findFirst({
-    where: { id: groundedContextId, workspaceId },
-    include: { citations: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
-  });
-  if (!snapshot) return null;
+): GroundedContext {
   const excerpts = Object.freeze(
     snapshot.citations.map((citation) =>
       Object.freeze({
@@ -178,5 +189,68 @@ export async function loadGroundedContext(
     sourceType: snapshot.sourceType,
     version: snapshot.contextVersion,
     workspaceId,
+  });
+}
+
+export async function loadGroundedContext(
+  prisma: PrismaClient,
+  workspaceId: string,
+  groundedContextId: string,
+): Promise<GroundedContext | null> {
+  const snapshot = await prisma.aiRetrievalSnapshot.findFirst({
+    where: { id: groundedContextId, workspaceId },
+    include: { citations: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
+  });
+  if (!snapshot) return null;
+  return groundedContextFromSnapshot(snapshot, workspaceId);
+}
+
+/**
+ * Resolves the sole immutable Chat GroundedContext explicitly bound to a
+ * routing decision. This does not reconstruct retrieval or use any heuristic
+ * selection criteria.
+ */
+export async function getAiRetrievalSnapshotForRoutingDecision(
+  prisma: PrismaClient,
+  input: Readonly<{ actorUserId: string; routingDecisionId: string; workspaceId: string }>,
+): Promise<Readonly<{ groundedContext: GroundedContext; id: string }>> {
+  if (
+    !UUID_PATTERN.test(input.actorUserId) ||
+    !UUID_PATTERN.test(input.routingDecisionId) ||
+    !UUID_PATTERN.test(input.workspaceId)
+  ) {
+    throw new AiGroundedContextRoutingDecisionError(
+      'The GroundedContext routing identity is invalid.',
+      'grounded_context_routing_invalid',
+    );
+  }
+  const snapshots = await prisma.aiRetrievalSnapshot.findMany({
+    where: {
+      createdByUserId: input.actorUserId,
+      routingDecisionId: input.routingDecisionId,
+      workspaceId: input.workspaceId,
+      routingDecision: {
+        userMessage: {
+          authorUserId: input.actorUserId,
+          conversation: { ownerUserId: input.actorUserId },
+          role: 'USER',
+        },
+      },
+    },
+    include: { citations: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
+    take: 2,
+  });
+  if (snapshots.length !== 1) {
+    throw new AiGroundedContextRoutingDecisionError(
+      'The route-bound GroundedContext was not found.',
+      snapshots.length === 0
+        ? 'grounded_context_routing_not_found'
+        : 'grounded_context_routing_ambiguous',
+    );
+  }
+  const snapshot = snapshots[0]!;
+  return Object.freeze({
+    groundedContext: groundedContextFromSnapshot(snapshot, input.workspaceId),
+    id: snapshot.id,
   });
 }

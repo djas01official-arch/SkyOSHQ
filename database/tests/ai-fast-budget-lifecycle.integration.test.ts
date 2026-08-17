@@ -5,7 +5,9 @@ import { after, beforeEach, test } from 'node:test';
 import { PrismaPg } from '@prisma/adapter-pg';
 
 import {
+  AiBudgetConfirmationStatus,
   AiBudgetReservationStatus,
+  AiGroundedContextSourceType,
   MembershipStatus,
   OrganizationRole,
   OrganizationStatus,
@@ -27,7 +29,17 @@ import {
   recordAiBudgetCredit,
 } from '../ai/ai-budget';
 import { preflightAiBudget } from '../ai/ai-budget-preflight';
+import {
+  approveAiBudgetConfirmation,
+  createAiBudgetConfirmationRequest,
+  rejectAiBudgetConfirmation,
+} from '../ai/ai-budget-confirmations';
 import { getAiRoutingDecision } from '../ai/ai-routing-decisions';
+import {
+  getAiRetrievalSnapshotForRoutingDecision,
+  loadGroundedContext,
+  persistGroundedContext,
+} from '../ai/grounded-context';
 import {
   LanguageModelProviderRegistry,
   type AiProviderInputTokenMeasurementAccounting,
@@ -43,6 +55,8 @@ import {
   type AiProviderInputTokenMeasurementIdentity,
 } from '../../services/ai/ai-input-token-measurement';
 import type { AiBudgetRuntimeEnvironment } from '../../services/ai/ai-budget-runtime-config';
+import { fingerprintAiBudgetProposal } from '../../services/ai/ai-budget-proposal-fingerprint';
+import type { AiExecutionCostPlan } from '../../services/ai/ai-execution-cost-plan';
 import {
   DeterministicLocalEmbeddingProvider,
   EmbeddingProviderRegistry,
@@ -62,7 +76,7 @@ const embeddingProviders = new EmbeddingProviderRegistry([embedding], embedding)
 
 async function reset(): Promise<void> {
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE "ai_budget_ledger_entries", "ai_budget_reservations", "ai_budget_accounts", "ai_run_citations", "ai_routing_decisions", "ai_orchestrations", "ai_retrieval_snapshots", "ai_messages", "ai_runs", "ai_conversations", "workspace_memberships", "organization_memberships", "workspaces", "organizations", "users" CASCADE;',
+    'TRUNCATE TABLE "ai_budget_confirmations", "ai_budget_ledger_entries", "ai_budget_reservations", "ai_budget_accounts", "ai_run_citations", "ai_routing_decisions", "ai_orchestrations", "ai_retrieval_snapshots", "ai_messages", "ai_runs", "ai_conversations", "workspace_memberships", "organization_memberships", "workspaces", "organizations", "users" CASCADE;',
   );
 }
 
@@ -245,6 +259,7 @@ test('disabled budget enforcement preserves FAST and touches no budget persisten
   assert.equal(executionLimits, undefined);
   assert.equal(await prisma.aiRun.count(), 1);
   assert.equal(await prisma.aiBudgetAccount.count(), 0);
+  assert.equal(await prisma.aiBudgetConfirmation.count(), 0);
   assert.equal(await prisma.aiBudgetReservation.count(), 0);
   assert.equal(await prisma.aiBudgetLedgerEntry.count(), 0);
 });
@@ -294,20 +309,169 @@ test('explicit FAST and AUTO-resolved FAST share one allowed reserve-run-settle 
     assert.deepEqual(requestLimits, [{ maxOutputTokens: 20 }]);
     assert.equal(pricingCaptures, 1);
     const run = await prisma.aiRun.findFirstOrThrow();
+    const routingDecision = await prisma.aiRoutingDecision.findUniqueOrThrow({
+      where: { userMessageId: run.userMessageId },
+    });
+    const routeBoundSnapshot = await prisma.aiRetrievalSnapshot.findUniqueOrThrow({
+      where: { routingDecisionId: routingDecision.id },
+    });
+    const loaded = await getAiRetrievalSnapshotForRoutingDecision(prisma, {
+      actorUserId: f.ownerId,
+      routingDecisionId: routingDecision.id,
+      workspaceId: f.workspaceId,
+    });
     const reservation = await prisma.aiBudgetReservation.findFirstOrThrow();
     const debit = await prisma.aiBudgetLedgerEntry.findFirstOrThrow({ where: { type: 'DEBIT' } });
     assert.equal(run.providerKey, provider.providerKey);
     assert.equal(run.modelKey, provider.modelKey);
     assert.equal(run.modelVersion, provider.modelVersion);
     assert.equal(run.providerAttempted, true);
+    assert.equal(routeBoundSnapshot.id, loaded.id);
+    assert.equal(routeBoundSnapshot.workspaceId, f.workspaceId);
+    assert.equal(routeBoundSnapshot.routingDecisionId, routingDecision.id);
     assert.equal(reservation.status, AiBudgetReservationStatus.SETTLED);
     assert.equal(reservation.reservedAmountUsd.toFixed(12), '0.000550000000');
     assert.equal(reservation.settledAmountUsd?.toFixed(12), run.estimatedCostUsd?.toFixed(12));
     assert.equal(debit.amountUsd.toFixed(12), run.estimatedCostUsd?.toFixed(12));
     assert.equal(await prisma.aiBudgetReservation.count(), 1);
+    assert.equal(await prisma.aiBudgetConfirmation.count(), 0);
     assert.equal(await prisma.aiRun.count(), 1);
     assert.equal(await prisma.aiOrchestration.count(), 0);
   }
+});
+
+test('route-bound Chat GroundedContexts are unique, immutable, and owner-scoped', async () => {
+  const f = await fixture();
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+  const firstContent = 'Retain this exact immutable grounding.';
+  const first = await submitAiChatMessage(
+    prisma,
+    dependencies(model()),
+    f.ownerId,
+    f.workspaceId,
+    conversation.id,
+    firstContent,
+    { budgetEnvironment: { AI_BUDGET_ENFORCEMENT: 'DISABLED' }, mode: 'FAST' },
+  );
+  assert.ok(first.responseRun);
+  const firstRun = first.responseRun;
+  const firstDecision = await prisma.aiRoutingDecision.findUniqueOrThrow({
+    where: { userMessageId: firstRun.userMessageId },
+  });
+  const snapshot = await prisma.aiRetrievalSnapshot.findUniqueOrThrow({
+    where: { routingDecisionId: firstDecision.id },
+  });
+  const context = await loadGroundedContext(prisma, f.workspaceId, snapshot.id);
+  assert.ok(context);
+  assert.equal(snapshot.routingDecisionId, firstDecision.id);
+  assert.equal(snapshot.runId, firstRun.id);
+  await assert.rejects(
+    persistGroundedContext(prisma, {
+      actorUserId: f.ownerId,
+      context,
+      query: firstContent,
+      routingDecisionId: firstDecision.id,
+    }),
+  );
+  await assert.rejects(
+    getAiRetrievalSnapshotForRoutingDecision(prisma, {
+      actorUserId: f.memberId,
+      routingDecisionId: firstDecision.id,
+      workspaceId: f.workspaceId,
+    }),
+    (error: unknown) =>
+      error instanceof Error && error.name === 'AiGroundedContextRoutingDecisionError',
+  );
+
+  const second = await submitAiChatMessage(
+    prisma,
+    dependencies(model()),
+    f.ownerId,
+    f.workspaceId,
+    conversation.id,
+    'Create another independently bound request.',
+    { budgetEnvironment: { AI_BUDGET_ENFORCEMENT: 'DISABLED' }, mode: 'FAST' },
+  );
+  assert.ok(second.responseRun);
+  const secondRun = second.responseRun;
+  const secondDecision = await prisma.aiRoutingDecision.findUniqueOrThrow({
+    where: { userMessageId: secondRun.userMessageId },
+  });
+  await assert.rejects(
+    prisma.aiRetrievalSnapshot.update({
+      where: { id: snapshot.id },
+      data: { routingDecisionId: secondDecision.id },
+    }),
+  );
+  await assert.rejects(prisma.aiRetrievalSnapshot.delete({ where: { id: snapshot.id } }));
+
+  const originWorkspace = await prisma.workspace.findUniqueOrThrow({
+    where: { id: f.workspaceId },
+    select: { organizationId: true },
+  });
+  const otherWorkspace = await prisma.workspace.create({
+    data: {
+      createdByUserId: f.ownerId,
+      name: randomUUID(),
+      organizationId: originWorkspace.organizationId,
+      slug: randomUUID(),
+      status: WorkspaceStatus.ACTIVE,
+    },
+  });
+  await assert.rejects(
+    prisma.aiRetrievalSnapshot.create({
+      data: {
+        characterCount: 0,
+        context: '',
+        contextChecksum: '0'.repeat(64),
+        contextVersion: 'skyos-grounded-context-v1',
+        createdByUserId: f.ownerId,
+        evidenceChecksum: '0'.repeat(64),
+        queryChecksum: '0'.repeat(64),
+        resultCount: 0,
+        routingDecisionId: firstDecision.id,
+        sourceType: AiGroundedContextSourceType.WORKSPACE_RETRIEVAL,
+        workspaceId: otherWorkspace.id,
+      },
+    }),
+  );
+});
+
+test('a routed FAST retry reuses its authoritative GroundedContext without a duplicate', async () => {
+  const f = await fixture();
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+  const failed = await submitAiChatMessage(
+    prisma,
+    dependencies(model({ fail: true })),
+    f.ownerId,
+    f.workspaceId,
+    conversation.id,
+    'Retry only the original immutable evidence.',
+    { budgetEnvironment: { AI_BUDGET_ENFORCEMENT: 'DISABLED' }, mode: 'FAST' },
+  );
+  assert.ok(failed.responseRun);
+  const failedRun = failed.responseRun;
+  assert.equal(failedRun.status, 'FAILED');
+  const routingDecision = await prisma.aiRoutingDecision.findUniqueOrThrow({
+    where: { userMessageId: failedRun.userMessageId },
+  });
+  const snapshot = await prisma.aiRetrievalSnapshot.findUniqueOrThrow({
+    where: { routingDecisionId: routingDecision.id },
+  });
+  const retried = await retryAiRun(
+    prisma,
+    dependencies(model()),
+    f.ownerId,
+    f.workspaceId,
+    failedRun.id,
+    { AI_BUDGET_ENFORCEMENT: 'DISABLED' },
+  );
+  assert.equal(retried.status, 'SUCCEEDED');
+  assert.equal(retried.groundedContextId, snapshot.id);
+  assert.equal(
+    await prisma.aiRetrievalSnapshot.count({ where: { routingDecisionId: routingDecision.id } }),
+    1,
+  );
 });
 
 test('FAST measured input resolves once before preflight and never lowers the reservation plan', async () => {
@@ -423,6 +587,7 @@ test('elevated measured input remains subject to unchanged hard-max and confirma
         AI_BUDGET_TASK_HARD_MAX_USD: '0.000799999999',
         AI_INPUT_TOKEN_MEASUREMENT: 'WHEN_AVAILABLE',
       }),
+      mode: 'FAST' as const,
     },
     {
       code: 'budget_confirmation_required',
@@ -430,6 +595,15 @@ test('elevated measured input remains subject to unchanged hard-max and confirma
         AI_BUDGET_CONFIRMATION_THRESHOLD_USD: '0.000800000000',
         AI_INPUT_TOKEN_MEASUREMENT: 'WHEN_AVAILABLE',
       }),
+      mode: 'FAST' as const,
+    },
+    {
+      code: 'budget_confirmation_required',
+      environment: budgetEnvironment({
+        AI_BUDGET_CONFIRMATION_THRESHOLD_USD: '0.000800000000',
+        AI_INPUT_TOKEN_MEASUREMENT: 'WHEN_AVAILABLE',
+      }),
+      mode: 'AUTO' as const,
     },
   ]) {
     await reset();
@@ -438,6 +612,8 @@ test('elevated measured input remains subject to unchanged hard-max and confirma
     const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
     let generationCalls = 0;
     let measurementCalls = 0;
+    let confirmationPlan: AiExecutionCostPlan | undefined;
+    let confirmationError: AiConversationBudgetError | undefined;
     await assert.rejects(
       submitAiChatMessage(
         prisma,
@@ -456,23 +632,74 @@ test('elevated measured input remains subject to unchanged hard-max and confirma
               generationCalls++;
             },
           }),
-          { capturePricingAt: () => new Date('2026-08-16T12:00:00.000Z') },
+          {
+            capturePricingAt: () => new Date('2026-08-16T12:00:00.000Z'),
+            preflight: async (client, input) => {
+              const outcome = await preflightAiBudget(client, input);
+              if (outcome.outcome === 'CONFIRMATION_REQUIRED') {
+                confirmationPlan = outcome.executionPlan;
+              }
+              return outcome;
+            },
+          },
         ),
         f.ownerId,
         f.workspaceId,
         conversation.id,
         'Measured policy boundary.',
-        { budgetEnvironment: scenario.environment, mode: 'FAST' },
+        { budgetEnvironment: scenario.environment, mode: scenario.mode },
       ),
-      (error: unknown) =>
-        error instanceof AiConversationBudgetError &&
-        error.code === scenario.code &&
-        error.proposedReserveUsd === '0.000800000000',
+      (error: unknown) => {
+        if (!(error instanceof AiConversationBudgetError)) return false;
+        if (error.code !== scenario.code || error.proposedReserveUsd !== '0.000800000000') {
+          return false;
+        }
+        confirmationError = error;
+        return true;
+      },
     );
     assert.equal(measurementCalls, 1);
     assert.equal(generationCalls, 0);
     assert.equal(await prisma.aiBudgetReservation.count(), 0);
     assert.equal(await prisma.aiRun.count(), 0);
+    if (scenario.code === 'budget_confirmation_required') {
+      assert.ok(confirmationError);
+      assert.ok(confirmationError.confirmationId);
+      const confirmation = await prisma.aiBudgetConfirmation.findUniqueOrThrow({
+        where: { id: confirmationError.confirmationId },
+      });
+      assert.equal(confirmation.status, AiBudgetConfirmationStatus.PENDING);
+      assert.equal(confirmation.requestedByUserId, f.ownerId);
+      assert.equal(
+        confirmation.proposedReserveUsd.toFixed(12),
+        confirmationError.proposedReserveUsd,
+      );
+      assert.equal(confirmation.pricingAt.toISOString(), '2026-08-16T12:00:00.000Z');
+      assert.equal(confirmationPlan?.runs[0]?.inputTokens, 200);
+      assert.equal(confirmationPlan?.runs[0]?.outputTokens, 20);
+      assert.equal(confirmationPlan?.mode, 'FAST');
+      assert.ok(confirmationError.estimate);
+      const fingerprints = fingerprintAiBudgetProposal({
+        estimate: confirmationError.estimate,
+        executionPlan: confirmationPlan!,
+      });
+      assert.equal(confirmation.executionPlanFingerprint, fingerprints.executionPlanFingerprint);
+      assert.equal(confirmation.estimateFingerprint, fingerprints.estimateFingerprint);
+      assert.equal(await prisma.aiBudgetConfirmation.count(), 1);
+      const snapshot = await prisma.aiRetrievalSnapshot.findUniqueOrThrow({
+        where: { routingDecisionId: confirmation.routingDecisionId },
+      });
+      assert.equal(snapshot.runId, null);
+      assert.equal(snapshot.routingDecisionId, confirmation.routingDecisionId);
+      const loaded = await getAiRetrievalSnapshotForRoutingDecision(prisma, {
+        actorUserId: f.ownerId,
+        routingDecisionId: confirmation.routingDecisionId,
+        workspaceId: f.workspaceId,
+      });
+      assert.equal(loaded.id, snapshot.id);
+    } else {
+      assert.equal(await prisma.aiBudgetConfirmation.count(), 0);
+    }
   }
 });
 
@@ -710,6 +937,7 @@ test('enabled malformed configuration, rejection, and confirmation stop before e
       error.code === 'budget_rejected' &&
       error.reason === 'INSUFFICIENT_AVAILABLE_BALANCE',
   );
+  assert.equal(await prisma.aiBudgetConfirmation.count(), 0);
   await fund(f.ownerId, f.workspaceId);
   await assert.rejects(
     submitAiChatMessage(
@@ -736,6 +964,105 @@ test('enabled malformed configuration, rejection, and confirmation stop before e
   assert.equal(await prisma.aiRun.count(), 0);
   assert.equal(await prisma.aiOrchestration.count(), 0);
   assert.equal(await prisma.aiBudgetReservation.count(), 0);
+});
+
+test('confirmation persistence failure fails closed before reservation or generation', async () => {
+  const f = await fixture();
+  await fund(f.ownerId, f.workspaceId);
+  const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+  let generationCalls = 0;
+  await assert.rejects(
+    submitAiChatMessage(
+      prisma,
+      dependencies(
+        model({
+          onRequest: () => {
+            generationCalls++;
+          },
+        }),
+        {
+          createConfirmation: async () => {
+            throw new Error('Safe injected confirmation persistence failure.');
+          },
+        },
+      ),
+      f.ownerId,
+      f.workspaceId,
+      conversation.id,
+      'Confirmation persistence failure.',
+      {
+        budgetEnvironment: budgetEnvironment({
+          AI_BUDGET_CONFIRMATION_THRESHOLD_USD: '0.000000000000',
+        }),
+        mode: 'FAST',
+      },
+    ),
+    (error: unknown) =>
+      error instanceof AiConversationBudgetError &&
+      error.code === 'budget_confirmation_persistence_failed',
+  );
+  assert.equal(generationCalls, 0);
+  assert.equal(await prisma.aiBudgetConfirmation.count(), 0);
+  assert.equal(await prisma.aiBudgetReservation.count(), 0);
+  assert.equal(await prisma.aiBudgetLedgerEntry.count({ where: { type: 'DEBIT' } }), 0);
+  assert.equal(await prisma.aiRun.count(), 0);
+  assert.equal(await prisma.aiOrchestration.count(), 0);
+});
+
+test('a terminal existing confirmation never resumes execution automatically', async () => {
+  for (const terminalStatus of ['APPROVED', 'REJECTED'] as const) {
+    await reset();
+    const f = await fixture();
+    await fund(f.ownerId, f.workspaceId);
+    const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
+    let generationCalls = 0;
+    await assert.rejects(
+      submitAiChatMessage(
+        prisma,
+        dependencies(
+          model({
+            onRequest: () => {
+              generationCalls++;
+            },
+          }),
+          {
+            createConfirmation: async (client, input) => {
+              const pending = await createAiBudgetConfirmationRequest(client, input);
+              return terminalStatus === 'APPROVED'
+                ? approveAiBudgetConfirmation(client, {
+                    actorUserId: input.actorUserId,
+                    confirmationId: pending.id,
+                    workspaceId: input.workspaceId,
+                  })
+                : rejectAiBudgetConfirmation(client, {
+                    actorUserId: input.actorUserId,
+                    confirmationId: pending.id,
+                    workspaceId: input.workspaceId,
+                  });
+            },
+          },
+        ),
+        f.ownerId,
+        f.workspaceId,
+        conversation.id,
+        `Terminal ${terminalStatus} confirmation.`,
+        {
+          budgetEnvironment: budgetEnvironment({
+            AI_BUDGET_CONFIRMATION_THRESHOLD_USD: '0.000000000000',
+          }),
+          mode: 'FAST',
+        },
+      ),
+      (error: unknown) =>
+        error instanceof AiConversationBudgetError && error.code === 'budget_confirmation_terminal',
+    );
+    assert.equal(generationCalls, 0);
+    assert.equal(await prisma.aiBudgetConfirmation.count(), 1);
+    assert.equal((await prisma.aiBudgetConfirmation.findFirstOrThrow()).status, terminalStatus);
+    assert.equal(await prisma.aiBudgetReservation.count(), 0);
+    assert.equal(await prisma.aiBudgetLedgerEntry.count({ where: { type: 'DEBIT' } }), 0);
+    assert.equal(await prisma.aiRun.count(), 0);
+  }
 });
 
 test('a failure before provider attempt releases, while attempted unknown cost holds', async () => {
