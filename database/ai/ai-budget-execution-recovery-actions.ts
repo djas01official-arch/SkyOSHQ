@@ -3,20 +3,31 @@ import {
   AiBudgetReservationStatus,
   type PrismaClient,
 } from '../generated/client/client';
-import type { FixedPrecisionUsd } from '../../services/ai/language-model-pricing';
 import {
-  reconcileAiBudgetReservation,
-  type AiBudgetReconciliationResult,
-} from './ai-budget-accounting';
-import { releaseAiBudgetReservationForConsumption } from './ai-budget';
+  compareFixedPrecisionUsd,
+  type FixedPrecisionUsd,
+} from '../../services/ai/language-model-pricing';
+import { reconcileAiBudgetReservation } from './ai-budget-accounting';
+import {
+  releaseAiBudgetReservation,
+  releaseAiBudgetReservationForConsumption,
+  settleAiBudgetReservation,
+} from './ai-budget';
 import { finishAiBudgetExecutionClaim } from './ai-budget-execution-claims';
 import {
   inspectAiBudgetExecutionRecovery,
+  inspectWorkspaceAiBudgetExecutionRecovery,
+  requireAiBudgetExecutionRecoveryMutationAccess,
   type AiBudgetExecutionRecoveryInspection,
   type AiBudgetExecutionRecoveryInput,
 } from './ai-budget-execution-recovery';
 
 export type RecoverAiBudgetExecutionInput = AiBudgetExecutionRecoveryInput;
+export type RecoverWorkspaceAiBudgetExecutionInput = Readonly<{
+  executionClaimId: string;
+  operatorUserId: string;
+  workspaceId: string;
+}>;
 
 export type AiBudgetExecutionRecoveryAction =
   | 'RECOVERY_NOT_REQUIRED'
@@ -76,6 +87,29 @@ export type AiBudgetExecutionRecoveryActionDependencies = Readonly<{
   release?: typeof releaseAiBudgetReservationForConsumption;
 }>;
 
+type RecoveryReconciliation = Readonly<{
+  outcome: 'HELD' | 'RELEASED' | 'SETTLED';
+  reservation: Readonly<{
+    settledAmountUsd: FixedPrecisionUsd | null;
+    status: AiBudgetReservationStatus;
+  }>;
+}>;
+type KnownCostInspection = Extract<
+  AiBudgetExecutionRecoveryInspection,
+  { classification: 'ATTEMPTED_KNOWN_COST' }
+>;
+type ZeroAttemptInspection = Extract<
+  AiBudgetExecutionRecoveryInspection,
+  { classification: 'ZERO_ATTEMPT_PROVEN' }
+>;
+
+type AuthorizedRecoveryMutations = Readonly<{
+  finish(): Promise<unknown>;
+  inspect(): Promise<AiBudgetExecutionRecoveryInspection>;
+  reconcile(inspection: KnownCostInspection): Promise<RecoveryReconciliation>;
+  release(inspection: ZeroAttemptInspection): Promise<{ status: AiBudgetReservationStatus }>;
+}>;
+
 function base<TAction extends AiBudgetExecutionRecoveryAction>(
   inspection: AiBudgetExecutionRecoveryInspection,
   action: TAction,
@@ -94,24 +128,21 @@ function base<TAction extends AiBudgetExecutionRecoveryAction>(
 }
 
 function reconciliationMatches(
-  reconciliation: AiBudgetReconciliationResult,
+  reconciliation: RecoveryReconciliation,
   status: AiBudgetReservationStatus,
 ): boolean {
   return reconciliation.reservation.status === status;
 }
 
 async function finishStartedClaim(
-  prisma: PrismaClient,
-  input: RecoverAiBudgetExecutionInput,
   inspection: AiBudgetExecutionRecoveryInspection,
-  dependencies: AiBudgetExecutionRecoveryActionDependencies,
+  mutations: AuthorizedRecoveryMutations,
 ): Promise<AiBudgetExecutionRecoveryActionResult | null> {
-  const finish = dependencies.finish ?? finishAiBudgetExecutionClaim;
   try {
-    await finish(prisma, input);
+    await mutations.finish();
     return null;
   } catch {
-    const refreshed = await inspectAiBudgetExecutionRecovery(prisma, input);
+    const refreshed = await mutations.inspect();
     if (refreshed.classification === 'ALREADY_TERMINAL') {
       return base(
         refreshed,
@@ -127,6 +158,95 @@ async function finishStartedClaim(
       refreshed.reservation.status,
     );
   }
+}
+
+function createOwnerRecoveryMutations(
+  prisma: PrismaClient,
+  input: RecoverAiBudgetExecutionInput,
+  dependencies: AiBudgetExecutionRecoveryActionDependencies,
+): AuthorizedRecoveryMutations {
+  return Object.freeze({
+    finish: () => (dependencies.finish ?? finishAiBudgetExecutionClaim)(prisma, input),
+    inspect: () => inspectAiBudgetExecutionRecovery(prisma, input),
+    reconcile: (inspection) =>
+      (dependencies.reconcile ?? reconcileAiBudgetReservation)(prisma, {
+        actorUserId: input.actorUserId,
+        reservationId: inspection.reservation.id,
+        routingDecisionId: inspection.routingDecisionId,
+        workspaceId: input.workspaceId,
+      }),
+    release: (inspection) =>
+      (dependencies.release ?? releaseAiBudgetReservationForConsumption)(prisma, {
+        actorUserId: input.actorUserId,
+        reservationId: inspection.reservation.id,
+        routingDecisionId: inspection.routingDecisionId,
+        workspaceId: input.workspaceId,
+      }),
+  });
+}
+
+function createWorkspaceRecoveryMutations(
+  prisma: PrismaClient,
+  input: RecoverWorkspaceAiBudgetExecutionInput,
+): AuthorizedRecoveryMutations {
+  return Object.freeze({
+    finish: async () => {
+      const transitioned = await prisma.aiBudgetExecutionClaim.updateMany({
+        data: { finishedAt: new Date(), status: AiBudgetExecutionClaimStatus.FINISHED },
+        where: {
+          finishedAt: null,
+          id: input.executionClaimId,
+          startedAt: { not: null },
+          status: AiBudgetExecutionClaimStatus.STARTED,
+          workspaceId: input.workspaceId,
+        },
+      });
+      if (transitioned.count !== 1) {
+        throw new Error('AI execution claim finish transition was not granted.');
+      }
+    },
+    inspect: () =>
+      inspectWorkspaceAiBudgetExecutionRecovery(prisma, {
+        actorUserId: input.operatorUserId,
+        executionClaimId: input.executionClaimId,
+        workspaceId: input.workspaceId,
+      }),
+    reconcile: async (inspection) => {
+      if (
+        compareFixedPrecisionUsd(
+          inspection.knownAccountedCostUsd,
+          inspection.reservation.reservedAmountUsd!,
+        ) > 0
+      ) {
+        return Object.freeze({
+          outcome: 'HELD' as const,
+          reservation: Object.freeze({
+            settledAmountUsd: null,
+            status: AiBudgetReservationStatus.RESERVED,
+          }),
+        });
+      }
+      const reservation = await settleAiBudgetReservation(prisma, {
+        actualCostUsd: inspection.knownAccountedCostUsd,
+        actorUserId: input.operatorUserId,
+        reservationId: inspection.reservation.id,
+        workspaceId: input.workspaceId,
+      });
+      return Object.freeze({
+        outcome: 'SETTLED' as const,
+        reservation: Object.freeze({
+          settledAmountUsd: inspection.knownAccountedCostUsd,
+          status: reservation.status,
+        }),
+      });
+    },
+    release: (inspection) =>
+      releaseAiBudgetReservation(prisma, {
+        actorUserId: input.operatorUserId,
+        reservationId: inspection.reservation.id,
+        workspaceId: input.workspaceId,
+      }),
+  });
 }
 
 function terminalFinancialEvidenceConflicts(
@@ -152,12 +272,10 @@ function terminalFinancialEvidenceConflicts(
  * grant another execution attempt: it only releases/settles existing money or
  * finishes the existing STARTED claim.
  */
-export async function recoverAiBudgetExecution(
-  prisma: PrismaClient,
-  input: RecoverAiBudgetExecutionInput,
-  dependencies: AiBudgetExecutionRecoveryActionDependencies = {},
+async function recoverAuthoritatively(
+  mutations: AuthorizedRecoveryMutations,
 ): Promise<AiBudgetExecutionRecoveryActionResult> {
-  const inspection = await inspectAiBudgetExecutionRecovery(prisma, input);
+  const inspection = await mutations.inspect();
 
   if (inspection.classification === 'NOT_STARTED') {
     return base(inspection, 'RECOVERY_NOT_REQUIRED');
@@ -173,7 +291,7 @@ export async function recoverAiBudgetExecution(
     if (terminalFinancialEvidenceConflicts(inspection)) {
       return base(inspection, 'RECOVERY_INDETERMINATE');
     }
-    const finishFailure = await finishStartedClaim(prisma, input, inspection, dependencies);
+    const finishFailure = await finishStartedClaim(inspection, mutations);
     return (
       finishFailure ??
       base(inspection, 'RECOVERED_TERMINAL_FINANCIAL_STATE', AiBudgetExecutionClaimStatus.FINISHED)
@@ -181,7 +299,7 @@ export async function recoverAiBudgetExecution(
   }
 
   if (inspection.classification === 'ATTEMPTED_UNKNOWN_COST') {
-    const finishFailure = await finishStartedClaim(prisma, input, inspection, dependencies);
+    const finishFailure = await finishStartedClaim(inspection, mutations);
     return (
       finishFailure ??
       Object.freeze({
@@ -197,19 +315,13 @@ export async function recoverAiBudgetExecution(
   }
 
   if (inspection.classification === 'ZERO_ATTEMPT_PROVEN') {
-    const release = dependencies.release ?? releaseAiBudgetReservationForConsumption;
     try {
-      const reservation = await release(prisma, {
-        actorUserId: input.actorUserId,
-        reservationId: inspection.reservation.id,
-        routingDecisionId: inspection.routingDecisionId,
-        workspaceId: input.workspaceId,
-      });
+      const reservation = await mutations.release(inspection);
       if (reservation.status !== AiBudgetReservationStatus.RELEASED) {
         return base(inspection, 'RECOVERY_RECONCILIATION_FAILED');
       }
     } catch {
-      const refreshed = await inspectAiBudgetExecutionRecovery(prisma, input);
+      const refreshed = await mutations.inspect();
       if (refreshed.classification === 'ALREADY_TERMINAL') {
         return base(refreshed, 'RECOVERY_ALREADY_TERMINAL');
       }
@@ -218,7 +330,7 @@ export async function recoverAiBudgetExecution(
         refreshed.reservation.status === AiBudgetReservationStatus.RELEASED &&
         !terminalFinancialEvidenceConflicts(refreshed)
       ) {
-        const finishFailure = await finishStartedClaim(prisma, input, refreshed, dependencies);
+        const finishFailure = await finishStartedClaim(refreshed, mutations);
         return (
           finishFailure ??
           base(
@@ -231,7 +343,7 @@ export async function recoverAiBudgetExecution(
       }
       return base(inspection, 'RECOVERY_RECONCILIATION_FAILED');
     }
-    const finishFailure = await finishStartedClaim(prisma, input, inspection, dependencies);
+    const finishFailure = await finishStartedClaim(inspection, mutations);
     return (
       finishFailure ??
       base(
@@ -243,15 +355,9 @@ export async function recoverAiBudgetExecution(
     );
   }
 
-  const reconcile = dependencies.reconcile ?? reconcileAiBudgetReservation;
-  let reconciliation: AiBudgetReconciliationResult;
+  let reconciliation: RecoveryReconciliation;
   try {
-    reconciliation = await reconcile(prisma, {
-      actorUserId: input.actorUserId,
-      reservationId: inspection.reservation.id,
-      routingDecisionId: inspection.routingDecisionId,
-      workspaceId: input.workspaceId,
-    });
+    reconciliation = await mutations.reconcile(inspection);
   } catch {
     return base(inspection, 'RECOVERY_RECONCILIATION_FAILED');
   }
@@ -260,7 +366,7 @@ export async function recoverAiBudgetExecution(
     reconciliation.outcome === 'SETTLED' &&
     reconciliationMatches(reconciliation, AiBudgetReservationStatus.SETTLED)
   ) {
-    const finishFailure = await finishStartedClaim(prisma, input, inspection, dependencies);
+    const finishFailure = await finishStartedClaim(inspection, mutations);
     return (
       finishFailure ??
       Object.freeze({
@@ -279,7 +385,7 @@ export async function recoverAiBudgetExecution(
     reconciliation.outcome === 'HELD' &&
     reconciliationMatches(reconciliation, AiBudgetReservationStatus.RESERVED)
   ) {
-    const finishFailure = await finishStartedClaim(prisma, input, inspection, dependencies);
+    const finishFailure = await finishStartedClaim(inspection, mutations);
     return (
       finishFailure ??
       Object.freeze({
@@ -294,4 +400,35 @@ export async function recoverAiBudgetExecution(
     );
   }
   return base(inspection, 'RECOVERY_RECONCILIATION_FAILED');
+}
+
+/**
+ * Terminates a stranded claim from persisted evidence. This owner-facing API
+ * retains its existing request-owner authorization through its inspection and
+ * mutation adapter.
+ */
+export async function recoverAiBudgetExecution(
+  prisma: PrismaClient,
+  input: RecoverAiBudgetExecutionInput,
+  dependencies: AiBudgetExecutionRecoveryActionDependencies = {},
+): Promise<AiBudgetExecutionRecoveryActionResult> {
+  return recoverAuthoritatively(createOwnerRecoveryMutations(prisma, input, dependencies));
+}
+
+/**
+ * Lets a workspace administrator terminally recover a stranded execution
+ * owned by another user. It does not impersonate the historical requester:
+ * administrative authorization is checked before the shared authoritative
+ * recovery state machine runs against workspace-owned evidence.
+ */
+export async function recoverWorkspaceAiBudgetExecution(
+  prisma: PrismaClient,
+  input: RecoverWorkspaceAiBudgetExecutionInput,
+): Promise<AiBudgetExecutionRecoveryActionResult> {
+  await requireAiBudgetExecutionRecoveryMutationAccess(
+    prisma,
+    input.operatorUserId,
+    input.workspaceId,
+  );
+  return recoverAuthoritatively(createWorkspaceRecoveryMutations(prisma, input));
 }

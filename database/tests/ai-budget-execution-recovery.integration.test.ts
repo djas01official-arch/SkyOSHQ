@@ -4,7 +4,12 @@ import { after, beforeEach, test } from 'node:test';
 
 import { PrismaPg } from '@prisma/adapter-pg';
 
-import { inspectAiBudgetExecutionRecovery } from '../ai/ai-budget-execution-recovery';
+import {
+  AiBudgetExecutionRecoveryOperationsAuthorizationError,
+  inspectAiBudgetExecutionRecovery,
+  inspectWorkspaceAiBudgetExecutionRecovery,
+  listWorkspaceAiExecutionRecoveryCandidates,
+} from '../ai/ai-budget-execution-recovery';
 import {
   releaseAiBudgetReservationForConsumption,
   settleAiBudgetReservationForConsumption,
@@ -58,6 +63,7 @@ async function fixture(
     claimStatus?: AiBudgetExecutionClaimStatus;
     configuredMode?: Mode | 'AUTO';
     mode?: Mode;
+    requestContent?: string;
     reservationStatus?: AiBudgetReservationStatus;
   }> = {},
 ) {
@@ -118,7 +124,7 @@ async function fixture(
   const message = await prisma.aiMessage.create({
     data: {
       authorUserId: owner.id,
-      content: randomUUID(),
+      content: options.requestContent ?? randomUUID(),
       conversationId: conversation.id,
       role: AiMessageRole.USER,
       workspaceId: workspace.id,
@@ -192,6 +198,114 @@ async function fixture(
     });
   }
   return { account, claim, message, mode, organization, other, owner, routing, workspace };
+}
+
+async function addWorkspaceAdministrator(f: Awaited<ReturnType<typeof fixture>>) {
+  const operator = await prisma.user.create({
+    data: { identitySubject: `recovery-operator:${randomUUID()}`, status: UserStatus.ACTIVE },
+  });
+  await prisma.organizationMembership.create({
+    data: {
+      activatedAt: new Date(),
+      organizationId: f.organization.id,
+      role: OrganizationRole.MEMBER,
+      status: MembershipStatus.ACTIVE,
+      userId: operator.id,
+    },
+  });
+  await prisma.workspaceMembership.create({
+    data: {
+      activatedAt: new Date(),
+      role: WorkspaceRole.ADMIN,
+      status: MembershipStatus.ACTIVE,
+      userId: operator.id,
+      workspaceId: f.workspace.id,
+    },
+  });
+  return operator;
+}
+
+async function claimInWorkspace(
+  f: Awaited<ReturnType<typeof fixture>>,
+  status: AiBudgetExecutionClaimStatus,
+) {
+  const conversation = await prisma.aiConversation.create({
+    data: { ownerUserId: f.owner.id, title: randomUUID(), workspaceId: f.workspace.id },
+  });
+  const message = await prisma.aiMessage.create({
+    data: {
+      authorUserId: f.owner.id,
+      content: randomUUID(),
+      conversationId: conversation.id,
+      role: AiMessageRole.USER,
+      workspaceId: f.workspace.id,
+    },
+  });
+  const routing = await prisma.aiRoutingDecision.create({
+    data: {
+      ambiguity: 'NOT_ANALYZED',
+      complexity: 'NOT_ANALYZED',
+      configuredMode: 'FAST',
+      conversationId: conversation.id,
+      expectedEffort: 'NOT_ANALYZED',
+      reason: 'EXPLICIT_MODE',
+      resolvedMode: 'FAST',
+      risk: 'NOT_ANALYZED',
+      signals: ['EXPLICIT_MODE'],
+      userMessageId: message.id,
+      verificationNeed: 'NOT_ANALYZED',
+      workspaceId: f.workspace.id,
+    },
+  });
+  const reservation = await prisma.aiBudgetReservation.create({
+    data: {
+      accountId: f.account.id,
+      idempotencyKey: `recovery-operations:${randomUUID()}`,
+      reservedAmountUsd: '1.000000000000',
+      routingDecisionId: routing.id,
+      workspaceId: f.workspace.id,
+    },
+  });
+  const confirmation = await prisma.aiBudgetConfirmation.create({
+    data: {
+      estimateFingerprint: 'f'.repeat(64),
+      executionPlanFingerprint: 'b'.repeat(64),
+      pricingAt: new Date('2026-08-17T00:00:00.000Z'),
+      proposedReserveUsd: '1.000000000000',
+      requestedByUserId: f.owner.id,
+      routingDecisionId: routing.id,
+      workspaceId: f.workspace.id,
+    },
+  });
+  await approveAiBudgetConfirmation(prisma, {
+    actorUserId: f.owner.id,
+    confirmationId: confirmation.id,
+    workspaceId: f.workspace.id,
+  });
+  const claim = await prisma.aiBudgetExecutionClaim.create({
+    data: {
+      claimedByUserId: f.owner.id,
+      confirmationId: confirmation.id,
+      reservationId: reservation.id,
+      routingDecisionId: routing.id,
+      workspaceId: f.workspace.id,
+    },
+  });
+  if (status !== AiBudgetExecutionClaimStatus.READY) {
+    await beginAiBudgetExecutionClaim(prisma, {
+      actorUserId: f.owner.id,
+      executionClaimId: claim.id,
+      workspaceId: f.workspace.id,
+    });
+  }
+  if (status === AiBudgetExecutionClaimStatus.FINISHED) {
+    await finishAiBudgetExecutionClaim(prisma, {
+      actorUserId: f.owner.id,
+      executionClaimId: claim.id,
+      workspaceId: f.workspace.id,
+    });
+  }
+  return { claim, message, routing };
 }
 
 async function groundedContext(f: Awaited<ReturnType<typeof fixture>>) {
@@ -474,4 +588,129 @@ test('cross-user inspection is denied and invalid accounting or FAST lineage fai
   await run(duplicateFast, { attempted: false });
   const invalidFast = await inspect(duplicateFast);
   assert.equal(invalidFast.classification, 'INDETERMINATE');
+});
+
+test('workspace administrators reuse the owner classifier without broadening owner-scoped inspection', async () => {
+  const f = await fixture();
+  const operator = await addWorkspaceAdministrator(f);
+  const ownerInspection = await inspect(f);
+  const administratorInspection = await inspectWorkspaceAiBudgetExecutionRecovery(prisma, {
+    actorUserId: operator.id,
+    executionClaimId: f.claim.id,
+    workspaceId: f.workspace.id,
+  });
+  assert.equal(administratorInspection.classification, ownerInspection.classification);
+  assert.equal(administratorInspection.routingDecisionId, ownerInspection.routingDecisionId);
+  await assert.rejects(
+    inspectAiBudgetExecutionRecovery(prisma, {
+      actorUserId: operator.id,
+      executionClaimId: f.claim.id,
+      workspaceId: f.workspace.id,
+    }),
+  );
+  await assert.rejects(
+    inspectWorkspaceAiBudgetExecutionRecovery(prisma, {
+      actorUserId: f.other.id,
+      executionClaimId: f.claim.id,
+      workspaceId: f.workspace.id,
+    }),
+    AiBudgetExecutionRecoveryOperationsAuthorizationError,
+  );
+});
+
+test('workspace recovery operations list only exact STARTED claims without time heuristics or mutation', async () => {
+  const f = await fixture({ requestContent: 'Exact routed user request for operations recovery.' });
+  const operator = await addWorkspaceAdministrator(f);
+  const ready = await claimInWorkspace(f, AiBudgetExecutionClaimStatus.READY);
+  const finished = await claimInWorkspace(f, AiBudgetExecutionClaimStatus.FINISHED);
+  const otherWorkspace = await fixture();
+  const before = await Promise.all([
+    prisma.aiBudgetExecutionClaim.findMany({ orderBy: { id: 'asc' } }),
+    prisma.aiBudgetReservation.findMany({ orderBy: { id: 'asc' } }),
+    prisma.aiBudgetLedgerEntry.findMany({ orderBy: { id: 'asc' } }),
+    prisma.aiRun.findMany({ orderBy: { id: 'asc' } }),
+    prisma.aiOrchestration.findMany({ orderBy: { id: 'asc' } }),
+  ]);
+  const candidates = await listWorkspaceAiExecutionRecoveryCandidates(
+    prisma,
+    operator.id,
+    f.workspace.id,
+  );
+  const after = await Promise.all([
+    prisma.aiBudgetExecutionClaim.findMany({ orderBy: { id: 'asc' } }),
+    prisma.aiBudgetReservation.findMany({ orderBy: { id: 'asc' } }),
+    prisma.aiBudgetLedgerEntry.findMany({ orderBy: { id: 'asc' } }),
+    prisma.aiRun.findMany({ orderBy: { id: 'asc' } }),
+    prisma.aiOrchestration.findMany({ orderBy: { id: 'asc' } }),
+  ]);
+  assert.deepEqual(after, before);
+  assert.deepEqual(
+    candidates.map((candidate) => candidate.executionClaimId),
+    [f.claim.id],
+  );
+  const candidate = candidates[0]!;
+  assert.equal(candidate.classification, 'ZERO_ATTEMPT_PROVEN');
+  assert.equal(candidate.conversationId, f.routing.conversationId);
+  assert.equal(candidate.routingDecisionId, f.routing.id);
+  assert.equal(candidate.requestPreview, 'Exact routed user request for operations recovery.');
+  assert.equal(candidate.resolvedMode, 'FAST');
+  assert.notEqual(candidate.startedAt, null);
+  assert.equal(candidate.reservation.status, AiBudgetReservationStatus.RESERVED);
+  assert.equal(candidate.reservation.reservedAmountUsd, '1.000000000000');
+  assert.equal(candidate.providerAttemptCount, 0);
+  assert.equal(candidate.knownAccountedCostUsd, null);
+  assert.equal(
+    candidates.some((candidate) => candidate.executionClaimId === ready.claim.id),
+    false,
+  );
+  assert.equal(
+    candidates.some((candidate) => candidate.executionClaimId === finished.claim.id),
+    false,
+  );
+  assert.equal(
+    candidates.some((candidate) => candidate.executionClaimId === otherWorkspace.claim.id),
+    false,
+  );
+});
+
+test('workspace recovery operations project only persisted known cost and authoritative classifications', async () => {
+  const known = await fixture();
+  const knownOperator = await addWorkspaceAdministrator(known);
+  await run(known, { attempted: true, cost: '0.000000000001' });
+  const [knownCandidate] = await listWorkspaceAiExecutionRecoveryCandidates(
+    prisma,
+    knownOperator.id,
+    known.workspace.id,
+  );
+  assert.equal(knownCandidate?.classification, 'ATTEMPTED_KNOWN_COST');
+  assert.equal(knownCandidate?.knownAccountedCostUsd, '0.000000000001');
+  assert.equal(knownCandidate?.knownCostAttemptCount, 1);
+  assert.equal(knownCandidate?.unknownCostAttemptCount, 0);
+
+  await reset();
+  const unknown = await fixture();
+  const unknownOperator = await addWorkspaceAdministrator(unknown);
+  await run(unknown, { attempted: true, cost: null });
+  const [unknownCandidate] = await listWorkspaceAiExecutionRecoveryCandidates(
+    prisma,
+    unknownOperator.id,
+    unknown.workspace.id,
+  );
+  assert.equal(unknownCandidate?.classification, 'ATTEMPTED_UNKNOWN_COST');
+  assert.equal(unknownCandidate?.knownAccountedCostUsd, null);
+  assert.equal(unknownCandidate?.knownCostAttemptCount, 0);
+  assert.equal(unknownCandidate?.unknownCostAttemptCount, 1);
+
+  await reset();
+  const indeterminate = await fixture();
+  const indeterminateOperator = await addWorkspaceAdministrator(indeterminate);
+  await run(indeterminate, { attempted: false, cost: '0.010000000000' });
+  const [indeterminateCandidate] = await listWorkspaceAiExecutionRecoveryCandidates(
+    prisma,
+    indeterminateOperator.id,
+    indeterminate.workspace.id,
+  );
+  assert.equal(indeterminateCandidate?.classification, 'INDETERMINATE');
+  assert.equal(indeterminateCandidate?.indeterminateReason, 'RUN_ACCOUNTING_STATE_INVALID');
+  assert.equal(indeterminateCandidate?.knownAccountedCostUsd, null);
 });

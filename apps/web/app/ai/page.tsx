@@ -43,9 +43,14 @@ export default async function AiPage() {
           Open retrieval inspector
         </Link>
         {hasWorkspaceCapability(workspace.role, 'workspace.members.read') ? (
-          <Link className="text-sm font-medium text-accent hover:underline" href="/ai/usage">
-            Open usage and cost
-          </Link>
+          <>
+            <Link className="text-sm font-medium text-accent hover:underline" href="/ai/usage">
+              Open usage and cost
+            </Link>
+            <Link className="text-sm font-medium text-accent hover:underline" href="/ai/recovery">
+              Open execution recovery
+            </Link>
+          </>
         ) : null}
       </div>
       <div className="grid gap-3">

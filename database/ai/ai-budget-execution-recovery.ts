@@ -4,9 +4,15 @@ import {
   AiBudgetReservationStatus,
   AiMessageRole,
   AiOrchestrationMode,
+  type Prisma,
   type AiOrchestrationStatus,
   type PrismaClient,
 } from '../generated/client/client';
+import {
+  KnowledgeAuthorizationError,
+  requireKnowledgeWorkspaceAccess,
+} from '../knowledge/knowledge-documents';
+import { workspaceRoleGrantsPermission } from '../policy/authorization-policy';
 import type { FixedPrecisionUsd } from '../../services/ai/language-model-pricing';
 import {
   isFixedPrecisionUsd,
@@ -109,6 +115,44 @@ export class AiBudgetExecutionRecoveryError extends Error {
 
 export class AiBudgetExecutionRecoveryNotFoundError extends AiBudgetExecutionRecoveryError {}
 export class AiBudgetExecutionRecoveryValidationError extends AiBudgetExecutionRecoveryError {}
+export class AiBudgetExecutionRecoveryOperationsAuthorizationError extends AiBudgetExecutionRecoveryError {}
+
+const RECOVERY_CLAIM_INCLUDE = {
+  confirmation: true,
+  reservation: { include: { settlementLedgerEntry: true } },
+  routingDecision: {
+    include: {
+      conversation: true,
+      groundedContext: { include: { orchestrations: true } },
+      runs: { include: { orchestration: true } },
+      userMessage: true,
+    },
+  },
+} satisfies Prisma.AiBudgetExecutionClaimInclude;
+
+type RecoveryClaim = Prisma.AiBudgetExecutionClaimGetPayload<{
+  include: typeof RECOVERY_CLAIM_INCLUDE;
+}>;
+
+export type WorkspaceAiBudgetExecutionRecoveryCandidate = Readonly<{
+  classification: AiBudgetExecutionRecoveryClassification;
+  conversationId: string;
+  executionClaimId: string;
+  indeterminateReason: AiBudgetExecutionRecoveryIndeterminateReason | null;
+  knownAccountedCostUsd: FixedPrecisionUsd | null;
+  knownCostAttemptCount: number;
+  orchestration: Readonly<{ status: AiOrchestrationStatus }> | null;
+  providerAttemptCount: number;
+  requestPreview: string;
+  reservation: Readonly<{
+    reservedAmountUsd: FixedPrecisionUsd | null;
+    status: AiBudgetReservationStatus;
+  }>;
+  resolvedMode: AiOrchestrationMode;
+  routingDecisionId: string;
+  startedAt: Date | null;
+  unknownCostAttemptCount: number;
+}>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -156,6 +200,102 @@ function isMultiMode(mode: AiOrchestrationMode): boolean {
   );
 }
 
+export async function requireAiBudgetExecutionRecoveryOperationsAccess(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+): Promise<void> {
+  try {
+    const access = await requireKnowledgeWorkspaceAccess(prisma, actorUserId, workspaceId, false);
+    if (
+      !workspaceRoleGrantsPermission(access.role, 'ai.use') ||
+      !workspaceRoleGrantsPermission(access.role, 'workspace.members.read')
+    ) {
+      throw new AiBudgetExecutionRecoveryOperationsAuthorizationError(
+        'AI execution recovery operations require workspace administration permissions.',
+        'budget_execution_recovery_operations_forbidden',
+      );
+    }
+  } catch (error) {
+    if (error instanceof AiBudgetExecutionRecoveryOperationsAuthorizationError) throw error;
+    if (error instanceof KnowledgeAuthorizationError) {
+      throw new AiBudgetExecutionRecoveryOperationsAuthorizationError(
+        'AI execution recovery operations require workspace administration permissions.',
+        'budget_execution_recovery_operations_forbidden',
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * Recovery changes durable financial and execution state, so it uses the
+ * existing workspace-administration mutation capability rather than the
+ * read-only capability used to inspect recovery candidates.
+ */
+export async function requireAiBudgetExecutionRecoveryMutationAccess(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+): Promise<void> {
+  try {
+    const access = await requireKnowledgeWorkspaceAccess(prisma, actorUserId, workspaceId, false);
+    if (
+      !workspaceRoleGrantsPermission(access.role, 'ai.use') ||
+      !workspaceRoleGrantsPermission(access.role, 'workspace.members.manage')
+    ) {
+      throw new AiBudgetExecutionRecoveryOperationsAuthorizationError(
+        'AI execution recovery operations require workspace administration permissions.',
+        'budget_execution_recovery_operations_forbidden',
+      );
+    }
+  } catch (error) {
+    if (error instanceof AiBudgetExecutionRecoveryOperationsAuthorizationError) throw error;
+    if (error instanceof KnowledgeAuthorizationError) {
+      throw new AiBudgetExecutionRecoveryOperationsAuthorizationError(
+        'AI execution recovery operations require workspace administration permissions.',
+        'budget_execution_recovery_operations_forbidden',
+      );
+    }
+    throw error;
+  }
+}
+
+function requestPreview(value: string): string {
+  const normalized = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  return normalized.length > 180 ? `${normalized.slice(0, 179)}…` : normalized;
+}
+
+function projectWorkspaceRecoveryCandidate(
+  claim: RecoveryClaim,
+  inspection: AiBudgetExecutionRecoveryInspection,
+): WorkspaceAiBudgetExecutionRecoveryCandidate {
+  return Object.freeze({
+    classification: inspection.classification,
+    conversationId: claim.routingDecision.conversationId,
+    executionClaimId: claim.id,
+    indeterminateReason: inspection.classification === 'INDETERMINATE' ? inspection.reason : null,
+    knownAccountedCostUsd:
+      inspection.classification === 'ATTEMPTED_KNOWN_COST'
+        ? inspection.knownAccountedCostUsd
+        : null,
+    knownCostAttemptCount: inspection.knownAttemptedRunCount,
+    orchestration: inspection.orchestration
+      ? Object.freeze({ status: inspection.orchestration.status })
+      : null,
+    providerAttemptCount: inspection.providerAttemptCount,
+    requestPreview: requestPreview(claim.routingDecision.userMessage.content),
+    reservation: Object.freeze({
+      reservedAmountUsd: inspection.reservation.reservedAmountUsd,
+      status: inspection.reservation.status,
+    }),
+    resolvedMode: inspection.resolvedMode,
+    routingDecisionId: inspection.routingDecisionId,
+    startedAt: claim.startedAt,
+    unknownCostAttemptCount: inspection.unknownCostAttemptedRunCount,
+  });
+}
+
 /**
  * Inspects durable recovery evidence only. It deliberately invokes no provider,
  * token counter, cost estimator, or financial/execution mutation.
@@ -173,18 +313,7 @@ export async function inspectAiBudgetExecutionRecovery(
       id: input.executionClaimId,
       workspaceId: input.workspaceId,
     },
-    include: {
-      confirmation: true,
-      reservation: { include: { settlementLedgerEntry: true } },
-      routingDecision: {
-        include: {
-          conversation: true,
-          groundedContext: { include: { orchestrations: true } },
-          runs: { include: { orchestration: true } },
-          userMessage: true,
-        },
-      },
-    },
+    include: RECOVERY_CLAIM_INCLUDE,
   });
   if (!claim) {
     throw new AiBudgetExecutionRecoveryNotFoundError(
@@ -193,6 +322,61 @@ export async function inspectAiBudgetExecutionRecovery(
     );
   }
 
+  return inspectRecoveryClaim(claim);
+}
+
+/**
+ * Provides administrative read-only inspection for one exact workspace claim.
+ * Owner-scoped Chat inspection remains intentionally separate above.
+ */
+export async function inspectWorkspaceAiBudgetExecutionRecovery(
+  prisma: PrismaClient,
+  input: AiBudgetExecutionRecoveryInput,
+): Promise<AiBudgetExecutionRecoveryInspection> {
+  validateInput(input);
+  await requireAiBudgetExecutionRecoveryOperationsAccess(
+    prisma,
+    input.actorUserId,
+    input.workspaceId,
+  );
+  const claim = await prisma.aiBudgetExecutionClaim.findFirst({
+    where: { id: input.executionClaimId, workspaceId: input.workspaceId },
+    include: RECOVERY_CLAIM_INCLUDE,
+  });
+  if (!claim) {
+    throw new AiBudgetExecutionRecoveryNotFoundError(
+      'The AI budget execution claim was not found in this workspace.',
+      'budget_execution_recovery_not_found',
+    );
+  }
+  return inspectRecoveryClaim(claim);
+}
+
+/** Lists only STARTED workspace claims and projects persisted recovery evidence for operations. */
+export async function listWorkspaceAiExecutionRecoveryCandidates(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+): Promise<readonly WorkspaceAiBudgetExecutionRecoveryCandidate[]> {
+  if (!validUuid(actorUserId) || !validUuid(workspaceId)) {
+    throw new AiBudgetExecutionRecoveryValidationError(
+      'The AI budget execution recovery operations input is invalid.',
+      'budget_execution_recovery_invalid',
+    );
+  }
+  await requireAiBudgetExecutionRecoveryOperationsAccess(prisma, actorUserId, workspaceId);
+  const claims = await prisma.aiBudgetExecutionClaim.findMany({
+    where: { status: AiBudgetExecutionClaimStatus.STARTED, workspaceId },
+    include: RECOVERY_CLAIM_INCLUDE,
+    orderBy: [{ startedAt: 'asc' }, { id: 'asc' }],
+  });
+  return Object.freeze(
+    claims.map((claim) => projectWorkspaceRecoveryCandidate(claim, inspectRecoveryClaim(claim))),
+  );
+}
+
+/** Shared authoritative persisted-evidence classifier for owner and operations inspection. */
+function inspectRecoveryClaim(claim: RecoveryClaim): AiBudgetExecutionRecoveryInspection {
   const { confirmation, reservation, routingDecision } = claim;
   const runs = routingDecision.runs;
   const reservationAmount = fixedUsd(reservation.reservedAmountUsd);
@@ -255,12 +439,12 @@ export async function inspectAiBudgetExecutionRecovery(
     routingDecision.workspaceId === claim.workspaceId &&
     confirmation.routingDecisionId === routingDecision.id &&
     reservation.routingDecisionId === routingDecision.id &&
-    confirmation.requestedByUserId === input.actorUserId &&
+    claim.claimedByUserId === confirmation.requestedByUserId &&
     routingDecision.conversation.workspaceId === claim.workspaceId &&
-    routingDecision.conversation.ownerUserId === input.actorUserId &&
+    routingDecision.conversation.ownerUserId === confirmation.requestedByUserId &&
     routingDecision.userMessage.workspaceId === claim.workspaceId &&
     routingDecision.userMessage.conversationId === routingDecision.conversationId &&
-    routingDecision.userMessage.authorUserId === input.actorUserId &&
+    routingDecision.userMessage.authorUserId === confirmation.requestedByUserId &&
     routingDecision.userMessage.role === AiMessageRole.USER;
   if (!lineageValid) {
     return Object.freeze({
@@ -310,7 +494,7 @@ export async function inspectAiBudgetExecutionRecovery(
       run.workspaceId === claim.workspaceId &&
       run.conversationId === routingDecision.conversationId &&
       run.userMessageId === routingDecision.userMessageId &&
-      run.requestedByUserId === input.actorUserId &&
+      run.requestedByUserId === confirmation.requestedByUserId &&
       run.routingDecisionId === routingDecision.id &&
       run.knowledgeActionType === null &&
       (routingDecision.groundedContext === null ||
@@ -353,7 +537,7 @@ export async function inspectAiBudgetExecutionRecovery(
       (orchestration.workspaceId !== claim.workspaceId ||
         orchestration.conversationId !== routingDecision.conversationId ||
         orchestration.userMessageId !== routingDecision.userMessageId ||
-        orchestration.createdByUserId !== input.actorUserId ||
+        orchestration.createdByUserId !== confirmation.requestedByUserId ||
         orchestration.mode !== routingDecision.resolvedMode ||
         orchestration.groundedContextId !== routingDecision.groundedContext?.id))
   ) {

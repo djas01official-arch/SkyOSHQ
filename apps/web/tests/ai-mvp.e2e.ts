@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import type { TestContext } from 'node:test';
 
+import { approveAiBudgetConfirmation } from '../../../database/ai/ai-budget-confirmations';
+import { beginAiBudgetExecutionClaim } from '../../../database/ai/ai-budget-execution-claims';
 import { createAiConversation } from '../../../database/ai/ai-conversations';
 import { createWorkspaceForOrganization } from '../../../database/context/workspace-creation';
 import {
@@ -646,4 +648,152 @@ export async function runAiMvpE2eScenario(
       0,
     );
   });
+
+  await context.test(
+    'AI recovery operations are workspace-admin-only and require explicit terminal recovery',
+    async () => {
+      const owner = await harness.createIdentity('ai-recovery-owner');
+      const { organizationId, workspaceAId } = await createFixture(harness.prisma, owner.id);
+      const conversation = await createAiConversation(
+        harness.prisma,
+        owner.id,
+        workspaceAId,
+        `Recovery operations ${randomUUID()}`,
+      );
+      const confirmation = await createBudgetConfirmationFixture(
+        harness.prisma,
+        owner.id,
+        workspaceAId,
+        conversation.id,
+      );
+      const account = await harness.prisma.aiBudgetAccount.create({
+        data: { workspaceId: workspaceAId },
+      });
+      const reservation = await harness.prisma.aiBudgetReservation.create({
+        data: {
+          accountId: account.id,
+          idempotencyKey: `ai-recovery-e2e:${randomUUID()}`,
+          reservedAmountUsd: '0.000000000001',
+          routingDecisionId: confirmation.routingDecisionId,
+          workspaceId: workspaceAId,
+        },
+      });
+      await approveAiBudgetConfirmation(harness.prisma, {
+        actorUserId: owner.id,
+        confirmationId: confirmation.id,
+        workspaceId: workspaceAId,
+      });
+      const claim = await harness.prisma.aiBudgetExecutionClaim.create({
+        data: {
+          claimedByUserId: owner.id,
+          confirmationId: confirmation.id,
+          reservationId: reservation.id,
+          routingDecisionId: confirmation.routingDecisionId,
+          workspaceId: workspaceAId,
+        },
+      });
+      await beginAiBudgetExecutionClaim(harness.prisma, {
+        actorUserId: owner.id,
+        executionClaimId: claim.id,
+        workspaceId: workspaceAId,
+      });
+
+      const ownerJar = harness.createJar();
+      harness.assertRedirectsTo(await harness.login(ownerJar, owner), '/ai');
+      const beforeLoad = await readBudgetSideEffects(harness.prisma);
+      const recoveryPage = await loadHtml(ownerJar, '/ai/recovery');
+      const afterLoad = await readBudgetSideEffects(harness.prisma);
+      assert.deepEqual(afterLoad, beforeLoad);
+      assert.ok(recoveryPage.includes('data-ai-execution-recovery-page="read-only"'));
+      assert.ok(recoveryPage.includes(`data-ai-execution-recovery-candidate="${claim.id}"`));
+      assert.match(recoveryPage, /No provider attempt recorded/u);
+      assert.match(recoveryPage, /Started executions: 1/u);
+      assert.match(recoveryPage, /\$0\.000000000001/u);
+      assert.ok(recoveryPage.includes('>Recover<'));
+      assert.doesNotMatch(recoveryPage, />Release</u);
+      assert.doesNotMatch(recoveryPage, />Settle</u);
+      assert.doesNotMatch(recoveryPage, />Retry</u);
+      assert.doesNotMatch(recoveryPage, />Resume</u);
+      assert.doesNotMatch(recoveryPage, />Start over</iu);
+      assert.deepEqual(
+        findServerActionForm(recoveryPage, {
+          markerName: 'data-ai-recovery-action',
+          markerValue: 'recover',
+        }).filter(([name]) => !name.startsWith('$ACTION_')),
+        [['executionClaimId', claim.id]],
+      );
+
+      const member = await harness.createIdentity('ai-recovery-member');
+      await addWorkspaceMember(
+        harness.prisma,
+        member,
+        organizationId,
+        workspaceAId,
+        WorkspaceRole.MEMBER,
+      );
+      const memberJar = harness.createJar();
+      harness.assertRedirectsTo(await harness.login(memberJar, member), '/ai');
+      const memberAiPage = await loadHtml(memberJar, '/ai');
+      assert.equal(memberAiPage.includes('href="/ai/recovery"'), false);
+      await assertStreamedRedirectTo(
+        (await memberJar.request('/ai/recovery')).response,
+        '/ai/recovery',
+        '/dashboard',
+        'data-ai-execution-recovery-page="read-only"',
+      );
+
+      const memberRecoveryAttempt = await submitServerActionForm(
+        memberJar,
+        harness.baseUrl,
+        '/ai/recovery',
+        recoveryPage,
+        { markerName: 'data-ai-recovery-action', markerValue: 'recover' },
+        {
+          actorUserId: owner.id,
+          classification: 'ZERO_ATTEMPT_PROVEN',
+          executionClaimId: claim.id,
+          reservationStatus: 'RELEASED',
+          workspaceId: workspaceAId,
+        },
+      );
+      harness.assertRedirectsTo(memberRecoveryAttempt, '/dashboard');
+      assert.deepEqual(await readBudgetSideEffects(harness.prisma), beforeLoad);
+      assert.equal(
+        (await harness.prisma.aiBudgetExecutionClaim.findUniqueOrThrow({ where: { id: claim.id } }))
+          .status,
+        'STARTED',
+      );
+
+      const recoverResponse = await submitServerActionForm(
+        ownerJar,
+        harness.baseUrl,
+        '/ai/recovery',
+        recoveryPage,
+        { markerName: 'data-ai-recovery-action', markerValue: 'recover' },
+        {
+          classification: 'ATTEMPTED_UNKNOWN_COST',
+          knownCostUsd: '999999.000000000000',
+          reservationStatus: 'SETTLED',
+          workspaceId: workspaceAId,
+        },
+      );
+      assert.equal(recoverResponse.status, 200);
+      assert.equal(
+        (await harness.prisma.aiBudgetExecutionClaim.findUniqueOrThrow({ where: { id: claim.id } }))
+          .status,
+        'FINISHED',
+      );
+      assert.equal(
+        (
+          await harness.prisma.aiBudgetReservation.findUniqueOrThrow({
+            where: { id: reservation.id },
+          })
+        ).status,
+        'RELEASED',
+      );
+      const refreshedRecoveryPage = await loadHtml(ownerJar, '/ai/recovery');
+      assert.equal(refreshedRecoveryPage.includes(claim.id), false);
+      assert.match(refreshedRecoveryPage, /No started executions/u);
+    },
+  );
 }

@@ -6,11 +6,14 @@ import { PrismaPg } from '@prisma/adapter-pg';
 
 import {
   recoverAiBudgetExecution,
+  recoverWorkspaceAiBudgetExecution,
   type AiBudgetExecutionRecoveryActionDependencies,
 } from '../ai/ai-budget-execution-recovery-actions';
+import { AiBudgetExecutionRecoveryOperationsAuthorizationError } from '../ai/ai-budget-execution-recovery';
 import {
   recordAiBudgetCredit,
   releaseAiBudgetReservationForConsumption,
+  settleAiBudgetReservation,
   settleAiBudgetReservationForConsumption,
 } from '../ai/ai-budget';
 import { approveAiBudgetConfirmation } from '../ai/ai-budget-confirmations';
@@ -176,6 +179,70 @@ async function fixture(
     });
   }
   return { claim, owner, reservation, routing, workspace };
+}
+
+async function addWorkspaceAdministrator(f: Awaited<ReturnType<typeof fixture>>) {
+  const administrator = await prisma.user.create({
+    data: {
+      identitySubject: `recovery-action-administrator:${randomUUID()}`,
+      status: UserStatus.ACTIVE,
+    },
+  });
+  const organization = await prisma.workspace.findUniqueOrThrow({
+    where: { id: f.workspace.id },
+    select: { organizationId: true },
+  });
+  await prisma.organizationMembership.create({
+    data: {
+      activatedAt: new Date(),
+      organizationId: organization.organizationId,
+      role: OrganizationRole.MEMBER,
+      status: MembershipStatus.ACTIVE,
+      userId: administrator.id,
+    },
+  });
+  await prisma.workspaceMembership.create({
+    data: {
+      activatedAt: new Date(),
+      role: WorkspaceRole.ADMIN,
+      status: MembershipStatus.ACTIVE,
+      userId: administrator.id,
+      workspaceId: f.workspace.id,
+    },
+  });
+  return administrator;
+}
+
+async function addWorkspaceMember(f: Awaited<ReturnType<typeof fixture>>) {
+  const member = await prisma.user.create({
+    data: {
+      identitySubject: `recovery-action-member:${randomUUID()}`,
+      status: UserStatus.ACTIVE,
+    },
+  });
+  const workspace = await prisma.workspace.findUniqueOrThrow({
+    where: { id: f.workspace.id },
+    select: { organizationId: true },
+  });
+  await prisma.organizationMembership.create({
+    data: {
+      activatedAt: new Date(),
+      organizationId: workspace.organizationId,
+      role: OrganizationRole.MEMBER,
+      status: MembershipStatus.ACTIVE,
+      userId: member.id,
+    },
+  });
+  await prisma.workspaceMembership.create({
+    data: {
+      activatedAt: new Date(),
+      role: WorkspaceRole.MEMBER,
+      status: MembershipStatus.ACTIVE,
+      userId: member.id,
+      workspaceId: f.workspace.id,
+    },
+  });
+  return member;
 }
 
 async function addRun(
@@ -473,5 +540,244 @@ test('concurrent zero-attempt and known-cost recovery never duplicate financial 
       (result) =>
         !['RECOVERY_INDETERMINATE', 'RECOVERY_RECONCILIATION_FAILED'].includes(result.action),
     ),
+  );
+});
+
+test('workspace administrators recover another user’s claim through the same authoritative recovery rules', async () => {
+  const f = await fixture();
+  const administrator = await addWorkspaceAdministrator(f);
+  const result = await recoverWorkspaceAiBudgetExecution(prisma, {
+    executionClaimId: f.claim.id,
+    operatorUserId: administrator.id,
+    workspaceId: f.workspace.id,
+  });
+  assert.equal(result.action, 'RECOVERED_RELEASED_ZERO_ATTEMPT');
+  const [claim, reservation] = await current(f);
+  assert.equal(claim.status, AiBudgetExecutionClaimStatus.FINISHED);
+  assert.equal(reservation.status, AiBudgetReservationStatus.RELEASED);
+});
+
+test('workspace recovery re-inspects authoritative evidence and fails closed outside the active workspace', async () => {
+  const f = await fixture();
+  const administrator = await addWorkspaceAdministrator(f);
+  const staleInspection = await prisma.aiBudgetExecutionClaim.findUniqueOrThrow({
+    where: { id: f.claim.id },
+    select: { id: true },
+  });
+  assert.equal(staleInspection.id, f.claim.id);
+  await addRun(f, { attempted: true, cost: '0.010000000000' });
+  const result = await recoverWorkspaceAiBudgetExecution(prisma, {
+    executionClaimId: f.claim.id,
+    operatorUserId: administrator.id,
+    workspaceId: f.workspace.id,
+  });
+  assert.equal(result.action, 'RECOVERED_SETTLED_KNOWN_COST');
+
+  const unrelated = await fixture();
+  await assert.rejects(
+    recoverWorkspaceAiBudgetExecution(prisma, {
+      executionClaimId: unrelated.claim.id,
+      operatorUserId: administrator.id,
+      workspaceId: unrelated.workspace.id,
+    }),
+    (error: unknown) => error instanceof AiBudgetExecutionRecoveryOperationsAuthorizationError,
+  );
+});
+
+test('privileged recovery requires workspace.members.manage and preserves known and unknown-cost terminal semantics', async () => {
+  const denied = await fixture();
+  const member = await addWorkspaceMember(denied);
+  await assert.rejects(
+    recoverWorkspaceAiBudgetExecution(prisma, {
+      executionClaimId: denied.claim.id,
+      operatorUserId: member.id,
+      workspaceId: denied.workspace.id,
+    }),
+    (error: unknown) => error instanceof AiBudgetExecutionRecoveryOperationsAuthorizationError,
+  );
+  await reset();
+
+  const known = await fixture();
+  const administrator = await addWorkspaceAdministrator(known);
+  await addRun(known, { attempted: true, cost: '0.010000000001' });
+  assert.equal(
+    (
+      await recoverWorkspaceAiBudgetExecution(prisma, {
+        executionClaimId: known.claim.id,
+        operatorUserId: administrator.id,
+        workspaceId: known.workspace.id,
+      })
+    ).action,
+    'RECOVERED_SETTLED_KNOWN_COST',
+  );
+  assert.equal((await current(known))[1].settledAmountUsd!.toFixed(12), '0.010000000001');
+  await reset();
+
+  const unknown = await fixture();
+  const unknownAdministrator = await addWorkspaceAdministrator(unknown);
+  await addRun(unknown, { attempted: true, cost: null });
+  assert.equal(
+    (
+      await recoverWorkspaceAiBudgetExecution(prisma, {
+        executionClaimId: unknown.claim.id,
+        operatorUserId: unknownAdministrator.id,
+        workspaceId: unknown.workspace.id,
+      })
+    ).action,
+    'RECOVERED_HELD_UNKNOWN_COST',
+  );
+  const [unknownClaim, unknownReservation, unknownDebits] = await current(unknown);
+  assert.equal(unknownClaim.status, AiBudgetExecutionClaimStatus.FINISHED);
+  assert.equal(unknownReservation.status, AiBudgetReservationStatus.RESERVED);
+  assert.equal(unknownDebits.length, 0);
+});
+
+test('concurrent privileged recovery keeps financial effects idempotent', async () => {
+  const zero = await fixture();
+  const administrator = await addWorkspaceAdministrator(zero);
+  await Promise.all([
+    recoverWorkspaceAiBudgetExecution(prisma, {
+      executionClaimId: zero.claim.id,
+      operatorUserId: administrator.id,
+      workspaceId: zero.workspace.id,
+    }),
+    recoverWorkspaceAiBudgetExecution(prisma, {
+      executionClaimId: zero.claim.id,
+      operatorUserId: administrator.id,
+      workspaceId: zero.workspace.id,
+    }),
+  ]);
+  const [claim, reservation, debits] = await current(zero);
+  assert.equal(claim.status, AiBudgetExecutionClaimStatus.FINISHED);
+  assert.equal(reservation.status, AiBudgetReservationStatus.RELEASED);
+  assert.equal(debits.length, 0);
+});
+
+test('privileged recovery preserves existing overrun holds and indeterminate no-mutation behavior', async () => {
+  const overrun = await fixture(AiBudgetExecutionClaimStatus.STARTED, '0.001000000000');
+  const administrator = await addWorkspaceAdministrator(overrun);
+  await addRun(overrun, { attempted: true, cost: '0.010000000000' });
+  assert.equal(
+    (
+      await recoverWorkspaceAiBudgetExecution(prisma, {
+        executionClaimId: overrun.claim.id,
+        operatorUserId: administrator.id,
+        workspaceId: overrun.workspace.id,
+      })
+    ).action,
+    'RECOVERED_HELD_KNOWN_COST',
+  );
+  const [overrunClaim, overrunReservation, overrunDebits] = await current(overrun);
+  assert.equal(overrunClaim.status, AiBudgetExecutionClaimStatus.FINISHED);
+  assert.equal(overrunReservation.status, AiBudgetReservationStatus.RESERVED);
+  assert.equal(overrunDebits.length, 0);
+  await reset();
+
+  const indeterminate = await fixture();
+  const indeterminateAdministrator = await addWorkspaceAdministrator(indeterminate);
+  await addRun(indeterminate, { attempted: false, cost: '0.010000000000' });
+  const before = await current(indeterminate);
+  assert.equal(
+    (
+      await recoverWorkspaceAiBudgetExecution(prisma, {
+        executionClaimId: indeterminate.claim.id,
+        operatorUserId: indeterminateAdministrator.id,
+        workspaceId: indeterminate.workspace.id,
+      })
+    ).action,
+    'RECOVERY_INDETERMINATE',
+  );
+  assert.deepEqual(await current(indeterminate), before);
+});
+
+test('privileged terminal-financial recovery closes execution without a duplicate debit', async () => {
+  const f = await fixture();
+  const administrator = await addWorkspaceAdministrator(f);
+  await addRun(f, { attempted: true, cost: '0.010000000000' });
+  await settleAiBudgetReservation(prisma, {
+    actualCostUsd: '0.010000000000',
+    actorUserId: administrator.id,
+    reservationId: f.reservation.id,
+    workspaceId: f.workspace.id,
+  });
+  const beforeDebitCount = await prisma.aiBudgetLedgerEntry.count({
+    where: { type: AiBudgetLedgerEntryType.DEBIT },
+  });
+  assert.equal(
+    (
+      await recoverWorkspaceAiBudgetExecution(prisma, {
+        executionClaimId: f.claim.id,
+        operatorUserId: administrator.id,
+        workspaceId: f.workspace.id,
+      })
+    ).action,
+    'RECOVERED_TERMINAL_FINANCIAL_STATE',
+  );
+  assert.equal(
+    await prisma.aiBudgetLedgerEntry.count({ where: { type: AiBudgetLedgerEntryType.DEBIT } }),
+    beforeDebitCount,
+  );
+  assert.equal((await current(f))[0].status, AiBudgetExecutionClaimStatus.FINISHED);
+});
+
+test('owner recovery remains owner-scoped while privileged recovery ignores the former requester’s current role', async () => {
+  const f = await fixture();
+  const administrator = await addWorkspaceAdministrator(f);
+  await prisma.workspaceMembership.update({
+    data: { role: WorkspaceRole.OWNER },
+    where: { workspaceId_userId: { userId: administrator.id, workspaceId: f.workspace.id } },
+  });
+  await prisma.workspaceMembership.update({
+    data: { role: WorkspaceRole.VIEWER },
+    where: { workspaceId_userId: { userId: f.owner.id, workspaceId: f.workspace.id } },
+  });
+
+  await assert.rejects(
+    recoverAiBudgetExecution(prisma, input(f)),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message === 'ai.use requires an effective non-viewer workspace membership.',
+  );
+
+  const historical = await prisma.aiBudgetExecutionClaim.findUniqueOrThrow({
+    where: { id: f.claim.id },
+    include: { confirmation: true, routingDecision: true },
+  });
+  const result = await recoverWorkspaceAiBudgetExecution(prisma, {
+    executionClaimId: f.claim.id,
+    operatorUserId: administrator.id,
+    workspaceId: f.workspace.id,
+  });
+  assert.equal(result.action, 'RECOVERED_RELEASED_ZERO_ATTEMPT');
+  const after = await prisma.aiBudgetExecutionClaim.findUniqueOrThrow({
+    where: { id: f.claim.id },
+    include: { confirmation: true, routingDecision: true },
+  });
+  assert.equal(after.claimedByUserId, historical.claimedByUserId);
+  assert.equal(after.confirmation.requestedByUserId, historical.confirmation.requestedByUserId);
+  assert.equal(after.routingDecision.userMessageId, historical.routingDecision.userMessageId);
+});
+
+test('privileged recovery accepts a historical requester without an active workspace membership', async () => {
+  const f = await fixture();
+  const administrator = await addWorkspaceAdministrator(f);
+  await prisma.workspaceMembership.update({
+    data: { role: WorkspaceRole.OWNER },
+    where: { workspaceId_userId: { userId: administrator.id, workspaceId: f.workspace.id } },
+  });
+  await prisma.workspaceMembership.delete({
+    where: { workspaceId_userId: { userId: f.owner.id, workspaceId: f.workspace.id } },
+  });
+
+  const result = await recoverWorkspaceAiBudgetExecution(prisma, {
+    executionClaimId: f.claim.id,
+    operatorUserId: administrator.id,
+    workspaceId: f.workspace.id,
+  });
+  assert.equal(result.action, 'RECOVERED_RELEASED_ZERO_ATTEMPT');
+  assert.equal(
+    (await prisma.aiBudgetExecutionClaim.findUniqueOrThrow({ where: { id: f.claim.id } }))
+      .claimedByUserId,
+    f.owner.id,
   );
 });
