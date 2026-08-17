@@ -6,6 +6,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 
 import {
   AiBudgetConfirmationStatus,
+  AiBudgetReservationHoldReason,
   AiBudgetReservationStatus,
   AiGroundedContextSourceType,
   MembershipStatus,
@@ -1124,8 +1125,12 @@ test('a failure before provider attempt releases, while attempted unknown cost h
     assert.equal(calls, attempted ? 1 : 0);
     assert.equal(
       reservation.status,
-      attempted ? AiBudgetReservationStatus.RESERVED : AiBudgetReservationStatus.RELEASED,
+      attempted ? AiBudgetReservationStatus.HELD : AiBudgetReservationStatus.RELEASED,
     );
+    if (attempted) {
+      assert.equal(reservation.holdReason, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+      assert.notEqual(reservation.heldAt, null);
+    }
     assert.equal(await prisma.aiBudgetLedgerEntry.count({ where: { type: 'DEBIT' } }), 0);
   }
 });
@@ -1179,7 +1184,9 @@ test('attempted known failed cost settles, while a known overrun holds without t
       assert.equal(debits.length, 1);
       assert.equal(debits[0]?.amountUsd.toFixed(12), cost);
     } else {
-      assert.equal(reservation.status, AiBudgetReservationStatus.RESERVED);
+      assert.equal(reservation.status, AiBudgetReservationStatus.HELD);
+      assert.equal(reservation.holdReason, AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN);
+      assert.notEqual(reservation.heldAt, null);
       assert.equal(debits.length, 0);
     }
   }
@@ -1241,10 +1248,17 @@ test('plan mismatch and reconciliation failure make zero retries and fail safely
     assert.equal(calls, scenario === 'plan-mismatch' ? 0 : 1);
     assert.equal(await prisma.aiRun.count(), scenario === 'plan-mismatch' ? 0 : 1);
     assert.equal(await prisma.aiBudgetReservation.count(), 1);
+    const reservation = await prisma.aiBudgetReservation.findFirstOrThrow();
     assert.equal(
-      (await prisma.aiBudgetReservation.findFirstOrThrow()).status,
-      AiBudgetReservationStatus.RESERVED,
+      reservation.status,
+      scenario === 'plan-mismatch'
+        ? AiBudgetReservationStatus.HELD
+        : AiBudgetReservationStatus.RESERVED,
     );
+    if (scenario === 'plan-mismatch') {
+      assert.equal(reservation.holdReason, AiBudgetReservationHoldReason.ACCOUNTING_UNRESOLVED);
+      assert.notEqual(reservation.heldAt, null);
+    }
   }
 });
 

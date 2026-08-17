@@ -8,6 +8,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import {
   AiGroundedContextSourceType,
   AiBudgetConfirmationStatus,
+  AiBudgetReservationHoldReason,
   AiBudgetReservationStatus,
   AiKnowledgeActionType,
   AiMessageRole,
@@ -3921,7 +3922,9 @@ test('unknown or overrun first-candidate accounting stops and holds without fall
         : AiOrchestrationStatus.PARTIALLY_SUCCEEDED,
     );
     const reservation = await prisma.aiBudgetReservation.findFirstOrThrow();
-    assert.equal(reservation.status, AiBudgetReservationStatus.RESERVED);
+    assert.equal(reservation.status, AiBudgetReservationStatus.HELD);
+    assert.equal(reservation.holdReason, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+    assert.notEqual(reservation.heldAt, null);
     assert.equal(await prisma.aiBudgetLedgerEntry.count({ where: { type: 'DEBIT' } }), 0);
     if (scenario === 'unknown') {
       const failedRun = await prisma.aiRun.findFirstOrThrow({

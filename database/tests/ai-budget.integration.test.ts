@@ -15,6 +15,7 @@ import {
   AiBudgetValidationError,
   getAiBudgetSnapshot,
   getOrCreateAiBudgetAccount,
+  holdAiBudgetReservation,
   recordAiBudgetCredit,
   releaseAiBudgetReservation,
   reserveAiBudget,
@@ -22,6 +23,7 @@ import {
 } from '../ai/ai-budget';
 import {
   AiBudgetLedgerEntryType,
+  AiBudgetReservationHoldReason,
   AiBudgetReservationStatus,
   AiMessageRole,
   MembershipStatus,
@@ -149,6 +151,19 @@ async function reserve(
   });
 }
 
+async function hold(
+  f: Awaited<ReturnType<typeof fixture>>,
+  reservationId: string,
+  holdReason: AiBudgetReservationHoldReason,
+) {
+  return holdAiBudgetReservation(prisma, {
+    actorUserId: f.ownerId,
+    holdReason,
+    reservationId,
+    workspaceId: f.workspaceId,
+  });
+}
+
 async function routingDecision(f: Awaited<ReturnType<typeof fixture>>) {
   const conversation = await prisma.aiConversation.create({
     data: { ownerUserId: f.ownerId, title: 'Budget routing', workspaceId: f.workspaceId },
@@ -256,6 +271,204 @@ test('reservation changes active and spendable amounts without changing ledger b
     spendableBalanceUsd: '0.500000000000',
     workspaceId: f.workspaceId,
   });
+});
+
+test('a reservation hold persists immutable evidence without a financial ledger effect', async () => {
+  const f = await fixture();
+  const account = await accountFor(f);
+  await credit(f, account.id);
+  const reservation = await reserve(f, account.id, usd('0.250000000001'));
+  const held = await hold(f, reservation.id, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+
+  assert.equal(held.status, AiBudgetReservationStatus.HELD);
+  assert.equal(held.holdReason, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+  assert.ok(held.heldAt);
+  assert.equal(held.reservedAmountUsd.toFixed(12), '0.250000000001');
+  assert.equal(held.accountId, account.id);
+  assert.equal(held.workspaceId, f.workspaceId);
+  assert.equal(await prisma.aiBudgetLedgerEntry.count(), 1);
+  assert.equal(await prisma.aiBudgetExecutionClaim.count(), 0);
+  assert.equal(await prisma.aiRun.count(), 0);
+  assert.equal(await prisma.aiOrchestration.count(), 0);
+
+  await assert.rejects(
+    prisma.aiBudgetReservation.update({
+      data: { holdReason: AiBudgetReservationHoldReason.ACCOUNTING_UNRESOLVED },
+      where: { id: held.id },
+    }),
+    /hold reason is immutable/u,
+  );
+  await assert.rejects(
+    prisma.aiBudgetReservation.update({
+      data: { heldAt: new Date(0) },
+      where: { id: held.id },
+    }),
+    /hold timestamp is immutable/u,
+  );
+});
+
+test('holds remain active reserved capacity and reduce spendable balance exactly', async () => {
+  const f = await fixture();
+  const account = await accountFor(f);
+  await credit(f, account.id, usd('10.000000000000'));
+  await reserve(f, account.id, usd('2.000000000000'));
+  const heldReservation = await reserve(f, account.id, usd('3.000000000000'));
+  await hold(f, heldReservation.id, AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN);
+
+  assert.deepEqual(await getAiBudgetSnapshot(prisma, f.ownerId, f.workspaceId, account.id), {
+    accountId: account.id,
+    activeReservedUsd: '5.000000000000',
+    ledgerBalanceUsd: '10.000000000000',
+    spendableBalanceUsd: '5.000000000000',
+    workspaceId: f.workspaceId,
+  });
+});
+
+test('identical holds are idempotent while conflicting reasons fail closed', async () => {
+  const f = await fixture();
+  const account = await accountFor(f);
+  await credit(f, account.id);
+  const reservation = await reserve(f, account.id, usd('0.250000000000'));
+  const first = await hold(f, reservation.id, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+  const repeated = await hold(
+    f,
+    reservation.id,
+    AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST,
+  );
+
+  assert.equal(first.id, repeated.id);
+  assert.equal(first.heldAt?.toISOString(), repeated.heldAt?.toISOString());
+  await assert.rejects(
+    hold(f, reservation.id, AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN),
+    AiBudgetConflictError,
+  );
+});
+
+test('held reservations support only controlled terminal resolution and retain hold history', async () => {
+  const f = await fixture();
+  const account = await accountFor(f);
+  await credit(f, account.id);
+  const settledReservation = await reserve(f, account.id, usd('0.250000000000'));
+  const heldForSettlement = await hold(
+    f,
+    settledReservation.id,
+    AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN,
+  );
+  const settled = await settleAiBudgetReservation(prisma, {
+    actorUserId: f.ownerId,
+    actualCostUsd: usd('0.200000000000'),
+    reservationId: heldForSettlement.id,
+    workspaceId: f.workspaceId,
+  });
+  assert.equal(settled.status, AiBudgetReservationStatus.SETTLED);
+  assert.equal(settled.holdReason, AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN);
+  assert.equal(settled.heldAt?.toISOString(), heldForSettlement.heldAt?.toISOString());
+
+  const releasedReservation = await reserve(f, account.id, usd('0.250000000000'));
+  const heldForRelease = await hold(
+    f,
+    releasedReservation.id,
+    AiBudgetReservationHoldReason.ACCOUNTING_UNRESOLVED,
+  );
+  const released = await releaseAiBudgetReservation(prisma, {
+    actorUserId: f.ownerId,
+    reservationId: heldForRelease.id,
+    workspaceId: f.workspaceId,
+  });
+  assert.equal(released.status, AiBudgetReservationStatus.RELEASED);
+  assert.equal(released.holdReason, AiBudgetReservationHoldReason.ACCOUNTING_UNRESOLVED);
+  assert.equal(released.heldAt?.toISOString(), heldForRelease.heldAt?.toISOString());
+
+  for (const reservation of [settled, released]) {
+    await assert.rejects(
+      hold(f, reservation.id, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST),
+      AiBudgetStateError,
+    );
+  }
+});
+
+test('database protections reject invalid or backward hold lifecycle changes', async () => {
+  const f = await fixture();
+  const account = await accountFor(f);
+  await credit(f, account.id);
+  const reservation = await reserve(f, account.id, usd('0.250000000000'));
+
+  await assert.rejects(
+    prisma.aiBudgetReservation.update({
+      data: { status: AiBudgetReservationStatus.HELD },
+      where: { id: reservation.id },
+    }),
+    /Invalid AI budget reservation lifecycle transition/u,
+  );
+  const held = await hold(f, reservation.id, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+  await assert.rejects(
+    prisma.aiBudgetReservation.update({
+      data: { holdReason: null, heldAt: null, status: AiBudgetReservationStatus.RESERVED },
+      where: { id: held.id },
+    }),
+    /hold reason is immutable/u,
+  );
+  await assert.rejects(
+    prisma.aiBudgetReservation.delete({ where: { id: held.id } }),
+    /cannot be deleted/u,
+  );
+
+  const settledReservation = await reserve(f, account.id, usd('0.100000000000'));
+  await settleAiBudgetReservation(prisma, {
+    actorUserId: f.ownerId,
+    actualCostUsd: usd('0.100000000000'),
+    reservationId: settledReservation.id,
+    workspaceId: f.workspaceId,
+  });
+  const releasedReservation = await reserve(f, account.id, usd('0.100000000000'));
+  await releaseAiBudgetReservation(prisma, {
+    actorUserId: f.ownerId,
+    reservationId: releasedReservation.id,
+    workspaceId: f.workspaceId,
+  });
+  for (const reservationId of [settledReservation.id, releasedReservation.id]) {
+    await assert.rejects(
+      prisma.aiBudgetReservation.update({
+        data: {
+          heldAt: new Date(),
+          holdReason: AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST,
+          status: AiBudgetReservationStatus.HELD,
+        },
+        where: { id: reservationId },
+      }),
+      /Invalid AI budget reservation lifecycle transition/u,
+    );
+  }
+});
+
+test('concurrent holds retain one reason and create no duplicate financial effect', async () => {
+  const f = await fixture();
+  const account = await accountFor(f);
+  await credit(f, account.id);
+  const reservation = await reserve(f, account.id, usd('0.250000000000'));
+
+  const identical = await Promise.all([
+    hold(f, reservation.id, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST),
+    hold(f, reservation.id, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST),
+  ]);
+  assert.equal(identical[0].id, identical[1].id);
+  assert.equal(await prisma.aiBudgetLedgerEntry.count({ where: { type: 'DEBIT' } }), 0);
+
+  const conflictingReservation = await reserve(f, account.id, usd('0.250000000000'));
+  const conflicting = await Promise.allSettled([
+    hold(f, conflictingReservation.id, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST),
+    hold(f, conflictingReservation.id, AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN),
+  ]);
+  assert.equal(conflicting.filter((attempt) => attempt.status === 'fulfilled').length, 1);
+  assert.equal(conflicting.filter((attempt) => attempt.status === 'rejected').length, 1);
+  assert.equal(
+    (
+      await prisma.aiBudgetReservation.findUniqueOrThrow({
+        where: { id: conflictingReservation.id },
+      })
+    ).status,
+    AiBudgetReservationStatus.HELD,
+  );
 });
 
 test('reservation equal to spendable succeeds and an excess fails closed', async () => {

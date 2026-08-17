@@ -22,6 +22,7 @@ import {
 import {
   getAiBudgetSnapshot,
   getOrCreateAiBudgetAccount,
+  holdAiBudgetReservation,
   recordAiBudgetCredit,
   reserveAiBudget,
 } from '../ai/ai-budget';
@@ -32,6 +33,7 @@ import {
 } from '../ai/ai-routing-decisions';
 import {
   AiMessageRole,
+  AiBudgetReservationHoldReason,
   MembershipStatus,
   OrganizationRole,
   OrganizationStatus,
@@ -289,6 +291,35 @@ test('known cheap plan is allowed with exactly one exact reservation and no exec
   assert.equal(
     (await getAiBudgetSnapshot(prisma, f.ownerId, f.workspaceId, account.id)).ledgerBalanceUsd,
     '10.000000000000',
+  );
+});
+
+test('preflight treats a held reservation as active capacity without changing budget policy', async () => {
+  const f = await fixture();
+  const decision = await routingDecision(f, 'FAST');
+  const account = await fundedAccount(f, usd('0.010000000000'));
+  const heldReservation = await reserveAiBudget(prisma, {
+    accountId: account.id,
+    actorUserId: f.ownerId,
+    amountUsd: usd('0.008000000000'),
+    idempotencyKey: `held:${randomUUID()}`,
+    workspaceId: f.workspaceId,
+  });
+  await holdAiBudgetReservation(prisma, {
+    actorUserId: f.ownerId,
+    holdReason: AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST,
+    reservationId: heldReservation.id,
+    workspaceId: f.workspaceId,
+  });
+
+  const result = await preflightAiBudget(prisma, preflightInput(f, decision));
+
+  assert.equal(result.outcome, 'REJECTED');
+  assert.equal(result.budgetDecision.reason, 'INSUFFICIENT_AVAILABLE_BALANCE');
+  assert.equal(result.reservation, null);
+  assert.equal(
+    (await getAiBudgetSnapshot(prisma, f.ownerId, f.workspaceId, account.id)).spendableBalanceUsd,
+    '0.002000000000',
   );
 });
 

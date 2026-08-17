@@ -248,8 +248,15 @@ enum AiBudgetLedgerEntryType {
 
 enum AiBudgetReservationStatus {
   RESERVED
+  HELD
   SETTLED
   RELEASED
+}
+
+enum AiBudgetReservationHoldReason {
+  UNKNOWN_PROVIDER_COST
+  ACTUAL_COST_OVERRUN
+  ACCOUNTING_UNRESOLVED
 }
 
 enum AiBudgetConfirmationStatus {
@@ -1001,6 +1008,8 @@ model AiBudgetReservation {
   idempotencyKey        String
   reservedAmountUsd     Decimal                   @db.Decimal(65, 12)
   status                AiBudgetReservationStatus @default(RESERVED)
+  holdReason            AiBudgetReservationHoldReason?
+  heldAt                DateTime?                 @db.Timestamptz(6)
   settledAmountUsd      Decimal?                  @db.Decimal(65, 12)
   createdAt             DateTime                  @default(now()) @db.Timestamptz(6)
   settledAt             DateTime?                 @db.Timestamptz(6)
@@ -1016,7 +1025,7 @@ model AiBudgetReservation {
   @@unique([accountId, idempotencyKey])
   @@unique([routingDecisionId, workspaceId], map: "ai_budget_reservation_routing_scope_key")
   @@index([workspaceId, status, createdAt])
-  @@index([accountId, createdAt], map: "ai_budget_reservations_active_idx", where: raw("(status = 'RESERVED'::\"AiBudgetReservationStatus\")"))
+  @@index([accountId, createdAt], map: "ai_budget_reservations_active_idx", where: raw("(status = ANY (ARRAY['RESERVED'::\"AiBudgetReservationStatus\", 'HELD'::\"AiBudgetReservationStatus\"]))"))
   @@map("ai_budget_reservations")
 }
 

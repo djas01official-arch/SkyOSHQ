@@ -1,5 +1,6 @@
 import {
   AiBudgetLedgerEntryType,
+  AiBudgetReservationHoldReason,
   AiBudgetReservationStatus,
   type AiBudgetAccount,
   type AiBudgetLedgerEntry,
@@ -64,6 +65,13 @@ export type ReleaseAiBudgetReservationInput = Readonly<{
   workspaceId: string;
 }>;
 
+export type HoldAiBudgetReservationInput = Readonly<{
+  actorUserId: string;
+  holdReason: AiBudgetReservationHoldReason;
+  reservationId: string;
+  workspaceId: string;
+}>;
+
 export class AiBudgetPersistenceError extends Error {
   readonly code: string;
 
@@ -120,7 +128,12 @@ function validateCommon(actorUserId: unknown, workspaceId: unknown): void {
   }
 }
 
-async function requireAiBudgetAdministrationAccess(
+/**
+ * Financial reservation mutations are restricted to workspace administrators.
+ * Other budget services reuse this boundary rather than accepting a caller's
+ * assertion about the original execution requester or its cost.
+ */
+export async function requireAiBudgetAdministrationAccess(
   prisma: PrismaClient,
   actorUserId: string,
   workspaceId: string,
@@ -204,7 +217,11 @@ async function snapshotInTransaction(
   });
   const activeReservations = await transaction.aiBudgetReservation.aggregate({
     _sum: { reservedAmountUsd: true },
-    where: { accountId, status: AiBudgetReservationStatus.RESERVED, workspaceId },
+    where: {
+      accountId,
+      status: { in: [AiBudgetReservationStatus.RESERVED, AiBudgetReservationStatus.HELD] },
+      workspaceId,
+    },
   });
   const creditUsd = decimalMoney(
     ledgerGroups.find((entry) => entry.type === AiBudgetLedgerEntryType.CREDIT)?._sum.amountUsd ??
@@ -508,13 +525,73 @@ async function lockReservationAccount(
   return current;
 }
 
-function requireReserved(reservation: AiBudgetReservation): void {
-  if (reservation.status !== AiBudgetReservationStatus.RESERVED) {
+function requireReconciliableReservation(reservation: AiBudgetReservation): void {
+  if (
+    reservation.status !== AiBudgetReservationStatus.RESERVED &&
+    reservation.status !== AiBudgetReservationStatus.HELD
+  ) {
     throw new AiBudgetStateError(
       'The AI budget reservation is already terminal.',
       'budget_reservation_transition_invalid',
     );
   }
+}
+
+function validHoldReason(value: unknown): value is AiBudgetReservationHoldReason {
+  return Object.values(AiBudgetReservationHoldReason).includes(
+    value as AiBudgetReservationHoldReason,
+  );
+}
+
+async function holdAiBudgetReservationAfterAuthorization(
+  prisma: PrismaClient,
+  input: HoldAiBudgetReservationInput,
+): Promise<AiBudgetReservation> {
+  return prisma.$transaction(async (transaction) => {
+    const reservation = await lockReservationAccount(
+      transaction,
+      input.reservationId,
+      input.workspaceId,
+    );
+    if (reservation.status === AiBudgetReservationStatus.HELD) {
+      if (reservation.holdReason === input.holdReason) return reservation;
+      throw new AiBudgetConflictError(
+        'The AI budget reservation is already held for a different reason.',
+        'budget_reservation_hold_reason_conflict',
+      );
+    }
+    if (reservation.status !== AiBudgetReservationStatus.RESERVED) {
+      throw new AiBudgetStateError(
+        'The AI budget reservation cannot enter a hold from its current state.',
+        'budget_reservation_transition_invalid',
+      );
+    }
+    return transaction.aiBudgetReservation.update({
+      data: {
+        heldAt: new Date(),
+        holdReason: input.holdReason,
+        status: AiBudgetReservationStatus.HELD,
+      },
+      where: { id: reservation.id },
+    });
+  });
+}
+
+/**
+ * Durably blocks the existing reserved capacity while exact financial
+ * reconciliation remains unsafe. This operation never creates a ledger entry
+ * or execution state, and the first persisted reason remains immutable.
+ */
+export async function holdAiBudgetReservation(
+  prisma: PrismaClient,
+  input: HoldAiBudgetReservationInput,
+): Promise<AiBudgetReservation> {
+  validateCommon(input.actorUserId, input.workspaceId);
+  if (!validUuid(input.reservationId) || !validHoldReason(input.holdReason)) {
+    throw new AiBudgetValidationError('AI budget hold input is invalid.', 'budget_input_invalid');
+  }
+  await requireAiBudgetAdministrationAccess(prisma, input.actorUserId, input.workspaceId);
+  return holdAiBudgetReservationAfterAuthorization(prisma, input);
 }
 
 type AiBudgetConsumptionReservationInput = Readonly<{
@@ -562,7 +639,7 @@ async function settleAiBudgetReservationAfterAuthorization(
       input.reservationId,
       input.workspaceId,
     );
-    requireReserved(reservation);
+    requireReconciliableReservation(reservation);
     if (compareFixedPrecisionUsd(actualCostUsd, decimalMoney(reservation.reservedAmountUsd)) > 0) {
       throw new AiBudgetStateError(
         'AI budget settlement exceeds its reservation.',
@@ -622,6 +699,27 @@ export async function settleAiBudgetReservationForConsumption(
   return settleAiBudgetReservationAfterAuthorization(prisma, input, actualCostUsd);
 }
 
+/**
+ * Durably holds the reservation owned by the authenticated Chat execution
+ * lineage. It preserves the consumption authorization boundary used by normal
+ * execution reconciliation; workspace-budget administration is not required.
+ */
+export async function holdAiBudgetReservationForConsumption(
+  prisma: PrismaClient,
+  input: HoldAiBudgetReservationInput & Readonly<{ routingDecisionId: string }>,
+): Promise<AiBudgetReservation> {
+  validateCommon(input.actorUserId, input.workspaceId);
+  if (
+    !validUuid(input.reservationId) ||
+    !validUuid(input.routingDecisionId) ||
+    !validHoldReason(input.holdReason)
+  ) {
+    throw new AiBudgetValidationError('AI budget hold input is invalid.', 'budget_input_invalid');
+  }
+  await requireConsumptionReservation(prisma, input);
+  return holdAiBudgetReservationAfterAuthorization(prisma, input);
+}
+
 async function releaseAiBudgetReservationAfterAuthorization(
   prisma: PrismaClient,
   input: ReleaseAiBudgetReservationInput,
@@ -632,7 +730,7 @@ async function releaseAiBudgetReservationAfterAuthorization(
       input.reservationId,
       input.workspaceId,
     );
-    requireReserved(reservation);
+    requireReconciliableReservation(reservation);
     return transaction.aiBudgetReservation.update({
       data: { releasedAt: new Date(), status: AiBudgetReservationStatus.RELEASED },
       where: { id: reservation.id },

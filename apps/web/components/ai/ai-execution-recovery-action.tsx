@@ -26,7 +26,7 @@ function descriptionFor(classification: AiExecutionRecoveryActionProps['classifi
     case 'ATTEMPTED_KNOWN_COST':
       return 'Recovery will reconcile the persisted provider cost and close execution ownership.';
     case 'ATTEMPTED_UNKNOWN_COST':
-      return 'Provider execution was attempted, but complete cost is unresolved. Recovery will close execution ownership while preserving the reserved budget for later financial review.';
+      return 'Provider execution was attempted, but complete cost is unresolved. Recovery will close execution ownership and hold the budget for later financial review.';
     case 'TERMINAL_FINANCIAL_STATE':
       return 'Financial reconciliation is already terminal. Recovery will close the remaining execution ownership state.';
     case 'INDETERMINATE':

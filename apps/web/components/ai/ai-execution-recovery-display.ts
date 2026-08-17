@@ -2,12 +2,26 @@ import type {
   AiBudgetExecutionRecoveryClassification,
   AiBudgetExecutionRecoveryIndeterminateReason,
 } from '../../../../database/ai/ai-budget-execution-recovery';
+import type { AiBudgetReservationHoldReason } from '../../../../database/generated/client/client';
 
 export type AiExecutionRecoveryPresentation = Readonly<{
   description: string;
   title: string;
   tone: 'neutral' | 'warning';
 }>;
+
+export function getAiBudgetReservationHoldReasonDisplay(
+  holdReason: AiBudgetReservationHoldReason,
+): string {
+  switch (holdReason) {
+    case 'UNKNOWN_PROVIDER_COST':
+      return 'Budget is held because provider cost is unresolved.';
+    case 'ACTUAL_COST_OVERRUN':
+      return 'Budget is held because recorded provider cost exceeded the reserved amount.';
+    case 'ACCOUNTING_UNRESOLVED':
+      return 'Budget is held because accounting requires manual resolution.';
+  }
+}
 
 const INDETERMINATE_DESCRIPTIONS: Record<AiBudgetExecutionRecoveryIndeterminateReason, string> = {
   EXECUTION_LINEAGE_MISMATCH: 'Execution lineage is inconsistent.',
@@ -44,7 +58,7 @@ export function getAiExecutionRecoveryPresentation(
     case 'TERMINAL_FINANCIAL_STATE':
       return {
         description:
-          'The reservation is already settled or released while execution ownership is still marked started.',
+          'The reservation is already settled, released, or held while execution ownership is still marked started.',
         title: 'Financial state already terminal',
         tone: 'neutral',
       };

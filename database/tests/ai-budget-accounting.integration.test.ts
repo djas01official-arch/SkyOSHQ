@@ -474,7 +474,7 @@ test('terminal FAST with no provider attempt releases without a debit', async ()
   );
 });
 
-test('unknown cost, overrun, and non-terminal executions HOLD without financial mutation', async () => {
+test('unknown cost, overrun, and explicit unresolved accounting durably HOLD without financial mutation', async () => {
   for (const scenario of ['unknown', 'overrun', 'processing'] as const) {
     await reset();
     const f = await fixture();
@@ -493,7 +493,16 @@ test('unknown cost, overrun, and non-terminal executions HOLD without financial 
 
     const result = await reconcile(f, route, reservation.id);
     assert.equal(result.outcome, 'HELD');
-    assert.equal(result.reservation.status, AiBudgetReservationStatus.RESERVED);
+    assert.equal(result.reservation.status, AiBudgetReservationStatus.HELD);
+    assert.notEqual(result.reservation.heldAt, null);
+    assert.equal(
+      result.reservation.holdReason,
+      scenario === 'unknown'
+        ? 'UNKNOWN_PROVIDER_COST'
+        : scenario === 'overrun'
+          ? 'ACTUAL_COST_OVERRUN'
+          : 'ACCOUNTING_UNRESOLVED',
+    );
     assert.equal(
       result.decision.reason,
       scenario === 'unknown'
@@ -506,7 +515,52 @@ test('unknown cost, overrun, and non-terminal executions HOLD without financial 
       await prisma.aiBudgetLedgerEntry.count({ where: { reservationId: reservation.id } }),
       0,
     );
+    const repeated = await reconcile(f, route, reservation.id);
+    assert.equal(repeated.alreadyTerminal, true);
+    assert.equal(repeated.outcome, 'HELD');
+    assert.equal(repeated.reservation.status, AiBudgetReservationStatus.HELD);
+    assert.equal(repeated.reservation.holdReason, result.reservation.holdReason);
   }
+});
+
+test('hold persistence failure fails closed without reporting or fabricating HELD', async () => {
+  const f = await fixture();
+  const route = await routingDecision(f);
+  const { reservation } = await fundedReservation(f, route);
+  await createRun(f, route, { providerAttempted: true, status: AiRunStatus.FAILED });
+  await prisma.$executeRawUnsafe(`
+    CREATE FUNCTION reject_budget_hold_for_test() RETURNS trigger AS $$
+    BEGIN
+      IF NEW."status" = 'HELD' THEN
+        RAISE EXCEPTION 'forced AI budget hold persistence failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TRIGGER reject_budget_hold_for_test
+    BEFORE UPDATE OF "status" ON "ai_budget_reservations"
+    FOR EACH ROW EXECUTE FUNCTION reject_budget_hold_for_test();
+  `);
+  try {
+    await assert.rejects(reconcile(f, route, reservation.id));
+  } finally {
+    await prisma.$executeRawUnsafe(
+      'DROP TRIGGER IF EXISTS reject_budget_hold_for_test ON "ai_budget_reservations";',
+    );
+    await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS reject_budget_hold_for_test();');
+  }
+  const persisted = await prisma.aiBudgetReservation.findUniqueOrThrow({
+    where: { id: reservation.id },
+  });
+  assert.equal(persisted.status, AiBudgetReservationStatus.RESERVED);
+  assert.equal(persisted.holdReason, null);
+  assert.equal(persisted.heldAt, null);
+  assert.equal(
+    await prisma.aiBudgetLedgerEntry.count({ where: { reservationId: reservation.id } }),
+    0,
+  );
 });
 
 test('orchestrated terminal spend settles the exact aggregate of all linked runs', async () => {

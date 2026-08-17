@@ -29,9 +29,9 @@ function noticeFor(action: AiBudgetExecutionRecoveryAction): string | null {
     case 'RECOVERED_SETTLED_KNOWN_COST':
       return 'Recovery completed. Persisted provider cost was reconciled.';
     case 'RECOVERED_HELD_KNOWN_COST':
-      return 'Execution ownership was closed. Budget remains reserved under the existing budget hold.';
+      return 'Execution ownership was closed. Budget remains held because recorded provider cost exceeded the reserved amount.';
     case 'RECOVERED_HELD_UNKNOWN_COST':
-      return 'Execution ownership was closed. Budget remains reserved because provider cost is unresolved.';
+      return 'Execution ownership was closed. Budget remains held because provider cost is unresolved.';
     case 'RECOVERED_TERMINAL_FINANCIAL_STATE':
       return 'Recovery completed. Existing financial state was preserved.';
     case 'RECOVERY_ALREADY_TERMINAL':

@@ -1,4 +1,5 @@
 import {
+  AiBudgetReservationHoldReason,
   AiBudgetReservationStatus,
   AiOrchestrationStatus,
   AiRunStatus,
@@ -31,6 +32,7 @@ import {
   AiBudgetPersistenceError,
   AiBudgetStateError,
   getAiBudgetSnapshotForConsumption,
+  holdAiBudgetReservationForConsumption,
   releaseAiBudgetReservationForConsumption,
   settleAiBudgetReservationForConsumption,
 } from './ai-budget';
@@ -87,6 +89,8 @@ export type AiBudgetReconciliationResult = Readonly<{
   outcome: 'SETTLED' | 'RELEASED' | 'HELD';
   reservation: Readonly<{
     id: string;
+    heldAt: Date | null;
+    holdReason: AiBudgetReservationHoldReason | null;
     reservedAmountUsd: FixedPrecisionUsd;
     settledAmountUsd: FixedPrecisionUsd | null;
     status: AiBudgetReservationStatus;
@@ -407,11 +411,59 @@ function reservationView(reservation: AiBudgetReservation) {
     );
   }
   return Object.freeze({
+    heldAt: reservation.heldAt,
+    holdReason: reservation.holdReason,
     id: reservation.id,
     reservedAmountUsd,
     settledAmountUsd: money(reservation.settledAmountUsd),
     status: reservation.status,
   });
+}
+
+function holdReasonForDecision(
+  decision: Extract<AiBudgetSettlementDecision, { action: 'HOLD' }>,
+): AiBudgetReservationHoldReason {
+  switch (decision.reason) {
+    case 'UNKNOWN_ACTUAL_COST':
+      return AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST;
+    case 'ACTUAL_COST_OVERRUN':
+      return AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN;
+    case 'ACCOUNTING_INCONSISTENT':
+      return AiBudgetReservationHoldReason.ACCOUNTING_UNRESOLVED;
+  }
+}
+
+function decisionForPersistedHold(
+  holdReason: AiBudgetReservationHoldReason | null,
+): Extract<AiBudgetSettlementDecision, { action: 'HOLD' }> {
+  switch (holdReason) {
+    case AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST:
+      return Object.freeze({
+        action: 'HOLD' as const,
+        knownActualSpentUsd: null,
+        reason: 'UNKNOWN_ACTUAL_COST' as const,
+        settledAmountUsd: null,
+      });
+    case AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN:
+      return Object.freeze({
+        action: 'HOLD' as const,
+        knownActualSpentUsd: null,
+        reason: 'ACTUAL_COST_OVERRUN' as const,
+        settledAmountUsd: null,
+      });
+    case AiBudgetReservationHoldReason.ACCOUNTING_UNRESOLVED:
+      return Object.freeze({
+        action: 'HOLD' as const,
+        knownActualSpentUsd: null,
+        reason: 'ACCOUNTING_INCONSISTENT' as const,
+        settledAmountUsd: null,
+      });
+    default:
+      throw new AiBudgetAccountingError(
+        'The held AI budget reservation does not contain its immutable hold reason.',
+        'budget_accounting_state_invalid',
+      );
+  }
 }
 
 function terminalReadBack(
@@ -420,6 +472,15 @@ function terminalReadBack(
   decision: AiBudgetSettlementDecision,
 ): AiBudgetReconciliationResult | null {
   const view = reservationView(reservation);
+  if (reservation.status === AiBudgetReservationStatus.HELD) {
+    return Object.freeze({
+      alreadyTerminal: true,
+      decision: decisionForPersistedHold(view.holdReason),
+      observations,
+      outcome: 'HELD' as const,
+      reservation: view,
+    });
+  }
   if (reservation.status === AiBudgetReservationStatus.SETTLED) {
     if (
       view.settledAmountUsd === null ||
@@ -509,7 +570,8 @@ async function currentReservation(
 /**
  * Reconciles every durably linked Chat run for one routing decision. Persisted
  * estimatedCostUsd is treated as the known accounted telemetry cost, not as a
- * provider invoice. HOLD leaves the reservation unchanged for later review.
+ * provider invoice. HOLD durably blocks the original reservation for later
+ * financial review without creating a ledger entry.
  */
 export async function reconcileAiBudgetReservation(
   prisma: PrismaClient,
@@ -549,6 +611,13 @@ export async function reconcileAiBudgetReservation(
   const existing = terminalReadBack(reservation, observations, decision);
   if (existing) return existing;
   if (decision.action === 'HOLD') {
+    reservation = await holdAiBudgetReservationForConsumption(prisma, {
+      actorUserId: input.actorUserId,
+      holdReason: holdReasonForDecision(decision),
+      reservationId: reservation.id,
+      routingDecisionId: input.routingDecisionId,
+      workspaceId: input.workspaceId,
+    });
     return Object.freeze({
       alreadyTerminal: false,
       decision,

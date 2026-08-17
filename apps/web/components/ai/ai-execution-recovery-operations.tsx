@@ -2,7 +2,10 @@ import type { WorkspaceAiBudgetExecutionRecoveryCandidate } from '../../../../da
 
 import { formatAiBudgetConfirmationUsd } from '@/components/ai/ai-budget-confirmation-display';
 import { AiExecutionRecoveryAction } from '@/components/ai/ai-execution-recovery-action';
-import { getAiExecutionRecoveryPresentation } from '@/components/ai/ai-execution-recovery-display';
+import {
+  getAiBudgetReservationHoldReasonDisplay,
+  getAiExecutionRecoveryPresentation,
+} from '@/components/ai/ai-execution-recovery-display';
 import { Card, CardHeader } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
@@ -98,6 +101,20 @@ export function AiExecutionRecoveryOperations({
                 <dl className="mt-5 grid gap-x-6 gap-y-4 border-t border-border pt-5 sm:grid-cols-2 lg:grid-cols-4">
                   <EvidenceField label="Started" value={displayDate(candidate.startedAt)} />
                   <EvidenceField label="Reservation status" value={candidate.reservation.status} />
+                  {candidate.reservation.holdReason !== null ? (
+                    <EvidenceField
+                      label="Budget hold"
+                      value={getAiBudgetReservationHoldReasonDisplay(
+                        candidate.reservation.holdReason,
+                      )}
+                    />
+                  ) : null}
+                  {candidate.reservation.heldAt !== null ? (
+                    <EvidenceField
+                      label="Held at"
+                      value={displayDate(candidate.reservation.heldAt)}
+                    />
+                  ) : null}
                   <EvidenceField
                     label="Reserved amount"
                     value={displayMoney(candidate.reservation.reservedAmountUsd)}

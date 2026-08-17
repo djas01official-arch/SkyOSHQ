@@ -1,6 +1,7 @@
 import {
   AiBudgetLedgerEntryType,
   AiBudgetExecutionClaimStatus,
+  AiBudgetReservationHoldReason,
   AiBudgetReservationStatus,
   AiMessageRole,
   AiOrchestrationMode,
@@ -55,6 +56,8 @@ type AiBudgetExecutionRecoveryEvidence = Readonly<{
   providerAttemptCount: number;
   reservation: Readonly<{
     id: string;
+    heldAt: Date | null;
+    holdReason: AiBudgetReservationHoldReason | null;
     reservedAmountUsd: FixedPrecisionUsd | null;
     settlementLedgerEntry: Readonly<{
       amountUsd: FixedPrecisionUsd | null;
@@ -145,6 +148,8 @@ export type WorkspaceAiBudgetExecutionRecoveryCandidate = Readonly<{
   providerAttemptCount: number;
   requestPreview: string;
   reservation: Readonly<{
+    heldAt: Date | null;
+    holdReason: AiBudgetReservationHoldReason | null;
     reservedAmountUsd: FixedPrecisionUsd | null;
     status: AiBudgetReservationStatus;
   }>;
@@ -286,6 +291,8 @@ function projectWorkspaceRecoveryCandidate(
     providerAttemptCount: inspection.providerAttemptCount,
     requestPreview: requestPreview(claim.routingDecision.userMessage.content),
     reservation: Object.freeze({
+      heldAt: inspection.reservation.heldAt,
+      holdReason: inspection.reservation.holdReason,
       reservedAmountUsd: inspection.reservation.reservedAmountUsd,
       status: inspection.reservation.status,
     }),
@@ -416,6 +423,8 @@ function inspectRecoveryClaim(claim: RecoveryClaim): AiBudgetExecutionRecoveryIn
         : null,
       providerAttemptCount,
       reservation: Object.freeze({
+        heldAt: reservation.heldAt,
+        holdReason: reservation.holdReason,
         id: reservation.id,
         reservedAmountUsd: reservationAmount,
         settlementLedgerEntry,
@@ -472,7 +481,8 @@ function inspectRecoveryClaim(claim: RecoveryClaim): AiBudgetExecutionRecoveryIn
 
   if (
     reservation.status === AiBudgetReservationStatus.SETTLED ||
-    reservation.status === AiBudgetReservationStatus.RELEASED
+    reservation.status === AiBudgetReservationStatus.RELEASED ||
+    reservation.status === AiBudgetReservationStatus.HELD
   ) {
     return Object.freeze({
       ...evidence(),

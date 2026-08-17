@@ -12,6 +12,7 @@ import {
 import { AiBudgetExecutionRecoveryOperationsAuthorizationError } from '../ai/ai-budget-execution-recovery';
 import {
   recordAiBudgetCredit,
+  holdAiBudgetReservationForConsumption,
   releaseAiBudgetReservationForConsumption,
   settleAiBudgetReservation,
   settleAiBudgetReservationForConsumption,
@@ -24,6 +25,7 @@ import {
 import {
   AiBudgetExecutionClaimStatus,
   AiBudgetLedgerEntryType,
+  AiBudgetReservationHoldReason,
   AiBudgetReservationStatus,
   AiMessageRole,
   AiRunStatus,
@@ -394,11 +396,13 @@ test('attempted known zero cost remains a settlement, while overrun is held with
   );
   const [claim, reservation, ledger] = await current(overrun);
   assert.equal(claim.status, AiBudgetExecutionClaimStatus.FINISHED);
-  assert.equal(reservation.status, AiBudgetReservationStatus.RESERVED);
+  assert.equal(reservation.status, AiBudgetReservationStatus.HELD);
+  assert.equal(reservation.holdReason, AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN);
+  assert.notEqual(reservation.heldAt, null);
   assert.equal(ledger.length, 0);
 });
 
-test('unknown attempted cost keeps the reservation reserved and finishes execution ownership', async () => {
+test('unknown attempted cost holds the reservation and finishes execution ownership', async () => {
   const unknown = await fixture();
   await addRun(unknown, { attempted: true, cost: null });
   assert.equal(
@@ -407,8 +411,47 @@ test('unknown attempted cost keeps the reservation reserved and finishes executi
   );
   const [unknownClaim, unknownReservation, unknownLedger] = await current(unknown);
   assert.equal(unknownClaim.status, AiBudgetExecutionClaimStatus.FINISHED);
-  assert.equal(unknownReservation.status, AiBudgetReservationStatus.RESERVED);
+  assert.equal(unknownReservation.status, AiBudgetReservationStatus.HELD);
+  assert.equal(unknownReservation.holdReason, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+  assert.notEqual(unknownReservation.heldAt, null);
   assert.equal(unknownLedger.length, 0);
+});
+
+test('unknown-cost hold persistence failure fails closed without closing the claim or fabricating HELD', async () => {
+  const f = await fixture();
+  await addRun(f, { attempted: true, cost: null });
+  const result = await recoverAiBudgetExecution(prisma, input(f), {
+    hold: async () => {
+      throw new Error('test hold persistence failure');
+    },
+  });
+  assert.equal(result.action, 'RECOVERY_RECONCILIATION_FAILED');
+  const [claim, reservation, ledger] = await current(f);
+  assert.equal(claim.status, AiBudgetExecutionClaimStatus.STARTED);
+  assert.equal(reservation.status, AiBudgetReservationStatus.RESERVED);
+  assert.equal(reservation.holdReason, null);
+  assert.equal(reservation.heldAt, null);
+  assert.equal(ledger.length, 0);
+});
+
+test('a STARTED claim with a compatible existing hold finishes without a second hold mutation', async () => {
+  const f = await fixture();
+  await addRun(f, { attempted: true, cost: null });
+  const held = await holdAiBudgetReservationForConsumption(prisma, {
+    actorUserId: f.owner.id,
+    holdReason: AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST,
+    reservationId: f.reservation.id,
+    routingDecisionId: f.routing.id,
+    workspaceId: f.workspace.id,
+  });
+  const result = await recoverAiBudgetExecution(prisma, input(f));
+  assert.equal(result.action, 'RECOVERED_TERMINAL_FINANCIAL_STATE');
+  const [claim, reservation, ledger] = await current(f);
+  assert.equal(claim.status, AiBudgetExecutionClaimStatus.FINISHED);
+  assert.equal(reservation.status, AiBudgetReservationStatus.HELD);
+  assert.equal(reservation.holdReason, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+  assert.equal(reservation.heldAt?.getTime(), held.heldAt?.getTime());
+  assert.equal(ledger.length, 0);
 });
 
 test('terminal financial state finishes once without duplicate settlement', async () => {
@@ -628,7 +671,8 @@ test('privileged recovery requires workspace.members.manage and preserves known 
   );
   const [unknownClaim, unknownReservation, unknownDebits] = await current(unknown);
   assert.equal(unknownClaim.status, AiBudgetExecutionClaimStatus.FINISHED);
-  assert.equal(unknownReservation.status, AiBudgetReservationStatus.RESERVED);
+  assert.equal(unknownReservation.status, AiBudgetReservationStatus.HELD);
+  assert.equal(unknownReservation.holdReason, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
   assert.equal(unknownDebits.length, 0);
 });
 
@@ -669,7 +713,8 @@ test('privileged recovery preserves existing overrun holds and indeterminate no-
   );
   const [overrunClaim, overrunReservation, overrunDebits] = await current(overrun);
   assert.equal(overrunClaim.status, AiBudgetExecutionClaimStatus.FINISHED);
-  assert.equal(overrunReservation.status, AiBudgetReservationStatus.RESERVED);
+  assert.equal(overrunReservation.status, AiBudgetReservationStatus.HELD);
+  assert.equal(overrunReservation.holdReason, AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN);
   assert.equal(overrunDebits.length, 0);
   await reset();
 

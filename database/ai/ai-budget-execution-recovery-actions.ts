@@ -1,5 +1,6 @@
 import {
   AiBudgetExecutionClaimStatus,
+  AiBudgetReservationHoldReason,
   AiBudgetReservationStatus,
   type PrismaClient,
 } from '../generated/client/client';
@@ -12,6 +13,8 @@ import {
   releaseAiBudgetReservation,
   releaseAiBudgetReservationForConsumption,
   settleAiBudgetReservation,
+  holdAiBudgetReservation,
+  holdAiBudgetReservationForConsumption,
 } from './ai-budget';
 import { finishAiBudgetExecutionClaim } from './ai-budget-execution-claims';
 import {
@@ -83,6 +86,7 @@ export type AiBudgetExecutionRecoveryActionResult =
 /** Injectable only for deterministic persistence-failure regression tests. */
 export type AiBudgetExecutionRecoveryActionDependencies = Readonly<{
   finish?: typeof finishAiBudgetExecutionClaim;
+  hold?: typeof holdAiBudgetReservationForConsumption;
   reconcile?: typeof reconcileAiBudgetReservation;
   release?: typeof releaseAiBudgetReservationForConsumption;
 }>;
@@ -98,6 +102,10 @@ type KnownCostInspection = Extract<
   AiBudgetExecutionRecoveryInspection,
   { classification: 'ATTEMPTED_KNOWN_COST' }
 >;
+type UnknownCostInspection = Extract<
+  AiBudgetExecutionRecoveryInspection,
+  { classification: 'ATTEMPTED_UNKNOWN_COST' }
+>;
 type ZeroAttemptInspection = Extract<
   AiBudgetExecutionRecoveryInspection,
   { classification: 'ZERO_ATTEMPT_PROVEN' }
@@ -106,6 +114,10 @@ type ZeroAttemptInspection = Extract<
 type AuthorizedRecoveryMutations = Readonly<{
   finish(): Promise<unknown>;
   inspect(): Promise<AiBudgetExecutionRecoveryInspection>;
+  hold(
+    inspection: KnownCostInspection | UnknownCostInspection,
+    holdReason: AiBudgetReservationHoldReason,
+  ): Promise<{ status: AiBudgetReservationStatus }>;
   reconcile(inspection: KnownCostInspection): Promise<RecoveryReconciliation>;
   release(inspection: ZeroAttemptInspection): Promise<{ status: AiBudgetReservationStatus }>;
 }>;
@@ -168,6 +180,14 @@ function createOwnerRecoveryMutations(
   return Object.freeze({
     finish: () => (dependencies.finish ?? finishAiBudgetExecutionClaim)(prisma, input),
     inspect: () => inspectAiBudgetExecutionRecovery(prisma, input),
+    hold: (inspection, holdReason) =>
+      (dependencies.hold ?? holdAiBudgetReservationForConsumption)(prisma, {
+        actorUserId: input.actorUserId,
+        holdReason,
+        reservationId: inspection.reservation.id,
+        routingDecisionId: inspection.routingDecisionId,
+        workspaceId: input.workspaceId,
+      }),
     reconcile: (inspection) =>
       (dependencies.reconcile ?? reconcileAiBudgetReservation)(prisma, {
         actorUserId: input.actorUserId,
@@ -211,6 +231,13 @@ function createWorkspaceRecoveryMutations(
         executionClaimId: input.executionClaimId,
         workspaceId: input.workspaceId,
       }),
+    hold: (inspection, holdReason) =>
+      holdAiBudgetReservation(prisma, {
+        actorUserId: input.operatorUserId,
+        holdReason,
+        reservationId: inspection.reservation.id,
+        workspaceId: input.workspaceId,
+      }),
     reconcile: async (inspection) => {
       if (
         compareFixedPrecisionUsd(
@@ -218,11 +245,17 @@ function createWorkspaceRecoveryMutations(
           inspection.reservation.reservedAmountUsd!,
         ) > 0
       ) {
+        const reservation = await holdAiBudgetReservation(prisma, {
+          actorUserId: input.operatorUserId,
+          holdReason: AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN,
+          reservationId: inspection.reservation.id,
+          workspaceId: input.workspaceId,
+        });
         return Object.freeze({
           outcome: 'HELD' as const,
           reservation: Object.freeze({
             settledAmountUsd: null,
-            status: AiBudgetReservationStatus.RESERVED,
+            status: reservation.status,
           }),
         });
       }
@@ -264,6 +297,25 @@ function terminalFinancialEvidenceConflicts(
       (inspection.providerAttemptCount > 0 && inspection.knownObservedCostUsd !== '0.000000000000')
     );
   }
+  if (inspection.reservation.status === AiBudgetReservationStatus.HELD) {
+    if (inspection.reservation.heldAt === null || inspection.reservation.holdReason === null) {
+      return true;
+    }
+    if (inspection.reservation.holdReason === AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST) {
+      return inspection.providerAttemptCount === 0 || inspection.unknownCostAttemptedRunCount === 0;
+    }
+    if (inspection.reservation.holdReason === AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN) {
+      return (
+        inspection.knownObservedCostUsd === null ||
+        inspection.reservation.reservedAmountUsd === null ||
+        compareFixedPrecisionUsd(
+          inspection.knownObservedCostUsd,
+          inspection.reservation.reservedAmountUsd,
+        ) <= 0
+      );
+    }
+    return false;
+  }
   return true;
 }
 
@@ -299,6 +351,34 @@ async function recoverAuthoritatively(
   }
 
   if (inspection.classification === 'ATTEMPTED_UNKNOWN_COST') {
+    try {
+      const reservation = await mutations.hold(
+        inspection,
+        AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST,
+      );
+      if (reservation.status !== AiBudgetReservationStatus.HELD) {
+        return base(inspection, 'RECOVERY_RECONCILIATION_FAILED');
+      }
+    } catch {
+      const refreshed = await mutations.inspect();
+      if (
+        refreshed.classification === 'TERMINAL_FINANCIAL_STATE' &&
+        refreshed.reservation.status === AiBudgetReservationStatus.HELD &&
+        !terminalFinancialEvidenceConflicts(refreshed)
+      ) {
+        const finishFailure = await finishStartedClaim(refreshed, mutations);
+        return (
+          finishFailure ??
+          base(
+            refreshed,
+            'RECOVERED_TERMINAL_FINANCIAL_STATE',
+            AiBudgetExecutionClaimStatus.FINISHED,
+            AiBudgetReservationStatus.HELD,
+          )
+        );
+      }
+      return base(inspection, 'RECOVERY_RECONCILIATION_FAILED');
+    }
     const finishFailure = await finishStartedClaim(inspection, mutations);
     return (
       finishFailure ??
@@ -307,7 +387,7 @@ async function recoverAuthoritatively(
           inspection,
           'RECOVERED_HELD_UNKNOWN_COST',
           AiBudgetExecutionClaimStatus.FINISHED,
-          AiBudgetReservationStatus.RESERVED,
+          AiBudgetReservationStatus.HELD,
         ),
         knownPartialCostUsd: inspection.knownPartialCostUsd,
       })
@@ -383,7 +463,7 @@ async function recoverAuthoritatively(
   }
   if (
     reconciliation.outcome === 'HELD' &&
-    reconciliationMatches(reconciliation, AiBudgetReservationStatus.RESERVED)
+    reconciliationMatches(reconciliation, AiBudgetReservationStatus.HELD)
   ) {
     const finishFailure = await finishStartedClaim(inspection, mutations);
     return (
@@ -393,7 +473,7 @@ async function recoverAuthoritatively(
           inspection,
           'RECOVERED_HELD_KNOWN_COST',
           AiBudgetExecutionClaimStatus.FINISHED,
-          AiBudgetReservationStatus.RESERVED,
+          AiBudgetReservationStatus.HELD,
         ),
         knownAccountedCostUsd: inspection.knownAccountedCostUsd,
       })
