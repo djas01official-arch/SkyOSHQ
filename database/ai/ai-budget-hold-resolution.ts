@@ -103,6 +103,31 @@ export type AiBudgetHoldResolutionInspection =
         reason: AiBudgetHoldResolutionIndeterminateReason;
       }>);
 
+/**
+ * Deliberately small, operator-safe projection for the held-reservations
+ * Operations view. It contains only persisted request identity and financial
+ * evidence; it never exposes retrieval context or provider payloads.
+ */
+export type WorkspaceAiBudgetHoldCandidate = Readonly<{
+  classification: AiBudgetHoldResolutionClassification;
+  indeterminateReason: AiBudgetHoldResolutionIndeterminateReason | null;
+  knownAccountedCostUsd: FixedPrecisionUsd | null;
+  knownCostAttemptCount: number;
+  knownPartialCostUsd: FixedPrecisionUsd | null;
+  providerAttemptCount: number;
+  requestPreview: string;
+  reservation: Readonly<{
+    heldAt: Date | null;
+    holdReason: AiBudgetReservationHoldReason | null;
+    id: string;
+    reservedAmountUsd: FixedPrecisionUsd;
+    status: AiBudgetReservationStatus;
+  }>;
+  resolvedMode: AiOrchestrationMode | null;
+  routingDecisionId: string | null;
+  unknownCostAttemptCount: number;
+}>;
+
 export type ResolveAiBudgetHoldResult = Readonly<{
   action: 'NO_MUTATION' | 'RELEASED' | 'SETTLED';
   inspection: AiBudgetHoldResolutionInspection;
@@ -166,6 +191,11 @@ function fixedUsd(value: { toFixed(digits?: number): string } | null): FixedPrec
   return isFixedPrecisionUsd(formatted) ? formatted : null;
 }
 
+function requestPreview(value: string): string {
+  const normalized = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  return normalized.length > 180 ? `${normalized.slice(0, 179)}…` : normalized;
+}
+
 function isMultiMode(mode: AiOrchestrationMode): boolean {
   return (
     mode === AiOrchestrationMode.BALANCED ||
@@ -212,6 +242,36 @@ function evidence(
     runCount: runs.length,
     unknownCostAttemptedRunCount: attemptedCosts.length - knownAttemptedRunCount,
     ...overrides,
+  });
+}
+
+function projectWorkspaceAiBudgetHold(
+  inspection: AiBudgetHoldResolutionInspection,
+  preview: string,
+): WorkspaceAiBudgetHoldCandidate {
+  return Object.freeze({
+    classification: inspection.classification,
+    indeterminateReason: inspection.classification === 'INDETERMINATE' ? inspection.reason : null,
+    knownAccountedCostUsd:
+      inspection.classification === 'RESOLVABLE_SETTLE_KNOWN_COST' ||
+      inspection.classification === 'BLOCKED_OVERRUN'
+        ? inspection.knownAccountedCostUsd
+        : null,
+    knownCostAttemptCount: inspection.knownAttemptedRunCount,
+    knownPartialCostUsd:
+      inspection.classification === 'BLOCKED_UNKNOWN_COST' ? inspection.knownPartialCostUsd : null,
+    providerAttemptCount: inspection.providerAttemptCount,
+    requestPreview: preview,
+    reservation: Object.freeze({
+      heldAt: inspection.reservation.heldAt,
+      holdReason: inspection.reservation.holdReason,
+      id: inspection.reservation.id,
+      reservedAmountUsd: inspection.reservation.reservedAmountUsd,
+      status: inspection.reservation.status,
+    }),
+    resolvedMode: inspection.resolvedMode,
+    routingDecisionId: inspection.routingDecisionId,
+    unknownCostAttemptCount: inspection.unknownCostAttemptedRunCount,
   });
 }
 
@@ -404,6 +464,52 @@ export async function inspectAiBudgetHoldResolution(
     classification: 'RESOLVABLE_SETTLE_KNOWN_COST' as const,
     knownAccountedCostUsd,
   });
+}
+
+/**
+ * Lists every currently HELD reservation in exactly one workspace. Each item
+ * is classified through the same authoritative inspection used by controlled
+ * resolution, but this listing performs no mutation and invokes no provider.
+ */
+export async function listWorkspaceAiBudgetHolds(
+  prisma: PrismaClient,
+  operatorUserId: string,
+  workspaceId: string,
+): Promise<readonly WorkspaceAiBudgetHoldCandidate[]> {
+  if (!validUuid(operatorUserId) || !validUuid(workspaceId)) {
+    throw new AiBudgetHoldResolutionValidationError(
+      'The AI budget hold operations input is invalid.',
+      'budget_hold_resolution_invalid',
+    );
+  }
+  await requireAiBudgetAdministrationAccess(prisma, operatorUserId, workspaceId);
+
+  const reservations = await prisma.aiBudgetReservation.findMany({
+    where: { status: AiBudgetReservationStatus.HELD, workspaceId },
+    select: {
+      id: true,
+      routingDecision: { select: { userMessage: { select: { content: true } } } },
+    },
+    orderBy: [{ heldAt: 'desc' }, { id: 'asc' }],
+  });
+  const candidates: WorkspaceAiBudgetHoldCandidate[] = [];
+  for (const reservation of reservations) {
+    const inspection = await inspectAiBudgetHoldResolution(prisma, {
+      operatorUserId,
+      reservationId: reservation.id,
+      workspaceId,
+    });
+    // Concurrent resolution can make a formerly HELD row terminal after the
+    // list query. Never present terminal state as a current hold.
+    if (inspection.reservation.status !== AiBudgetReservationStatus.HELD) continue;
+    candidates.push(
+      projectWorkspaceAiBudgetHold(
+        inspection,
+        requestPreview(reservation.routingDecision?.userMessage.content ?? 'Request unavailable'),
+      ),
+    );
+  }
+  return Object.freeze(candidates);
 }
 
 /**

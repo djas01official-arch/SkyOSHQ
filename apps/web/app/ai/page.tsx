@@ -52,6 +52,12 @@ export default async function AiPage() {
             </Link>
           </>
         ) : null}
+        {hasWorkspaceCapability(workspace.role, 'ai.use') &&
+        hasWorkspaceCapability(workspace.role, 'workspace.members.manage') ? (
+          <Link className="text-sm font-medium text-accent hover:underline" href="/ai/holds">
+            Open budget holds
+          </Link>
+        ) : null}
       </div>
       <div className="grid gap-3">
         {active.map((conversation) => (

@@ -6,6 +6,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 
 import {
   inspectAiBudgetHoldResolution,
+  listWorkspaceAiBudgetHolds,
   resolveAiBudgetHold,
   AiBudgetHoldResolutionValidationError,
 } from '../ai/ai-budget-hold-resolution';
@@ -14,7 +15,9 @@ import {
   getOrCreateAiBudgetAccount,
   holdAiBudgetReservation,
   recordAiBudgetCredit,
+  releaseAiBudgetReservation,
   reserveAiBudget,
+  settleAiBudgetReservation,
 } from '../ai/ai-budget';
 import {
   AiBudgetLedgerEntryType,
@@ -507,6 +510,52 @@ test('resolution accepts no financial or desired-outcome caller input and always
   assert.equal(second.inspection.classification, 'ALREADY_RESOLVED');
 });
 
+test('a stale settlement presentation cannot create a second settlement after another resolver completes', async () => {
+  const f = await fixture();
+  await addRun(f, { attempted: true, cost: '0.100000000000' });
+  await hold(f, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+  assert.equal((await inspection(f)).classification, 'RESOLVABLE_SETTLE_KNOWN_COST');
+
+  await settleAiBudgetReservation(prisma, {
+    actualCostUsd: '0.100000000000',
+    actorUserId: f.owner.id,
+    reservationId: f.reservation.id,
+    workspaceId: f.workspace.id,
+  });
+  const result = await resolve(f);
+  assert.equal(result.action, 'NO_MUTATION');
+  assert.equal(result.inspection.classification, 'ALREADY_RESOLVED');
+  assert.equal(
+    (await prisma.aiBudgetReservation.findUniqueOrThrow({ where: { id: f.reservation.id } }))
+      .status,
+    AiBudgetReservationStatus.SETTLED,
+  );
+  assert.equal(
+    await prisma.aiBudgetLedgerEntry.count({ where: { reservationId: f.reservation.id } }),
+    1,
+  );
+});
+
+test('a stale release presentation cannot force release after a provider attempt is persisted', async () => {
+  const f = await fixture();
+  await hold(f);
+  assert.equal((await inspection(f)).classification, 'RESOLVABLE_RELEASE_ZERO_ATTEMPT');
+
+  await addRun(f, { attempted: true, cost: null });
+  const result = await resolve(f);
+  assert.equal(result.action, 'NO_MUTATION');
+  assert.equal(result.inspection.classification, 'BLOCKED_UNKNOWN_COST');
+  assert.equal(
+    (await prisma.aiBudgetReservation.findUniqueOrThrow({ where: { id: f.reservation.id } }))
+      .status,
+    AiBudgetReservationStatus.HELD,
+  );
+  assert.equal(
+    await prisma.aiBudgetLedgerEntry.count({ where: { reservationId: f.reservation.id } }),
+    0,
+  );
+});
+
 test('concurrent settlement creates exactly one debit and retains immutable hold metadata', async () => {
   const f = await fixture();
   await addRun(f, { attempted: true, cost: '0.100000000000' });
@@ -553,4 +602,110 @@ test('cross-workspace resolution fails closed', async () => {
       workspaceId: other.workspace.id,
     }),
   );
+});
+
+test('privileged operations list includes only current workspace HELD reservations without mutation', async () => {
+  const f = await fixture();
+  const olderHeld = await prisma.aiBudgetReservation.create({
+    data: {
+      accountId: f.account.id,
+      idempotencyKey: `hold-list-older-held:${randomUUID()}`,
+      reservedAmountUsd: '0.200000000000',
+      workspaceId: f.workspace.id,
+    },
+  });
+  await holdAiBudgetReservation(prisma, {
+    actorUserId: f.owner.id,
+    holdReason: AiBudgetReservationHoldReason.ACCOUNTING_UNRESOLVED,
+    reservationId: olderHeld.id,
+    workspaceId: f.workspace.id,
+  });
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  await addRun(f, { attempted: true, cost: '0.125000000000' });
+  await hold(f, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+
+  const reserved = await prisma.aiBudgetReservation.create({
+    data: {
+      accountId: f.account.id,
+      idempotencyKey: `hold-list-reserved:${randomUUID()}`,
+      reservedAmountUsd: '0.200000000000',
+      workspaceId: f.workspace.id,
+    },
+  });
+  const released = await prisma.aiBudgetReservation.create({
+    data: {
+      accountId: f.account.id,
+      idempotencyKey: `hold-list-released:${randomUUID()}`,
+      reservedAmountUsd: '0.200000000000',
+      workspaceId: f.workspace.id,
+    },
+  });
+  await releaseAiBudgetReservation(prisma, {
+    actorUserId: f.owner.id,
+    reservationId: released.id,
+    workspaceId: f.workspace.id,
+  });
+  const settled = await prisma.aiBudgetReservation.create({
+    data: {
+      accountId: f.account.id,
+      idempotencyKey: `hold-list-settled:${randomUUID()}`,
+      reservedAmountUsd: '0.200000000000',
+      workspaceId: f.workspace.id,
+    },
+  });
+  await settleAiBudgetReservation(prisma, {
+    actualCostUsd: '0.000000000000',
+    actorUserId: f.owner.id,
+    reservationId: settled.id,
+    workspaceId: f.workspace.id,
+  });
+
+  const before = await Promise.all([
+    prisma.aiBudgetLedgerEntry.count(),
+    prisma.aiBudgetReservation.count(),
+    prisma.aiBudgetExecutionClaim.count(),
+    prisma.aiOrchestration.count(),
+    prisma.aiRun.count(),
+  ]);
+  const candidates = await listWorkspaceAiBudgetHolds(prisma, f.owner.id, f.workspace.id);
+  const after = await Promise.all([
+    prisma.aiBudgetLedgerEntry.count(),
+    prisma.aiBudgetReservation.count(),
+    prisma.aiBudgetExecutionClaim.count(),
+    prisma.aiOrchestration.count(),
+    prisma.aiRun.count(),
+  ]);
+
+  assert.deepEqual(after, before);
+  assert.equal(candidates.length, 2);
+  assert.equal(candidates[0]?.reservation.id, f.reservation.id);
+  assert.equal(candidates[0]?.reservation.status, AiBudgetReservationStatus.HELD);
+  assert.equal(candidates[0]?.classification, 'RESOLVABLE_SETTLE_KNOWN_COST');
+  assert.equal(candidates[0]?.knownAccountedCostUsd, '0.125000000000');
+  assert.equal(candidates[0]?.requestPreview, f.message.content);
+  assert.equal(candidates[1]?.reservation.id, olderHeld.id);
+  assert.equal(candidates[1]?.classification, 'INDETERMINATE');
+  assert.equal(
+    candidates.some((candidate) => candidate.reservation.id === reserved.id),
+    false,
+  );
+  assert.equal(
+    candidates.some((candidate) => candidate.reservation.id === released.id),
+    false,
+  );
+  assert.equal(
+    candidates.some((candidate) => candidate.reservation.id === settled.id),
+    false,
+  );
+  assert.equal('groundedContext' in (candidates[0] ?? {}), false);
+});
+
+test('held-reservations operations listing requires current workspace budget administration', async () => {
+  const f = await fixture();
+  await hold(f);
+  await assert.rejects(() => listWorkspaceAiBudgetHolds(prisma, f.member.id, f.workspace.id));
+
+  const other = await fixture();
+  await assert.rejects(() => listWorkspaceAiBudgetHolds(prisma, other.owner.id, f.workspace.id));
+  assert.equal((await listWorkspaceAiBudgetHolds(prisma, f.owner.id, f.workspace.id)).length, 1);
 });

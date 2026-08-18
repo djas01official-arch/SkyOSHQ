@@ -4,6 +4,7 @@ import type { TestContext } from 'node:test';
 
 import { approveAiBudgetConfirmation } from '../../../database/ai/ai-budget-confirmations';
 import { beginAiBudgetExecutionClaim } from '../../../database/ai/ai-budget-execution-claims';
+import { holdAiBudgetReservation } from '../../../database/ai/ai-budget';
 import { createAiConversation } from '../../../database/ai/ai-conversations';
 import { createWorkspaceForOrganization } from '../../../database/context/workspace-creation';
 import {
@@ -794,6 +795,211 @@ export async function runAiMvpE2eScenario(
       const refreshedRecoveryPage = await loadHtml(ownerJar, '/ai/recovery');
       assert.equal(refreshedRecoveryPage.includes(claim.id), false);
       assert.match(refreshedRecoveryPage, /No started executions/u);
+    },
+  );
+
+  await context.test(
+    'AI budget holds operations are privileged, workspace-scoped, and resolve only from current server evidence',
+    async () => {
+      const owner = await harness.createIdentity('ai-holds-owner');
+      const { organizationId, workspaceAId, workspaceBId } = await createFixture(
+        harness.prisma,
+        owner.id,
+      );
+      const ownerJar = harness.createJar();
+      harness.assertRedirectsTo(await harness.login(ownerJar, owner), '/ai');
+      const emptyHoldsPage = await loadHtml(ownerJar, '/ai/holds');
+      assert.match(emptyHoldsPage, /No budget holds/u);
+      assert.match(
+        emptyHoldsPage,
+        /SkyOS currently has no unresolved AI budget reservations in this workspace./u,
+      );
+      const conversation = await createAiConversation(
+        harness.prisma,
+        owner.id,
+        workspaceAId,
+        `Budget holds operations ${randomUUID()}`,
+      );
+      const confirmation = await createBudgetConfirmationFixture(
+        harness.prisma,
+        owner.id,
+        workspaceAId,
+        conversation.id,
+      );
+      const account = await harness.prisma.aiBudgetAccount.create({
+        data: { workspaceId: workspaceAId },
+      });
+      const reservation = await harness.prisma.aiBudgetReservation.create({
+        data: {
+          accountId: account.id,
+          idempotencyKey: `ai-holds-e2e:${randomUUID()}`,
+          reservedAmountUsd: '0.125000000000',
+          routingDecisionId: confirmation.routingDecisionId,
+          workspaceId: workspaceAId,
+        },
+      });
+      await holdAiBudgetReservation(harness.prisma, {
+        actorUserId: owner.id,
+        holdReason: 'ACCOUNTING_UNRESOLVED',
+        reservationId: reservation.id,
+        workspaceId: workspaceAId,
+      });
+      const workspaceBConversation = await createAiConversation(
+        harness.prisma,
+        owner.id,
+        workspaceBId,
+        `Budget holds isolation ${randomUUID()}`,
+      );
+      const workspaceBConfirmation = await createBudgetConfirmationFixture(
+        harness.prisma,
+        owner.id,
+        workspaceBId,
+        workspaceBConversation.id,
+      );
+      const workspaceBAccount = await harness.prisma.aiBudgetAccount.create({
+        data: { workspaceId: workspaceBId },
+      });
+      const workspaceBReservation = await harness.prisma.aiBudgetReservation.create({
+        data: {
+          accountId: workspaceBAccount.id,
+          idempotencyKey: `ai-holds-e2e-isolation:${randomUUID()}`,
+          reservedAmountUsd: '0.250000000000',
+          routingDecisionId: workspaceBConfirmation.routingDecisionId,
+          workspaceId: workspaceBId,
+        },
+      });
+      await holdAiBudgetReservation(harness.prisma, {
+        actorUserId: owner.id,
+        holdReason: 'ACCOUNTING_UNRESOLVED',
+        reservationId: workspaceBReservation.id,
+        workspaceId: workspaceBId,
+      });
+
+      const ownerAiPage = await loadHtml(ownerJar, '/ai');
+      assert.ok(ownerAiPage.includes('href="/ai/holds"'));
+
+      const beforeLoad = await readBudgetSideEffects(harness.prisma);
+      const holdsPage = await loadHtml(ownerJar, '/ai/holds');
+      const afterLoad = await readBudgetSideEffects(harness.prisma);
+      assert.deepEqual(afterLoad, beforeLoad);
+      assert.ok(holdsPage.includes('data-ai-budget-holds-page="read-only"'));
+      assert.ok(holdsPage.includes(`data-ai-budget-hold="${reservation.id}"`));
+      assert.match(holdsPage, /Evidence supports release/u);
+      assert.match(holdsPage, /Budget is held because accounting requires manual resolution\./u);
+      assert.match(holdsPage, /\$0\.125/u);
+      const resolveFields = findServerActionForm(holdsPage, {
+        markerName: 'data-ai-budget-hold-action',
+        markerValue: 'resolve',
+        requiredFields: { reservationId: reservation.id },
+      });
+      assert.deepEqual(
+        resolveFields.filter(([name]) => !name.startsWith('$ACTION_')),
+        [['reservationId', reservation.id]],
+      );
+      assert.match(holdsPage, />Resolve</u);
+      assert.doesNotMatch(holdsPage, />Settle</u);
+      assert.doesNotMatch(holdsPage, />Release</u);
+      assert.doesNotMatch(holdsPage, />Retry</u);
+      assert.doesNotMatch(holdsPage, />Resume</u);
+      assert.equal(holdsPage.includes(`data-ai-budget-hold="${workspaceBReservation.id}"`), false);
+
+      const member = await harness.createIdentity('ai-holds-member');
+      await addWorkspaceMember(
+        harness.prisma,
+        member,
+        organizationId,
+        workspaceAId,
+        WorkspaceRole.MEMBER,
+      );
+      const memberJar = harness.createJar();
+      harness.assertRedirectsTo(await harness.login(memberJar, member), '/ai');
+      assert.equal((await loadHtml(memberJar, '/ai')).includes('href="/ai/holds"'), false);
+      harness.assertRedirectsTo(
+        await submitServerActionForm(memberJar, harness.baseUrl, '/ai/holds', holdsPage, {
+          markerName: 'data-ai-budget-hold-action',
+          markerValue: 'resolve',
+        }),
+        '/dashboard',
+      );
+      assert.equal(
+        (
+          await harness.prisma.aiBudgetReservation.findUniqueOrThrow({
+            where: { id: reservation.id },
+          })
+        ).status,
+        'HELD',
+      );
+
+      const beforeCrossWorkspaceAttempt = await readBudgetSideEffects(harness.prisma);
+      const crossWorkspaceResponse = await submitServerActionForm(
+        ownerJar,
+        harness.baseUrl,
+        '/ai/holds',
+        holdsPage,
+        { markerName: 'data-ai-budget-hold-action', markerValue: 'resolve' },
+        {
+          classification: 'RESOLVABLE_SETTLE_KNOWN_COST',
+          knownAccountedCostUsd: '999999.000000000000',
+          operatorUserId: owner.id,
+          reservationId: workspaceBReservation.id,
+          settle: 'true',
+          workspaceId: workspaceBId,
+        },
+      );
+      assert.equal(crossWorkspaceResponse.status, 200);
+      assert.deepEqual(await readBudgetSideEffects(harness.prisma), beforeCrossWorkspaceAttempt);
+      assert.equal(
+        (
+          await harness.prisma.aiBudgetReservation.findUniqueOrThrow({
+            where: { id: workspaceBReservation.id },
+          })
+        ).status,
+        'HELD',
+      );
+
+      const beforeResolve = await readBudgetSideEffects(harness.prisma);
+      const resolveResponse = await submitServerActionForm(
+        ownerJar,
+        harness.baseUrl,
+        '/ai/holds',
+        holdsPage,
+        { markerName: 'data-ai-budget-hold-action', markerValue: 'resolve' },
+        {
+          actualCostUsd: '999999.000000000000',
+          classification: 'RESOLVABLE_SETTLE_KNOWN_COST',
+          desiredOutcome: 'SETTLED',
+          holdReason: 'ACTUAL_COST_OVERRUN',
+          operatorUserId: member.id,
+          release: 'false',
+          settle: 'true',
+          workspaceId: workspaceBId,
+        },
+      );
+      assert.equal(resolveResponse.status, 200);
+      const afterResolve = await readBudgetSideEffects(harness.prisma);
+      assert.deepEqual(afterResolve, {
+        ...beforeResolve,
+        reservations: beforeResolve.reservations,
+      });
+      assert.equal(
+        (
+          await harness.prisma.aiBudgetReservation.findUniqueOrThrow({
+            where: { id: reservation.id },
+          })
+        ).status,
+        'RELEASED',
+      );
+      assert.equal(
+        await harness.prisma.aiBudgetLedgerEntry.count({
+          where: { reservationId: reservation.id },
+        }),
+        0,
+      );
+
+      const afterReload = await loadHtml(ownerJar, '/ai/holds');
+      assert.equal(afterReload.includes(`data-ai-budget-hold="${reservation.id}"`), false);
+      assert.match(afterReload, /No budget holds/u);
+      assert.deepEqual(await readBudgetSideEffects(harness.prisma), afterResolve);
     },
   );
 }
