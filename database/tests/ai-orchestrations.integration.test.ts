@@ -3187,16 +3187,23 @@ test('DEEP measures each exact dynamic request once and reuses it for generation
       { role: 'SYNTHESIZER', step: 5 },
     ],
   );
+  const runs = await prisma.aiRun.findMany({ orderBy: { orchestrationStep: 'asc' } });
+  assert.equal(runs.length, 6);
   for (const [index, measured] of measuredRequests.entries()) {
-    assert.equal(measured, generatedRequests[index]);
+    const generated = generatedRequests[index]!;
+    const { aiRunId, ...generationModelInput } = generated;
+    assert.deepEqual(measured, generationModelInput);
+    assert.match(
+      aiRunId ?? '',
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
+    assert.equal(aiRunId, runs[index]!.id);
     assert.equal(measured.executionLimits?.maxOutputTokens, 20);
   }
   assert.match(measuredRequests[3]!.userMessage, /Grounded stage 1 result/u);
   assert.match(measuredRequests[3]!.userMessage, /Grounded stage 3 result/u);
   assert.match(measuredRequests[4]!.userMessage, /Grounded stage 4 result/u);
   assert.match(measuredRequests[5]!.userMessage, /Grounded stage 5 result/u);
-  const runs = await prisma.aiRun.findMany({ orderBy: { orchestrationStep: 'asc' } });
-  assert.equal(runs.length, 6);
   assert.ok(
     runs.every(({ inputTokens, providerAttempted }) => inputTokens === 77 && providerAttempted),
   );
@@ -3244,8 +3251,28 @@ test('CRITICAL binds verifier A and verifier B measurements to separate dynamic 
     ],
   );
   assert.notEqual(measured[4]!.request, measured[5]!.request);
-  assert.equal(measured[4]!.request, generated[4]);
-  assert.equal(measured[5]!.request, generated[5]);
+  const verifierAGeneration = generated[4]!;
+  const verifierBGeneration = generated[5]!;
+  const { aiRunId: verifierAAiRunId, ...verifierAModelInput } = verifierAGeneration;
+  const { aiRunId: verifierBAiRunId, ...verifierBModelInput } = verifierBGeneration;
+  assert.deepEqual(measured[4]!.request, verifierAModelInput);
+  assert.deepEqual(measured[5]!.request, verifierBModelInput);
+  const verifierRuns = await prisma.aiRun.findMany({
+    where: { orchestrationRole: AiOrchestrationRole.VERIFIER },
+    orderBy: { orchestrationStep: 'asc' },
+  });
+  assert.equal(verifierRuns.length, 2);
+  assert.match(
+    verifierAAiRunId ?? '',
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+  );
+  assert.match(
+    verifierBAiRunId ?? '',
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+  );
+  assert.equal(verifierAAiRunId, verifierRuns[0]!.id);
+  assert.equal(verifierBAiRunId, verifierRuns[1]!.id);
+  assert.notEqual(verifierAAiRunId, verifierBAiRunId);
   assert.match(measured[5]!.request.userMessage, /Grounded critical stage 5 result/u);
   assert.match(measured[6]!.request.userMessage, /Grounded critical stage 6 result/u);
   assert.equal(
