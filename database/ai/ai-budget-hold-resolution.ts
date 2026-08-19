@@ -16,6 +16,10 @@ import {
   type FixedPrecisionUsd,
 } from '../../services/ai/language-model-pricing';
 import {
+  resolvePersistedAiRunAccountingCost,
+  type AiRunPersistedAccountingCostResolution,
+} from './ai-cost-evidence';
+import {
   AiBudgetStateError,
   releaseAiBudgetReservation,
   requireAiBudgetAdministrationAccess,
@@ -55,6 +59,7 @@ export type AiBudgetHoldResolutionIndeterminateReason =
   | 'FAST_RUN_LINEAGE_INVALID'
   | 'MULTI_ORCHESTRATION_LINEAGE_INVALID'
   | 'RUN_ACCOUNTING_STATE_INVALID'
+  | 'CONFLICTING_COST_EVIDENCE'
   | 'RUN_ATTEMPT_STATE_UNKNOWN'
   | 'EXECUTION_NOT_TERMINAL'
   | 'TERMINAL_FINANCIAL_STATE_INVALID';
@@ -150,7 +155,11 @@ const HOLD_RESOLUTION_INCLUDE = {
     include: {
       conversation: true,
       groundedContext: true,
-      runs: true,
+      runs: {
+        include: {
+          costEvidence: { select: { costUsd: true } },
+        },
+      },
       userMessage: true,
     },
   },
@@ -208,16 +217,33 @@ function isTerminalRunStatus(status: AiRunStatus): boolean {
   return status === AiRunStatus.SUCCEEDED || status === AiRunStatus.FAILED;
 }
 
+function resolveRunCosts(
+  reservation: HoldResolutionReservation,
+): readonly AiRunPersistedAccountingCostResolution[] {
+  return (reservation.routingDecision?.runs ?? []).map((run) =>
+    run.providerAttempted === null
+      ? Object.freeze({ classification: 'UNKNOWN_COST' as const })
+      : resolvePersistedAiRunAccountingCost({
+          estimatedCostUsd: run.estimatedCostUsd,
+          evidence: run.costEvidence,
+          providerAttempted: run.providerAttempted,
+          runId: run.id,
+        }),
+  );
+}
+
 function evidence(
   reservation: HoldResolutionReservation,
+  runCosts: readonly AiRunPersistedAccountingCostResolution[],
   overrides: Partial<AiBudgetHoldResolutionEvidence> = {},
 ): AiBudgetHoldResolutionEvidence {
   const runs = reservation.routingDecision?.runs ?? [];
   const attemptedCosts = runs
-    .filter((run) => run.providerAttempted === true)
-    .map((run) => fixedUsd(run.estimatedCostUsd));
+    .map((run, index) => ({ run, resolution: runCosts[index] }))
+    .filter(({ run }) => run.providerAttempted === true)
+    .map(({ resolution }) => resolution!);
   const knownAttemptedRunCount = attemptedCosts.filter(
-    (cost): cost is FixedPrecisionUsd => cost !== null,
+    (cost) => cost.classification === 'KNOWN_COST',
   ).length;
   const reservationAmount = fixedUsd(reservation.reservedAmountUsd);
   if (reservationAmount === null) {
@@ -240,7 +266,9 @@ function evidence(
     resolvedMode: reservation.routingDecision?.resolvedMode ?? null,
     routingDecisionId: reservation.routingDecisionId,
     runCount: runs.length,
-    unknownCostAttemptedRunCount: attemptedCosts.length - knownAttemptedRunCount,
+    unknownCostAttemptedRunCount: attemptedCosts.filter(
+      (cost) => cost.classification === 'UNKNOWN_COST',
+    ).length,
     ...overrides,
   });
 }
@@ -344,7 +372,8 @@ export async function inspectAiBudgetHoldResolution(
     );
   }
 
-  const base = evidence(reservation);
+  const runCosts = resolveRunCosts(reservation);
+  const base = evidence(reservation, runCosts);
   const historicalHold = reservation.holdReason !== null && reservation.heldAt !== null;
   if (reservation.status === AiBudgetReservationStatus.RESERVED) {
     return Object.freeze({ ...base, classification: 'NOT_HELD' as const });
@@ -440,11 +469,24 @@ export async function inspectAiBudgetHoldResolution(
     return Object.freeze({ ...base, classification: 'RESOLVABLE_RELEASE_ZERO_ATTEMPT' as const });
   }
 
-  const knownCosts = runs
-    .filter((run) => run.providerAttempted === true)
-    .map((run) => fixedUsd(run.estimatedCostUsd));
-  const known = knownCosts.filter((cost): cost is FixedPrecisionUsd => cost !== null);
-  if (known.length !== knownCosts.length) {
+  const attemptedCosts = runs
+    .map((run, index) => ({ run, resolution: runCosts[index]! }))
+    .filter(({ run }) => run.providerAttempted === true)
+    .map(({ resolution }) => resolution);
+  if (attemptedCosts.some((cost) => cost.classification === 'CONFLICTING_COST_EVIDENCE')) {
+    return indeterminate(base, 'CONFLICTING_COST_EVIDENCE');
+  }
+  const known = attemptedCosts
+    .filter(
+      (
+        cost,
+      ): cost is Extract<
+        AiRunPersistedAccountingCostResolution,
+        { classification: 'KNOWN_COST' }
+      > => cost.classification === 'KNOWN_COST',
+    )
+    .map((cost) => cost.costUsd);
+  if (known.length !== attemptedCosts.length) {
     return Object.freeze({
       ...base,
       classification: 'BLOCKED_UNKNOWN_COST' as const,

@@ -10,6 +10,7 @@ import {
   resolveAiBudgetHold,
   AiBudgetHoldResolutionValidationError,
 } from '../ai/ai-budget-hold-resolution';
+import { recordAiRunCostEvidence } from '../ai/ai-cost-evidence';
 import {
   getAiBudgetSnapshot,
   getOrCreateAiBudgetAccount,
@@ -26,6 +27,7 @@ import {
   AiGroundedContextSourceType,
   AiMessageRole,
   AiOrchestrationStatus,
+  AiRunCostEvidenceSource,
   AiRunStatus,
   MembershipStatus,
   OrganizationRole,
@@ -253,6 +255,20 @@ async function addRun(
   });
 }
 
+async function addEvidence(
+  run: Awaited<ReturnType<typeof addRun>>,
+  costUsd: string,
+  sourceReference = `hold-resolution-evidence:${randomUUID()}`,
+) {
+  return recordAiRunCostEvidence(prisma, {
+    costUsd: costUsd as `${number}.${string}`,
+    providerKey: run.providerKey,
+    runId: run.id,
+    source: AiRunCostEvidenceSource.PROVIDER_USAGE_RECEIPT,
+    sourceReference,
+  });
+}
+
 async function hold(
   f: Awaited<ReturnType<typeof fixture>>,
   reason: AiBudgetReservationHoldReason = AiBudgetReservationHoldReason.ACCOUNTING_UNRESOLVED,
@@ -399,6 +415,144 @@ test('attempted known zero cost settles instead of releasing', async () => {
   );
 });
 
+test('missing attempted cost is supplemented only by exact authoritative evidence after explicit resolution', async () => {
+  const f = await fixture();
+  const run = await addRun(f, { attempted: true, cost: null });
+  await hold(f, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+  assert.equal((await inspection(f)).classification, 'BLOCKED_UNKNOWN_COST');
+
+  await addEvidence(run, '0.123456789012');
+  assert.equal(
+    (await prisma.aiBudgetReservation.findUniqueOrThrow({ where: { id: f.reservation.id } }))
+      .status,
+    AiBudgetReservationStatus.HELD,
+  );
+  assert.equal(
+    await prisma.aiBudgetLedgerEntry.count({ where: { reservationId: f.reservation.id } }),
+    0,
+  );
+  assert.equal(
+    (await prisma.aiRun.findUniqueOrThrow({ where: { id: run.id } })).estimatedCostUsd,
+    null,
+  );
+
+  const found = await inspection(f);
+  assert.equal(found.classification, 'RESOLVABLE_SETTLE_KNOWN_COST');
+  assert.equal(found.knownAccountedCostUsd, '0.123456789012');
+  assert.equal((await resolve(f)).action, 'SETTLED');
+  assert.equal(
+    (
+      await prisma.aiBudgetReservation.findUniqueOrThrow({ where: { id: f.reservation.id } })
+    ).settledAmountUsd?.toFixed(12),
+    '0.123456789012',
+  );
+});
+
+test('held operations projection refreshes evidence-backed settlement eligibility without resolving', async () => {
+  const f = await fixture();
+  const run = await addRun(f, { attempted: true, cost: null });
+  await hold(f);
+  await addEvidence(run, '0.010000000000');
+  const before = await Promise.all([
+    prisma.aiBudgetLedgerEntry.count({ where: { reservationId: f.reservation.id } }),
+    prisma.aiBudgetReservation.findUniqueOrThrow({ where: { id: f.reservation.id } }),
+  ]);
+  const candidates = await listWorkspaceAiBudgetHolds(prisma, f.owner.id, f.workspace.id);
+  const after = await Promise.all([
+    prisma.aiBudgetLedgerEntry.count({ where: { reservationId: f.reservation.id } }),
+    prisma.aiBudgetReservation.findUniqueOrThrow({ where: { id: f.reservation.id } }),
+  ]);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0]?.classification, 'RESOLVABLE_SETTLE_KNOWN_COST');
+  assert.equal(candidates[0]?.knownAccountedCostUsd, '0.010000000000');
+  assert.equal(after[0], before[0]);
+  assert.equal(after[1].status, before[1].status);
+  assert.equal(after[1].settledAmountUsd, before[1].settledAmountUsd);
+});
+
+test('execution-time cost has precedence while corroborating evidence supplements missing attempted cost exactly', async () => {
+  const f = await fixture('BALANCED', '0.300000000000');
+  const persisted = await addRun(f, { attempted: true, cost: '0.100000000000', step: 0 });
+  const missing = await addRun(f, { attempted: true, cost: null, step: 1 });
+  await hold(f, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+  await addEvidence(persisted, '0.900000000000');
+  await addEvidence(persisted, '0.800000000000');
+  const sourceReference = `hold-resolution-corroborating:${randomUUID()}`;
+  await addEvidence(missing, '0.120000000000', sourceReference);
+  await addEvidence(
+    missing,
+    '0.120000000000',
+    `hold-resolution-corroborating-second:${randomUUID()}`,
+  );
+
+  const found = await inspection(f);
+  assert.equal(found.classification, 'RESOLVABLE_SETTLE_KNOWN_COST');
+  assert.equal(found.knownAccountedCostUsd, '0.220000000000');
+  assert.equal((await resolve(f)).action, 'SETTLED');
+  assert.equal(
+    (
+      await prisma.aiRun.findUniqueOrThrow({ where: { id: persisted.id } })
+    ).estimatedCostUsd?.toFixed(12),
+    '0.100000000000',
+  );
+});
+
+test('zero evidence-backed attempted cost settles, while no evidence remains unknown and conflicts fail closed', async () => {
+  const zero = await fixture();
+  const zeroRun = await addRun(zero, { attempted: true, cost: null });
+  await hold(zero);
+  await addEvidence(zeroRun, '0.000000000000');
+  const zeroInspection = await inspection(zero);
+  assert.equal(zeroInspection.classification, 'RESOLVABLE_SETTLE_KNOWN_COST');
+  assert.equal(zeroInspection.knownAccountedCostUsd, '0.000000000000');
+  assert.equal((await resolve(zero)).action, 'SETTLED');
+
+  await reset();
+  const conflict = await fixture();
+  const conflictRun = await addRun(conflict, { attempted: true, cost: null });
+  await hold(conflict);
+  await addEvidence(conflictRun, '0.100000000000');
+  await addEvidence(conflictRun, '0.120000000000');
+  const conflictInspection = await inspection(conflict);
+  assert.equal(conflictInspection.classification, 'INDETERMINATE');
+  assert.equal(conflictInspection.reason, 'CONFLICTING_COST_EVIDENCE');
+  assert.equal((await resolve(conflict)).action, 'NO_MUTATION');
+  assert.equal(
+    (await prisma.aiBudgetReservation.findUniqueOrThrow({ where: { id: conflict.reservation.id } }))
+      .status,
+    AiBudgetReservationStatus.HELD,
+  );
+});
+
+test('evidence-backed exact totals settle at reserve and overrun above it without manufacturing attempts', async () => {
+  const equal = await fixture('BALANCED', '0.220000000000');
+  const equalFirst = await addRun(equal, { attempted: true, cost: null, step: 0 });
+  const equalSecond = await addRun(equal, { attempted: true, cost: null, step: 1 });
+  await hold(equal);
+  await addEvidence(equalFirst, '0.100000000000');
+  await addEvidence(equalSecond, '0.120000000000');
+  assert.equal((await inspection(equal)).classification, 'RESOLVABLE_SETTLE_KNOWN_COST');
+  assert.equal((await resolve(equal)).action, 'SETTLED');
+
+  await reset();
+  const overrun = await fixture('BALANCED', '0.210000000000');
+  const overrunFirst = await addRun(overrun, { attempted: true, cost: null, step: 0 });
+  const overrunSecond = await addRun(overrun, { attempted: true, cost: null, step: 1 });
+  await hold(overrun, AiBudgetReservationHoldReason.ACTUAL_COST_OVERRUN);
+  await addEvidence(overrunFirst, '0.100000000000');
+  await addEvidence(overrunSecond, '0.120000000000');
+  assert.equal((await inspection(overrun)).classification, 'BLOCKED_OVERRUN');
+  assert.equal((await resolve(overrun)).action, 'NO_MUTATION');
+
+  await reset();
+  const noAttempt = await fixture();
+  const nonAttemptedRun = await addRun(noAttempt, { attempted: false, cost: null });
+  await hold(noAttempt);
+  await addEvidence(nonAttemptedRun, '0.100000000000');
+  assert.equal((await inspection(noAttempt)).classification, 'RESOLVABLE_RELEASE_ZERO_ATTEMPT');
+  assert.equal((await resolve(noAttempt)).action, 'RELEASED');
+});
+
 test('unknown or partially known attempted cost remains held with no financial mutation', async () => {
   const multi = await fixture('BALANCED');
   await addRun(multi, { attempted: true, cost: '0.100000000000', step: 0 });
@@ -441,6 +595,22 @@ test('FAST and each persisted multi-mode lineage use only their route-bound run 
     const attempts = mode === 'FAST' ? 1 : mode === 'BALANCED' ? 3 : mode === 'DEEP' ? 6 : 7;
     for (let step = 0; step < attempts; step += 1) {
       await addRun(f, { attempted: true, cost: '0.010000000000', step });
+    }
+    await hold(f, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
+    const found = await inspection(f);
+    assert.equal(found.classification, 'RESOLVABLE_SETTLE_KNOWN_COST');
+    assert.equal(found.knownAccountedCostUsd, `${(attempts / 100).toFixed(12)}`);
+  }
+});
+
+test('FAST, BALANCED, DEEP, and CRITICAL aggregate exact evidence only through their route lineage', async () => {
+  for (const mode of ['FAST', 'BALANCED', 'DEEP', 'CRITICAL'] as const) {
+    await reset();
+    const f = await fixture(mode, '1.000000000000');
+    const attempts = mode === 'FAST' ? 1 : mode === 'BALANCED' ? 3 : mode === 'DEEP' ? 6 : 7;
+    for (let step = 0; step < attempts; step += 1) {
+      const run = await addRun(f, { attempted: true, cost: null, step });
+      await addEvidence(run, '0.010000000000');
     }
     await hold(f, AiBudgetReservationHoldReason.UNKNOWN_PROVIDER_COST);
     const found = await inspection(f);
