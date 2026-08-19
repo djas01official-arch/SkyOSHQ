@@ -1,5 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 
+import { createGoogleVertexBillingCorrelation } from '../../database/ai/ai-google-vertex-billing-correlation';
+
 import {
   LanguageModelProviderError,
   type LanguageModelProvider,
@@ -51,6 +53,7 @@ export type GeminiProviderClock = Readonly<{
 export type GeminiInteractionRequest = Readonly<{
   generation_config: Readonly<{ max_output_tokens: number }>;
   input: string;
+  labels?: Readonly<Record<string, string>>;
   model: string;
   response_format: Readonly<{
     mime_type: 'application/json';
@@ -88,12 +91,30 @@ export interface GeminiInteractionClient {
   ): Promise<GeminiInteractionResponse>;
 }
 
+export type GeminiTransport = 'developer' | 'vertex';
+
+export type GeminiSdkClientConfiguration =
+  Readonly<{ apiKey: string }> | Readonly<{ location: string; project: string; vertexai: true }>;
+
+export type GeminiInteractionClientFactory = (
+  configuration: GeminiSdkClientConfiguration,
+) => GeminiInteractionClient;
+
+export type GeminiTransportConfig = Readonly<{
+  clientConfiguration: GeminiSdkClientConfiguration;
+  transport: GeminiTransport;
+}>;
+
 export type GeminiLanguageModelProviderOptions = Readonly<{
-  apiKey: string;
+  apiKey?: string;
+  clientFactory?: GeminiInteractionClientFactory;
   clock?: GeminiProviderClock;
   interactionClient?: GeminiInteractionClient;
   model: string;
   runtime?: string;
+  transport?: string;
+  vertexLocation?: string;
+  vertexProject?: string;
 }>;
 
 const defaultClock: GeminiProviderClock = {
@@ -123,6 +144,66 @@ export function isValidGeminiApiKey(value: string): boolean {
   const apiKey = value.trim();
   return apiKey.length > 0 && !PLACEHOLDER_API_KEY_PATTERN.test(apiKey);
 }
+
+/**
+ * Resolves the SkyOS-owned Gemini transport selection without consulting any
+ * ambient Google SDK configuration. An explicit Vertex selection can never
+ * fall back to the Developer API.
+ */
+export function resolveGeminiTransportConfig(
+  input: Readonly<{
+    apiKey?: string;
+    transport?: string;
+    vertexLocation?: string;
+    vertexProject?: string;
+  }>,
+): GeminiTransportConfig {
+  const configuredTransport = input.transport?.trim().toLowerCase();
+  if (
+    configuredTransport !== undefined &&
+    configuredTransport !== '' &&
+    configuredTransport !== 'developer' &&
+    configuredTransport !== 'vertex'
+  ) {
+    throw new LanguageModelProviderError(
+      'Gemini provider configuration is invalid.',
+      'provider_configuration_invalid',
+    );
+  }
+  if (configuredTransport === 'vertex') {
+    const project = input.vertexProject?.trim();
+    const location = input.vertexLocation?.trim();
+    if (!project || !location) {
+      throw new LanguageModelProviderError(
+        'Gemini provider configuration is invalid.',
+        'provider_configuration_invalid',
+      );
+    }
+    return Object.freeze({
+      clientConfiguration: Object.freeze({ location, project, vertexai: true }),
+      transport: 'vertex',
+    });
+  }
+  const apiKey = input.apiKey?.trim() ?? '';
+  if (!isValidGeminiApiKey(apiKey)) {
+    throw new LanguageModelProviderError(
+      'Gemini provider configuration is invalid.',
+      'provider_configuration_invalid',
+    );
+  }
+  return Object.freeze({
+    clientConfiguration: Object.freeze({ apiKey }),
+    transport: 'developer',
+  });
+}
+
+const defaultInteractionClientFactory: GeminiInteractionClientFactory = (configuration) => {
+  const sdk = new GoogleGenAI(configuration);
+  return {
+    create: (request, requestOptions) =>
+      sdk.interactions.create(request, requestOptions) as Promise<GeminiInteractionResponse>,
+  };
+};
 
 function safeInteger(value: unknown): number | undefined {
   return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= MAX_REPORTED_TOKENS
@@ -382,19 +463,17 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
   readonly modelKey: string;
   readonly #client: GeminiInteractionClient;
   readonly #clock: GeminiProviderClock;
+  readonly #transport: GeminiTransport;
 
   constructor(options: GeminiLanguageModelProviderOptions) {
-    const apiKey = options.apiKey.trim();
-    if (
-      !(GEMINI_APPROVED_MODELS as readonly string[]).includes(options.model) ||
-      !isValidGeminiApiKey(apiKey)
-    ) {
+    if (!(GEMINI_APPROVED_MODELS as readonly string[]).includes(options.model)) {
       throw new LanguageModelProviderError(
         'Gemini provider configuration is invalid.',
         'provider_configuration_invalid',
       );
     }
-    if (!options.interactionClient && options.runtime !== 'production') {
+    const transport = resolveGeminiTransportConfig(options);
+    if (!options.interactionClient && !options.clientFactory && options.runtime !== 'production') {
       throw new LanguageModelProviderError(
         'Gemini network transport is disabled outside production.',
         'provider_network_disabled',
@@ -402,14 +481,13 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
     }
     this.modelKey = options.model;
     this.#clock = options.clock ?? defaultClock;
+    this.#transport = transport.transport;
     if (options.interactionClient) {
       this.#client = options.interactionClient;
     } else {
-      const sdk = new GoogleGenAI({ apiKey });
-      this.#client = {
-        create: (request, requestOptions) =>
-          sdk.interactions.create(request, requestOptions) as Promise<GeminiInteractionResponse>,
-      };
+      this.#client = (options.clientFactory ?? defaultInteractionClientFactory)(
+        transport.clientConfiguration,
+      );
     }
   }
 
@@ -443,9 +521,29 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
       string,
       unknown
     >;
+    let vertexCorrelation: ReturnType<typeof createGoogleVertexBillingCorrelation> | undefined;
+    if (this.#transport === 'vertex') {
+      if (!request.aiRunId) {
+        throw new LanguageModelProviderError(
+          'Gemini provider configuration is invalid.',
+          'provider_configuration_invalid',
+        );
+      }
+      try {
+        vertexCorrelation = createGoogleVertexBillingCorrelation(request.aiRunId);
+      } catch {
+        throw new LanguageModelProviderError(
+          'Gemini provider configuration is invalid.',
+          'provider_configuration_invalid',
+        );
+      }
+    }
     const interactionRequest: GeminiInteractionRequest = {
       generation_config: { max_output_tokens: maxOutputTokens },
       input: requestInput(request),
+      ...(vertexCorrelation
+        ? { labels: { [vertexCorrelation.labelKey]: vertexCorrelation.labelValue } }
+        : {}),
       model: this.modelKey,
       response_format: {
         mime_type: 'application/json',

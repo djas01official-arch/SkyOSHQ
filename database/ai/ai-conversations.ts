@@ -773,7 +773,10 @@ export async function executeGroundedRun(
         'provider_attempt_state_invalid',
       );
     }
-    const response = await generateWithTimeout(provider, request);
+    const response = await generateWithTimeout(
+      provider,
+      Object.freeze({ ...request, aiRunId: run.id }),
+    );
     const usage = normalizeLanguageModelUsage(response);
     const estimatedCostUsd = estimateLanguageModelCostUsd(
       provider.providerKey,

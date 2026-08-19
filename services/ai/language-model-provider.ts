@@ -10,6 +10,7 @@ import {
   GEMINI_APPROVED_MODELS,
   GeminiLanguageModelProvider,
   type GeminiInteractionClient,
+  type GeminiInteractionClientFactory,
 } from './gemini-language-model-provider';
 import type { AiProviderExecutionLimits } from './ai-execution-limits';
 import type {
@@ -44,6 +45,8 @@ export type LanguageModelResponseFormat =
   | 'knowledge_key_decisions';
 
 export type LanguageModelRequest = Readonly<{
+  /** Immutable persisted attempt identity for approved opaque provider correlation. */
+  aiRunId?: string;
   context: string;
   citations: readonly LanguageModelCitationInput[];
   executionLimits?: AiProviderExecutionLimits;
@@ -277,7 +280,11 @@ export function createDefaultLanguageModelProviderRegistry(
     chatMode?: string;
     deterministicFailureMessage?: string;
     geminiApiKey?: string;
+    geminiClientFactory?: GeminiInteractionClientFactory;
     geminiInteractionClient?: GeminiInteractionClient;
+    geminiTransport?: string;
+    googleCloudLocation?: string;
+    googleCloudProject?: string;
     model?: string;
     openAiApiKey?: string;
     openAiFetch?: typeof globalThis.fetch;
@@ -307,8 +314,8 @@ export function createDefaultLanguageModelProviderRegistry(
     const model = (options.model ?? process.env.AI_MODEL)?.trim();
     const openAiApiKey = (options.openAiApiKey ?? process.env.OPENAI_API_KEY)?.trim();
     const anthropicApiKey = (options.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY)?.trim();
-    const geminiApiKey = (options.geminiApiKey ?? process.env.GEMINI_API_KEY)?.trim();
-    if (!model || !openAiApiKey || !anthropicApiKey || !geminiApiKey) {
+    const geminiApiKey = options.geminiApiKey ?? process.env.GEMINI_API_KEY;
+    if (!model || !openAiApiKey || !anthropicApiKey) {
       return new LanguageModelProviderRegistry(
         new UnavailableLanguageModelProvider('provider_configuration_invalid'),
       );
@@ -342,9 +349,13 @@ export function createDefaultLanguageModelProviderRegistry(
           (approvedModel) =>
             new GeminiLanguageModelProvider({
               apiKey: geminiApiKey,
+              clientFactory: options.geminiClientFactory,
               interactionClient: options.geminiInteractionClient,
               model: approvedModel,
               runtime,
+              transport: options.geminiTransport ?? process.env.GEMINI_TRANSPORT,
+              vertexLocation: options.googleCloudLocation ?? process.env.GOOGLE_CLOUD_LOCATION,
+              vertexProject: options.googleCloudProject ?? process.env.GOOGLE_CLOUD_PROJECT,
             }),
         ),
       ];
@@ -456,8 +467,8 @@ export function createDefaultLanguageModelProviderRegistry(
 
   if (key === 'gemini') {
     const model = (options.model ?? process.env.AI_MODEL)?.trim();
-    const apiKey = (options.geminiApiKey ?? process.env.GEMINI_API_KEY)?.trim();
-    if (!model || !apiKey) {
+    const apiKey = options.geminiApiKey ?? process.env.GEMINI_API_KEY;
+    if (!model) {
       return new LanguageModelProviderRegistry(
         new UnavailableLanguageModelProvider('provider_configuration_invalid'),
       );
@@ -472,9 +483,13 @@ export function createDefaultLanguageModelProviderRegistry(
         (approvedModel) =>
           new GeminiLanguageModelProvider({
             apiKey,
+            clientFactory: options.geminiClientFactory,
             interactionClient: options.geminiInteractionClient,
             model: approvedModel,
             runtime,
+            transport: options.geminiTransport ?? process.env.GEMINI_TRANSPORT,
+            vertexLocation: options.googleCloudLocation ?? process.env.GOOGLE_CLOUD_LOCATION,
+            vertexProject: options.googleCloudProject ?? process.env.GOOGLE_CLOUD_PROJECT,
           }),
       );
       const current = approvedProviders.find((provider) => provider.modelKey === model);

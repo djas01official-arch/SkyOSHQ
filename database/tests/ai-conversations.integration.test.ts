@@ -757,21 +757,25 @@ test('Gemini runs preserve workspace scope, thought usage, and only permitted ci
   const f = await fixture();
   const other = await fixture();
   await knowledge(f, 'gemini citation allowlist canary');
+  let observedAiRunId: string | undefined;
   const provider: LanguageModelProvider = {
     ...fakeModel,
     modelKey: 'gemini-3.6-flash',
     modelVersion: 'interactions-json-schema-v1',
     providerKey: 'gemini',
-    generate: async (request) => ({
-      cachedInputTokens: 40,
-      citationIds: ['cite_fabricated', request.citations[0]!.citationId],
-      inputTokens: 170,
-      outputTokens: 20,
-      providerRequestId: 'interaction_integration_test',
-      reasoningTokens: 10,
-      text: 'Validated Gemini citation response.',
-      totalTokens: 200,
-    }),
+    generate: async (request) => {
+      observedAiRunId = request.aiRunId;
+      return {
+        cachedInputTokens: 40,
+        citationIds: ['cite_fabricated', request.citations[0]!.citationId],
+        inputTokens: 170,
+        outputTokens: 20,
+        providerRequestId: 'interaction_integration_test',
+        reasoningTokens: 10,
+        text: 'Validated Gemini citation response.',
+        totalTokens: 200,
+      };
+    },
   };
   const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
   const run = await submitAiMessage(
@@ -790,6 +794,7 @@ test('Gemini runs preserve workspace scope, thought usage, and only permitted ci
   assert.equal(run.reasoningTokens, 10);
   assert.equal(run.totalTokens, 200);
   assert.equal(run.providerRequestId, 'interaction_integration_test');
+  assert.equal(observedAiRunId, run.id);
   assert.equal(run.estimatedCostUsd?.toString(), '0.000426');
   assert.equal(
     await prisma.aiRunProviderExecutionReference.count({

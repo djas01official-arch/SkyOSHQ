@@ -8,12 +8,14 @@ import {
 import {
   GeminiLanguageModelProvider,
   type GeminiInteractionClient,
+  type GeminiInteractionClientFactory,
   type GeminiInteractionRequest,
   type GeminiInteractionRequestOptions,
   type GeminiInteractionResponse,
   type GeminiProviderClock,
   geminiProviderLimits,
   normalizeGeminiTransportSchema,
+  resolveGeminiTransportConfig,
 } from './gemini-language-model-provider';
 import {
   groundedAnswerResponseSchema,
@@ -91,6 +93,7 @@ function mockClient(
 function provider(
   client: GeminiInteractionClient,
   clock?: GeminiProviderClock,
+  overrides: Partial<ConstructorParameters<typeof GeminiLanguageModelProvider>[0]> = {},
 ): GeminiLanguageModelProvider {
   return new GeminiLanguageModelProvider({
     apiKey: TEST_API_KEY,
@@ -98,6 +101,7 @@ function provider(
     interactionClient: client,
     model: MODEL,
     runtime: 'test',
+    ...overrides,
   });
 }
 
@@ -144,6 +148,146 @@ function hasSchemaKeyword(value: unknown, keyword: string): boolean {
     ([key, nested]) => key === keyword || hasSchemaKeyword(nested, keyword),
   );
 }
+
+test('resolves an explicit SkyOS Gemini transport without ambient SDK selection', () => {
+  assert.deepEqual(resolveGeminiTransportConfig({ apiKey: TEST_API_KEY }), {
+    clientConfiguration: { apiKey: TEST_API_KEY },
+    transport: 'developer',
+  });
+  assert.deepEqual(
+    resolveGeminiTransportConfig({
+      apiKey: TEST_API_KEY,
+      transport: 'developer',
+      vertexLocation: 'global',
+      vertexProject: 'must-not-switch-transport',
+    }),
+    { clientConfiguration: { apiKey: TEST_API_KEY }, transport: 'developer' },
+  );
+  assert.deepEqual(
+    resolveGeminiTransportConfig({
+      apiKey: TEST_API_KEY,
+      transport: 'vertex',
+      vertexLocation: 'global',
+      vertexProject: 'skyos-test-project',
+    }),
+    {
+      clientConfiguration: {
+        location: 'global',
+        project: 'skyos-test-project',
+        vertexai: true,
+      },
+      transport: 'vertex',
+    },
+  );
+});
+
+test('rejects invalid Gemini transport configuration before client construction', () => {
+  for (const configuration of [
+    { apiKey: TEST_API_KEY, transport: 'unsupported' },
+    { apiKey: TEST_API_KEY, transport: 'vertex', vertexLocation: 'global' },
+    { apiKey: TEST_API_KEY, transport: 'vertex', vertexProject: 'skyos-test-project' },
+    { transport: 'developer' },
+  ]) {
+    assert.throws(
+      () => resolveGeminiTransportConfig(configuration),
+      (error: unknown) =>
+        error instanceof LanguageModelProviderError &&
+        error.code === 'provider_configuration_invalid',
+    );
+  }
+
+  let factoryCalls = 0;
+  const clientFactory: GeminiInteractionClientFactory = () => {
+    factoryCalls += 1;
+    return mockClient(() => interaction()).client;
+  };
+  assert.throws(
+    () =>
+      new GeminiLanguageModelProvider({
+        clientFactory,
+        model: MODEL,
+        runtime: 'production',
+        transport: 'vertex',
+        vertexLocation: 'global',
+      }),
+    (error: unknown) =>
+      error instanceof LanguageModelProviderError &&
+      error.code === 'provider_configuration_invalid',
+  );
+  assert.equal(factoryCalls, 0);
+});
+
+test('constructs Developer and Vertex clients explicitly and limits labels to Vertex requests', async () => {
+  const developerTransport = mockClient(() => interaction());
+  const vertexTransport = mockClient(() => interaction());
+  const developerConfigurations: unknown[] = [];
+  const vertexConfigurations: unknown[] = [];
+  const developerFactory: GeminiInteractionClientFactory = (configuration) => {
+    developerConfigurations.push(configuration);
+    return developerTransport.client;
+  };
+  const vertexFactory: GeminiInteractionClientFactory = (configuration) => {
+    vertexConfigurations.push(configuration);
+    return vertexTransport.client;
+  };
+  const developer = new GeminiLanguageModelProvider({
+    apiKey: TEST_API_KEY,
+    clientFactory: developerFactory,
+    model: MODEL,
+    runtime: 'production',
+  });
+  const vertex = new GeminiLanguageModelProvider({
+    apiKey: TEST_API_KEY,
+    clientFactory: vertexFactory,
+    model: MODEL,
+    runtime: 'production',
+    transport: 'vertex',
+    vertexLocation: 'global',
+    vertexProject: 'skyos-test-project',
+  });
+
+  await developer.generate({ ...baseRequest, aiRunId: 'a16b8d88-c8b8-4a4f-8c7f-a16311fe1e5d' });
+  await vertex.generate({ ...baseRequest, aiRunId: 'b26b8d88-c8b8-4a4f-8c7f-a16311fe1e5d' });
+
+  assert.deepEqual(developerConfigurations, [{ apiKey: TEST_API_KEY }]);
+  assert.deepEqual(vertexConfigurations, [
+    { location: 'global', project: 'skyos-test-project', vertexai: true },
+  ]);
+  assert.equal('labels' in developerTransport.requests[0]!, false);
+  assert.deepEqual(vertexTransport.requests[0]!.labels, {
+    skyos_run: 'run-b26b8d88-c8b8-4a4f-8c7f-a16311fe1e5d',
+  });
+  assert.equal(vertexTransport.requests.length, 1);
+  assert.equal(vertexTransport.requests[0]!.model, MODEL);
+  assert.equal(vertexTransport.requests[0]!.input, developerTransport.requests[0]!.input);
+  assert.equal(
+    vertexTransport.requests[0]!.system_instruction,
+    developerTransport.requests[0]!.system_instruction,
+  );
+  assert.deepEqual(
+    vertexTransport.requests[0]!.response_format,
+    developerTransport.requests[0]!.response_format,
+  );
+  assert.deepEqual(
+    vertexTransport.requests[0]!.generation_config,
+    developerTransport.requests[0]!.generation_config,
+  );
+});
+
+test('fails closed without an authoritative AiRun identity before a Vertex interaction request', async () => {
+  const transport = mockClient(() => interaction());
+  const adapter = provider(transport.client, undefined, {
+    transport: 'vertex',
+    vertexLocation: 'global',
+    vertexProject: 'skyos-test-project',
+  });
+  await providerError(adapter.generate(baseRequest), 'provider_configuration_invalid');
+  await providerError(
+    adapter.generate({ ...baseRequest, aiRunId: 'not-a-canonical-run-id' }),
+    'provider_configuration_invalid',
+  );
+  assert.equal(transport.requests.length, 0);
+});
 
 test('reports exact Gemini Interactions measurement as unavailable without a provider call', async () => {
   const transport = mockClient(() => interaction());
@@ -201,6 +345,7 @@ test('uses one stateless Gemini Interactions request and maps safe usage metadat
     'background',
     'environment',
     'inference_geo',
+    'labels',
     'previous_interaction_id',
     'temperature',
     'thinking_level',

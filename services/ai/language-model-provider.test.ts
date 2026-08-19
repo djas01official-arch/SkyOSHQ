@@ -79,6 +79,18 @@ test('production selects only explicitly configured providers and never falls ba
   assert.equal(gemini.modelKey, 'gemini-3.6-flash');
   assert.equal(geminiRegistry.list().length, 1);
 
+  const vertexGeminiRegistry = createDefaultLanguageModelProviderRegistry({
+    chatMode: 'FAST',
+    configuredProvider: 'gemini',
+    geminiTransport: 'vertex',
+    googleCloudLocation: 'global',
+    googleCloudProject: 'skyos-test-project',
+    model: 'gemini-3.6-flash',
+    runtime: 'production',
+  });
+  assert.equal(vertexGeminiRegistry.getCurrent().providerKey, 'gemini');
+  assert.equal(vertexGeminiRegistry.getCurrent().modelKey, 'gemini-3.6-flash');
+
   for (const options of [
     { configuredProvider: '', model: 'gpt-5.6-terra', openAiApiKey: 'valid-value' },
     { configuredProvider: 'unknown', model: 'gpt-5.6-terra', openAiApiKey: 'valid-value' },
@@ -107,6 +119,18 @@ test('production selects only explicitly configured providers and never falls ba
     {
       configuredProvider: 'gemini',
       geminiApiKey: '<server-secret>',
+      model: 'gemini-3.6-flash',
+    },
+    {
+      configuredProvider: 'gemini',
+      geminiTransport: 'vertex',
+      googleCloudLocation: 'global',
+      model: 'gemini-3.6-flash',
+    },
+    {
+      configuredProvider: 'gemini',
+      geminiTransport: 'vertex',
+      googleCloudProject: 'skyos-test-project',
       model: 'gemini-3.6-flash',
     },
   ]) {
@@ -167,6 +191,25 @@ test('BALANCED production registry resolves every approved cross-provider identi
       'gemini',
     );
   }
+});
+
+test('multi-provider registry accepts explicitly configured Vertex Gemini without a Developer API key', () => {
+  const registry = createDefaultLanguageModelProviderRegistry({
+    anthropicApiKey: 'production-secret-shaped-value',
+    chatMode: 'BALANCED',
+    configuredProvider: 'openai',
+    geminiTransport: 'vertex',
+    googleCloudLocation: 'global',
+    googleCloudProject: 'skyos-test-project',
+    model: 'gpt-5.6-terra',
+    openAiApiKey: 'production-secret-shaped-value',
+    runtime: 'production',
+  });
+  assert.equal(registry.getCurrent().providerKey, 'openai');
+  assert.equal(
+    registry.getVersion('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1').providerKey,
+    'gemini',
+  );
 });
 
 test('DEEP production registry resolves every approved cross-provider identity', () => {
