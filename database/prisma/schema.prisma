@@ -461,6 +461,7 @@ model Workspace {
   aiMessages             AiMessage[]
   aiRuns                 AiRun[]
   aiRunCostEvidence      AiRunCostEvidence[]
+  aiRunProviderExecutionReferences AiRunProviderExecutionReference[]
   aiRetrievalSnapshots   AiRetrievalSnapshot[]
   aiOrchestrations       AiOrchestration[]
   aiRoutingDecisions     AiRoutingDecision[]
@@ -1081,6 +1082,7 @@ model AiRun {
   routingDecision            AiRoutingDecision?        @relation("AiRunRoutingDecision", fields: [routingDecisionId, userMessageId, conversationId, workspaceId], references: [id, userMessageId, conversationId, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_runs_routing_decision_scope_fkey")
   finalForOrchestration      AiOrchestration?          @relation("AiOrchestrationFinalRun")
   costEvidence              AiRunCostEvidence[]
+  providerExecutionReferences AiRunProviderExecutionReference[]
 
   @@unique([id, workspaceId])
   @@unique([userMessageId], map: "ai_runs_active_user_message_key", where: raw("((status = 'PROCESSING'::\"AiRunStatus\") AND (\"orchestrationId\" IS NULL))"))
@@ -1094,6 +1096,27 @@ model AiRun {
   @@index([groundedContextId, createdAt])
   @@index([routingDecisionId, orchestrationStep, createdAt])
   @@map("ai_runs")
+}
+
+enum AiProviderExecutionReferenceType {
+  REQUEST_ID
+}
+
+model AiRunProviderExecutionReference {
+  id             String                           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId          String                           @db.Uuid
+  workspaceId    String                           @db.Uuid
+  providerKey    String                           @db.VarChar(128)
+  referenceType  AiProviderExecutionReferenceType
+  referenceValue String                           @db.VarChar(200)
+  createdAt      DateTime                         @default(now()) @db.Timestamptz(6)
+  run            AiRun                            @relation(fields: [runId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_run_provider_execution_references_run_workspace_fkey")
+  workspace      Workspace                        @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([providerKey, referenceType, referenceValue], map: "ai_run_provider_execution_reference_identity_key")
+  @@index([runId, createdAt])
+  @@index([workspaceId, createdAt])
+  @@map("ai_run_provider_execution_references")
 }
 
 model AiRunCostEvidence {

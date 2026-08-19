@@ -486,6 +486,17 @@ test('successful runs persist tenancy-scoped provider usage and estimated cost',
   assert.equal(run.totalTokens, 150);
   assert.equal(run.providerRequestId, 'req_usage_test');
   assert.equal(run.estimatedCostUsd?.toString(), '0.00096125');
+  assert.equal(
+    await prisma.aiRunProviderExecutionReference.count({
+      where: {
+        providerKey: 'openai',
+        referenceType: 'REQUEST_ID',
+        referenceValue: 'req_usage_test',
+        runId: run.id,
+      },
+    }),
+    1,
+  );
 });
 
 test('successful runs preserve unknown usage and cost as null', async () => {
@@ -697,6 +708,7 @@ test('Anthropic runs preserve workspace scope, usage, and only permitted citatio
       inferenceGeo: 'global',
       inputTokens: 170,
       outputTokens: 20,
+      providerRequestId: 'req_anthropic_integration_test',
       text: 'Validated citation response.',
       totalTokens: 190,
     }),
@@ -717,6 +729,17 @@ test('Anthropic runs preserve workspace scope, usage, and only permitted citatio
   assert.equal(run.cacheWriteInputTokens, 30);
   assert.equal(run.cachedInputTokens, 40);
   assert.equal(run.estimatedCostUsd?.toString(), '0.000747');
+  assert.equal(
+    await prisma.aiRunProviderExecutionReference.count({
+      where: {
+        providerKey: 'anthropic',
+        referenceType: 'REQUEST_ID',
+        referenceValue: 'req_anthropic_integration_test',
+        runId: run.id,
+      },
+    }),
+    1,
+  );
   assert.deepEqual(run.referencedCitationIds, [
     (
       await prisma.aiRunCitation.findFirstOrThrow({
@@ -768,6 +791,17 @@ test('Gemini runs preserve workspace scope, thought usage, and only permitted ci
   assert.equal(run.totalTokens, 200);
   assert.equal(run.providerRequestId, 'interaction_integration_test');
   assert.equal(run.estimatedCostUsd?.toString(), '0.000426');
+  assert.equal(
+    await prisma.aiRunProviderExecutionReference.count({
+      where: {
+        providerKey: 'gemini',
+        referenceType: 'REQUEST_ID',
+        referenceValue: 'interaction_integration_test',
+        runId: run.id,
+      },
+    }),
+    1,
+  );
   assert.deepEqual(run.referencedCitationIds, [
     (
       await prisma.aiRunCitation.findFirstOrThrow({
@@ -806,6 +840,9 @@ test('provider failure retains one user message and retry creates a new successf
   const conversation = await createAiConversation(prisma, f.ownerId, f.workspaceId);
   const failing: LanguageModelProvider = {
     ...fakeModel,
+    modelKey: 'gpt-5.6-terra',
+    modelVersion: 'responses-json-schema-v1',
+    providerKey: 'openai',
     generate: async () => {
       throw new LanguageModelProviderError('secret upstream', 'provider_timeout', true, {
         providerRequestId: 'req_failed_test',
@@ -831,6 +868,17 @@ test('provider failure retains one user message and retry creates a new successf
   assert.equal(failed.totalTokens, null);
   assert.equal(failed.estimatedCostUsd, null);
   assert.equal(failed.providerAttempted, true);
+  assert.equal(
+    await prisma.aiRunProviderExecutionReference.count({
+      where: {
+        providerKey: 'openai',
+        referenceType: 'REQUEST_ID',
+        referenceValue: 'req_failed_test',
+        runId: failed.id,
+      },
+    }),
+    1,
+  );
   const retried = await retryAiRun(prisma, dependencies(), f.ownerId, f.workspaceId, failed.id);
   assert.equal(retried.status, AiRunStatus.SUCCEEDED);
   assert.equal(retried.userMessageId, failed.userMessageId);

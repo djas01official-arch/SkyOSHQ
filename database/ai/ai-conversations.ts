@@ -4,6 +4,7 @@ import {
   AiConversationStatus,
   AiMessageRole,
   AiOrchestrationRole,
+  AiProviderExecutionReferenceType,
   AiRunStatus,
   type AiRun,
   type PrismaClient,
@@ -93,6 +94,10 @@ import {
   validateAiBudgetExecutionPlan,
   type AiBudgetExecutionContext,
 } from './ai-budget-accounting';
+import {
+  recordAiRunProviderExecutionReference,
+  AiRunProviderExecutionReferenceConflictError,
+} from './ai-provider-execution-reference';
 
 const MAX_MESSAGE_CHARACTERS = 4_000;
 const MAX_HISTORY_CHARACTERS = 8_000;
@@ -596,29 +601,51 @@ async function failRun(
   accounting?: FailedRunAccounting,
 ) {
   const failure = safeFailure(error);
-  return prisma.aiRun.update({
-    where: { id: runId },
-    data: {
-      completedAt: new Date(),
-      durationMs: Date.now() - startedAt,
-      failureCode: failure.code,
-      failureMessage: failure.message,
-      ...(accounting
-        ? {
-            cacheWrite1HourInputTokens: accounting.usage.cacheWrite1HourInputTokens,
-            cacheWriteInputTokens: accounting.usage.cacheWriteInputTokens,
-            cachedInputTokens: accounting.usage.cachedInputTokens,
-            estimatedCostUsd: accounting.estimatedCostUsd,
-            inputTokens: accounting.usage.inputTokens,
-            outputTokens: accounting.usage.outputTokens,
-            reasoningTokens: accounting.usage.reasoningTokens,
-            totalTokens: accounting.usage.totalTokens,
-          }
-        : {}),
-      providerRequestId: failure.providerRequestId,
-      status: AiRunStatus.FAILED,
-    },
-  });
+  const data = {
+    completedAt: new Date(),
+    durationMs: Date.now() - startedAt,
+    failureCode: failure.code,
+    failureMessage: failure.message,
+    ...(accounting
+      ? {
+          cacheWrite1HourInputTokens: accounting.usage.cacheWrite1HourInputTokens,
+          cacheWriteInputTokens: accounting.usage.cacheWriteInputTokens,
+          cachedInputTokens: accounting.usage.cachedInputTokens,
+          estimatedCostUsd: accounting.estimatedCostUsd,
+          inputTokens: accounting.usage.inputTokens,
+          outputTokens: accounting.usage.outputTokens,
+          reasoningTokens: accounting.usage.reasoningTokens,
+          totalTokens: accounting.usage.totalTokens,
+        }
+      : {}),
+    providerRequestId: failure.providerRequestId,
+    status: AiRunStatus.FAILED,
+  } as const;
+  try {
+    return await prisma.$transaction(async (transaction) => {
+      const run = await transaction.aiRun.update({ where: { id: runId }, data });
+      if (failure.providerRequestId) {
+        await recordAiRunProviderExecutionReference(transaction, {
+          referenceType: AiProviderExecutionReferenceType.REQUEST_ID,
+          referenceValue: failure.providerRequestId,
+          runId: run.id,
+        });
+      }
+      return run;
+    });
+  } catch (referenceError) {
+    if (!(referenceError instanceof AiRunProviderExecutionReferenceConflictError)) {
+      throw referenceError;
+    }
+    return prisma.aiRun.update({
+      where: { id: runId },
+      data: {
+        ...data,
+        failureCode: 'provider_execution_reference_conflict',
+        providerRequestId: undefined,
+      },
+    });
+  }
 }
 
 /**
@@ -769,6 +796,7 @@ export async function executeGroundedRun(
       allowed.has(id),
     );
     const completedAt = new Date();
+    const providerRequestId = safeProviderRequestId(response.providerRequestId);
     await prisma.$transaction(async (transaction) => {
       await transaction.aiMessage.create({
         data: {
@@ -779,7 +807,7 @@ export async function executeGroundedRun(
           workspaceId: input.workspaceId,
         },
       });
-      await transaction.aiRun.update({
+      const completedRun = await transaction.aiRun.update({
         where: { id: run.id },
         data: {
           completedAt,
@@ -790,13 +818,20 @@ export async function executeGroundedRun(
           estimatedCostUsd,
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
-          providerRequestId: safeProviderRequestId(response.providerRequestId),
+          providerRequestId,
           reasoningTokens: usage.reasoningTokens,
           referencedCitationIds,
           status: AiRunStatus.SUCCEEDED,
           totalTokens: usage.totalTokens,
         },
       });
+      if (providerRequestId) {
+        await recordAiRunProviderExecutionReference(transaction, {
+          referenceType: AiProviderExecutionReferenceType.REQUEST_ID,
+          referenceValue: providerRequestId,
+          runId: completedRun.id,
+        });
+      }
       await transaction.aiConversation.update({
         where: { id: run.conversationId },
         data: { updatedAt: completedAt },
