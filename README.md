@@ -464,6 +464,30 @@ The provider-neutral orchestration persistence and execution foundation is docum
 
 `AI_PROVIDER` and `AI_MODEL` are trusted server configuration and cannot be selected by browser input. Provider credentials, hidden prompts, raw vectors, provider thoughts, and full upstream payloads are not stored. Run `pnpm test:ai:provider` to exercise all three official provider adapters, response parsing, structured Knowledge Actions, usage, error mapping, retries, and cancellation against injected in-memory transports; the command makes zero network requests. Provider decisions and official-source snapshots are recorded in [ADR 0003](./architecture/decisions/0003-production-language-model-provider.md), [ADR 0004](./architecture/decisions/0004-anthropic-language-model-provider.md), and [ADR 0005](./architecture/decisions/0005-gemini-language-model-provider.md).
 
+### Vertex deployment readiness
+
+Vertex remains disabled unless the server explicitly selects it. The offline readiness inspector reports only local SkyOS configuration; it does not contact Google, construct a provider client, inspect ADC, or create database or financial records:
+
+```sh
+GEMINI_TRANSPORT=vertex \
+GOOGLE_CLOUD_PROJECT=<project-id> \
+GOOGLE_CLOUD_LOCATION=<location> \
+AI_MODEL=gemini-3.6-flash \
+pnpm exec tsx scripts/inspect-gemini-vertex-readiness.ts
+```
+
+`GEMINI_TRANSPORT` is SkyOS-owned. `GOOGLE_GENAI_USE_VERTEXAI`, ADC, and other ambient Google settings never select Vertex. Developer transport remains the default and continues to require only `GEMINI_API_KEY`; Vertex does not use that API key. The inspector reports a locally complete Vertex configuration as `READY_FOR_EXTERNAL_VERIFICATION`, while project, billing, Vertex API, ADC, IAM, model availability, and live-smoke states remain `UNVERIFIED` or `NOT_RUN`. In particular, the configured SkyOS model is not asserted to be available on Vertex in the selected location, and SkyOS never substitutes another model.
+
+Before a separately approved live smoke test, operators must complete these external steps:
+
+1. Confirm the Google Cloud project exists and billing is enabled.
+2. An authorized provisioning operator enables `aiplatform.googleapis.com`, for example `gcloud services enable aiplatform.googleapis.com`. Enabling services requires `serviceusage.services.enable`; [Service Usage Admin](https://cloud.google.com/service-usage/docs/enable-disable) (`roles/serviceusage.serviceUsageAdmin`) is an appropriate provisioning role, not a runtime requirement.
+3. Configure supported Application Default Credentials. Local operators may use `gcloud auth application-default login`; production should use an attached workload identity or other supported ADC mechanism, never a committed service-account JSON key. See Google’s [ADC setup guide](https://cloud.google.com/docs/authentication/provide-credentials-adc).
+4. Grant the runtime identity only appropriate Vertex inference permissions. Google documents [Vertex AI User](https://cloud.google.com/iam/docs/roles-permissions/aiplatform) (`roles/aiplatform.user`) as the standard initial role; `GenerateContent` requires `aiplatform.endpoints.predict` or an equivalent least-privilege grant.
+5. Verify the configured model is available for the selected project and location, then obtain separate approval for one isolated live smoke test.
+
+This deployment-readiness work does not grant IAM, enable APIs, access Google Cloud Billing, or make Google billing authoritative. `GOOGLE_CLOUD_BILLING_STANDARD` and `GOOGLE_CLOUD_BILLING_DETAILED` remain blocked as cost-evidence sources.
+
 ### OpenAI staging evaluation
 
 SkyOS includes a bounded 12-case synthetic grounded-answer corpus and an operator-only live evaluator. Normal development, CI, database tests, E2E, checks, and builds never invoke it. The evaluator runs sequentially through the production OpenAI adapter, refuses CI environments, requires the approved model plus an explicit spend acknowledgement, reports deterministic structural/citation/security checks, and leaves groundedness and usefulness for human review.
