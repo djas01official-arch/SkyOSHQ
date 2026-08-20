@@ -17,6 +17,7 @@ import { encode } from 'next-auth/jwt';
 import { PrismaClient, UserStatus, type User } from '../../../database/generated/client/client';
 import { AI_E2E_FAILURE_MESSAGE, runAiMvpE2eScenario } from './ai-mvp.e2e';
 import { runKnowledgeMvpE2eScenario } from './knowledge-mvp.e2e';
+import { submitServerActionForm } from './server-action-form';
 import { runTasksMvpE2eScenario } from './tasks-mvp.e2e';
 import { runTenantLifecycleE2eScenarios, type LifecycleCookieJar } from './tenant-lifecycle.e2e';
 
@@ -392,6 +393,31 @@ async function loginWithCredentials(
   });
 }
 
+async function loginWithServerAction(
+  jar: CookieJar,
+  baseUrl: string,
+  identity: Pick<TestIdentity, 'email' | 'password'>,
+  callbackPath = '/dashboard',
+  overrides: Readonly<Record<string, string>> = {},
+): Promise<Response> {
+  const loginPath = `/login?callbackUrl=${encodeURIComponent(callbackPath)}`;
+  const page = await jar.request(loginPath);
+  assert.equal(
+    page.response.status,
+    200,
+    'The login page must render before its action is submitted.',
+  );
+
+  return submitServerActionForm(
+    jar,
+    baseUrl,
+    loginPath,
+    await page.response.text(),
+    { markerName: 'data-login-form', markerValue: 'login' },
+    { email: identity.email, password: identity.password, ...overrides },
+  );
+}
+
 async function logout(jar: CookieJar, baseUrl: string): Promise<HttpResult> {
   const csrfToken = await getCsrfToken(jar);
   const body = new URLSearchParams({
@@ -535,6 +561,55 @@ test(
       await context.test('unauthenticated product access redirects to login', async () => {
         await assertProtectedRouteDenied(new CookieJar(baseUrl), baseUrl);
       });
+
+      await context.test(
+        'browser login server action keeps final redirects local and returns inline errors',
+        async () => {
+          const identity = await createIdentity(prisma!, 'server-action', password, passwordHash);
+          const validJar = new CookieJar(baseUrl);
+          const validResponse = await loginWithServerAction(
+            validJar,
+            baseUrl,
+            identity,
+            '/settings?source=server-action',
+          );
+          const validRedirect = assertRedirectsTo(validResponse, baseUrl, '/settings');
+          assert.equal(validRedirect.search, '?source=server-action');
+          assert.notEqual(validJar.get(SESSION_COOKIE_NAME), undefined);
+          assert.equal((await validJar.request('/settings')).response.status, 200);
+
+          const unsafeJar = new CookieJar(baseUrl);
+          const unsafeResponse = await loginWithServerAction(
+            unsafeJar,
+            baseUrl,
+            identity,
+            '/settings',
+            { redirectTo: 'https://attacker.example/collect' },
+          );
+          assertRedirectsTo(unsafeResponse, baseUrl, '/dashboard');
+
+          const invalidJar = new CookieJar(baseUrl);
+          const invalidResponse = await loginWithServerAction(invalidJar, baseUrl, {
+            email: identity.email,
+            password: `${password}-wrong`,
+          });
+          assert.equal(invalidResponse.status, 200);
+          assert.match(
+            await invalidResponse.text(),
+            /The email address or password is incorrect\./u,
+          );
+          assert.equal(invalidJar.get(SESSION_COOKIE_NAME), undefined);
+
+          const malformedJar = new CookieJar(baseUrl);
+          const malformedResponse = await loginWithServerAction(malformedJar, baseUrl, {
+            email: '',
+            password: '',
+          });
+          assert.equal(malformedResponse.status, 200);
+          assert.match(await malformedResponse.text(), /Enter an email address and password\./u);
+          assert.equal(malformedJar.get(SESSION_COOKIE_NAME), undefined);
+        },
+      );
 
       await context.test(
         'valid login persists, exposes secure cookie attributes, and logs out',

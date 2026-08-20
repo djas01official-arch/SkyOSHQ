@@ -18,7 +18,7 @@ export function LoginForm({ redirectTo }: LoginFormProps) {
   const errorId = state.error ? 'login-error' : undefined;
 
   return (
-    <form action={formAction} className="space-y-5">
+    <form action={formAction} className="space-y-5" data-login-form="login">
       <input name="redirectTo" type="hidden" value={redirectTo} />
       <div>
         <label className="text-sm font-medium text-foreground" htmlFor="email">

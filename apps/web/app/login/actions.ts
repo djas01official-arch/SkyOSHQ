@@ -1,6 +1,7 @@
 'use server';
 
 import { AuthError } from 'next-auth';
+import { redirect } from 'next/navigation';
 
 import { normalizeCredentials } from '../../../../database/auth/credentials';
 
@@ -22,7 +23,7 @@ export async function login(_previousState: LoginState, formData: FormData): Pro
   }
 
   try {
-    await signIn('credentials', { ...credentials, redirectTo });
+    await signIn('credentials', { ...credentials, redirect: false });
   } catch (error) {
     if (error instanceof AuthError) {
       return { error: 'The email address or password is incorrect.' };
@@ -31,5 +32,5 @@ export async function login(_previousState: LoginState, formData: FormData): Pro
     throw error;
   }
 
-  return { error: 'Unable to sign in. Please try again.' };
+  redirect(redirectTo);
 }
