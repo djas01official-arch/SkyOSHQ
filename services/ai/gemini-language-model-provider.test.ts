@@ -18,7 +18,9 @@ import {
   type GeminiInteractionResponse,
   type GeminiProviderClock,
   geminiProviderLimits,
+  isLiveGeminiVertexDevelopmentEnabled,
   normalizeGeminiTransportSchema,
+  parseLiveAiDevelopmentOptIn,
   resolveGeminiTransportConfig,
 } from './gemini-language-model-provider';
 import {
@@ -241,6 +243,31 @@ test('resolves an explicit SkyOS Gemini transport without ambient SDK selection'
       transport: 'vertex',
     },
   );
+});
+
+test('the local Gemini Vertex development gate is exact and fail-closed', () => {
+  const base = {
+    allowLiveAiDevelopment: true,
+    chatMode: 'FAST',
+    provider: 'gemini',
+    runtime: 'development',
+    transport: 'vertex',
+  } as const;
+  assert.equal(isLiveGeminiVertexDevelopmentEnabled(base), true);
+  assert.equal(parseLiveAiDevelopmentOptIn('1'), true);
+  for (const value of [undefined, '', '0', 'true', 'yes', ' 1', '1 ']) {
+    assert.equal(parseLiveAiDevelopmentOptIn(value), false);
+  }
+  for (const input of [
+    { ...base, allowLiveAiDevelopment: false },
+    { ...base, provider: 'openai' },
+    { ...base, transport: 'developer' },
+    { ...base, chatMode: 'BALANCED' },
+    { ...base, runtime: 'test' },
+    { ...base, runtime: 'production' },
+  ]) {
+    assert.equal(isLiveGeminiVertexDevelopmentEnabled(input), false);
+  }
 });
 
 test('rejects invalid Gemini transport configuration before client construction', () => {

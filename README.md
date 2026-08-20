@@ -466,6 +466,27 @@ The provider-neutral orchestration persistence and execution foundation is docum
 
 ### Vertex deployment readiness
 
+### Controlled local Vertex UI verification
+
+For one deliberate local authenticated UI verification, development may opt in to
+the real Gemini Vertex transport without setting `NODE_ENV=production`:
+
+```sh
+AI_PROVIDER="gemini"
+AI_MODEL="gemini-3.6-flash"
+AI_CHAT_MODE="FAST"
+GEMINI_TRANSPORT="vertex"
+GOOGLE_CLOUD_PROJECT="..."
+GOOGLE_CLOUD_LOCATION="global"
+SKYOS_ALLOW_LIVE_AI_DEV="1"
+```
+
+This exact opt-in is only for controlled local Vertex integration verification.
+Development networking remains disabled by default; never enable it in CI, and do
+not use `NODE_ENV=production` merely to enable local AI networking. Comment or
+remove `SKYOS_ALLOW_LIVE_AI_DEV` again after the verification. It does not permit
+the Gemini Developer API, OpenAI, Anthropic, or any non-FAST orchestration mode.
+
 Vertex remains disabled unless the server explicitly selects it. The offline readiness inspector reports only local SkyOS configuration; it does not contact Google, construct a provider client, inspect ADC, or create database or financial records:
 
 ```sh

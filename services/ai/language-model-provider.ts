@@ -9,6 +9,10 @@ import {
 import {
   GEMINI_APPROVED_MODELS,
   GeminiLanguageModelProvider,
+  isLiveGeminiVertexDevelopmentEnabled,
+  parseLiveAiDevelopmentOptIn,
+  type GeminiGenerateContentClient,
+  type GeminiGenerateContentClientFactory,
   type GeminiInteractionClient,
   type GeminiInteractionClientFactory,
 } from './gemini-language-model-provider';
@@ -281,11 +285,14 @@ export function createDefaultLanguageModelProviderRegistry(
     deterministicFailureMessage?: string;
     geminiApiKey?: string;
     geminiClientFactory?: GeminiInteractionClientFactory;
+    geminiGenerateContentClient?: GeminiGenerateContentClient;
+    geminiGenerateContentClientFactory?: GeminiGenerateContentClientFactory;
     geminiInteractionClient?: GeminiInteractionClient;
     geminiTransport?: string;
     googleCloudLocation?: string;
     googleCloudProject?: string;
     model?: string;
+    liveAiDevelopmentOptIn?: string;
     openAiApiKey?: string;
     openAiFetch?: typeof globalThis.fetch;
     runtime?: string;
@@ -304,7 +311,12 @@ export function createDefaultLanguageModelProviderRegistry(
     );
   }
 
-  const chatMode = (options.chatMode ?? process.env.AI_CHAT_MODE)?.trim().toUpperCase();
+  const chatMode = (options.chatMode ?? process.env.AI_CHAT_MODE)?.trim().toUpperCase() || 'FAST';
+  const geminiTransport = options.geminiTransport ?? process.env.GEMINI_TRANSPORT;
+  const normalizedGeminiTransport = geminiTransport?.trim().toLowerCase();
+  const allowLiveAiDevelopment = parseLiveAiDevelopmentOptIn(
+    options.liveAiDevelopmentOptIn ?? process.env.SKYOS_ALLOW_LIVE_AI_DEV,
+  );
   if (
     chatMode === 'AUTO' ||
     chatMode === 'BALANCED' ||
@@ -349,11 +361,15 @@ export function createDefaultLanguageModelProviderRegistry(
           (approvedModel) =>
             new GeminiLanguageModelProvider({
               apiKey: geminiApiKey,
+              allowLiveAiDevelopment,
               clientFactory: options.geminiClientFactory,
+              chatMode,
+              generateContentClient: options.geminiGenerateContentClient,
+              generateContentClientFactory: options.geminiGenerateContentClientFactory,
               interactionClient: options.geminiInteractionClient,
               model: approvedModel,
               runtime,
-              transport: options.geminiTransport ?? process.env.GEMINI_TRANSPORT,
+              transport: geminiTransport,
               vertexLocation: options.googleCloudLocation ?? process.env.GOOGLE_CLOUD_LOCATION,
               vertexProject: options.googleCloudProject ?? process.env.GOOGLE_CLOUD_PROJECT,
             }),
@@ -473,7 +489,20 @@ export function createDefaultLanguageModelProviderRegistry(
         new UnavailableLanguageModelProvider('provider_configuration_invalid'),
       );
     }
-    if (runtime !== 'production' && !options.geminiInteractionClient) {
+    const allowsLiveVertexDevelopment = isLiveGeminiVertexDevelopmentEnabled({
+      allowLiveAiDevelopment,
+      chatMode,
+      provider: key,
+      runtime,
+      transport: normalizedGeminiTransport,
+    });
+    const hasInjectedGeminiClient =
+      normalizedGeminiTransport === 'vertex'
+        ? options.geminiGenerateContentClient !== undefined ||
+          options.geminiGenerateContentClientFactory !== undefined
+        : options.geminiInteractionClient !== undefined ||
+          options.geminiClientFactory !== undefined;
+    if (runtime !== 'production' && !hasInjectedGeminiClient && !allowsLiveVertexDevelopment) {
       return new LanguageModelProviderRegistry(
         new UnavailableLanguageModelProvider('provider_network_disabled'),
       );
@@ -483,11 +512,15 @@ export function createDefaultLanguageModelProviderRegistry(
         (approvedModel) =>
           new GeminiLanguageModelProvider({
             apiKey,
+            allowLiveAiDevelopment,
             clientFactory: options.geminiClientFactory,
+            chatMode,
+            generateContentClient: options.geminiGenerateContentClient,
+            generateContentClientFactory: options.geminiGenerateContentClientFactory,
             interactionClient: options.geminiInteractionClient,
             model: approvedModel,
             runtime,
-            transport: options.geminiTransport ?? process.env.GEMINI_TRANSPORT,
+            transport: geminiTransport,
             vertexLocation: options.googleCloudLocation ?? process.env.GOOGLE_CLOUD_LOCATION,
             vertexProject: options.googleCloudProject ?? process.env.GOOGLE_CLOUD_PROJECT,
           }),

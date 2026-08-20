@@ -125,6 +125,34 @@ export interface GeminiGenerateContentClient {
 
 export type GeminiTransport = 'developer' | 'vertex';
 
+export function parseLiveAiDevelopmentOptIn(value: unknown): boolean {
+  return value === '1';
+}
+
+/**
+ * Deliberately narrow local-only escape hatch for a controlled Vertex UI
+ * verification. The registry is the only production construction path that
+ * supplies these values; the provider repeats the same decision before it
+ * permits a real non-production transport.
+ */
+export function isLiveGeminiVertexDevelopmentEnabled(
+  input: Readonly<{
+    allowLiveAiDevelopment?: boolean;
+    chatMode?: string;
+    provider?: string;
+    runtime?: string;
+    transport?: string;
+  }>,
+): boolean {
+  return (
+    input.runtime === 'development' &&
+    input.allowLiveAiDevelopment === true &&
+    input.provider === 'gemini' &&
+    input.transport === 'vertex' &&
+    input.chatMode === 'FAST'
+  );
+}
+
 export type GeminiSdkClientConfiguration =
   Readonly<{ apiKey: string }> | Readonly<{ location: string; project: string; vertexai: true }>;
 
@@ -148,6 +176,8 @@ export type GeminiLanguageModelProviderOptions = Readonly<{
   generateContentClient?: GeminiGenerateContentClient;
   generateContentClientFactory?: GeminiGenerateContentClientFactory;
   interactionClient?: GeminiInteractionClient;
+  chatMode?: string;
+  allowLiveAiDevelopment?: boolean;
   model: string;
   runtime?: string;
   transport?: string;
@@ -525,7 +555,14 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
         ? options.generateContentClient !== undefined ||
           options.generateContentClientFactory !== undefined
         : options.interactionClient !== undefined || options.clientFactory !== undefined;
-    if (!hasInjectedClient && options.runtime !== 'production') {
+    const allowsLiveVertexDevelopment = isLiveGeminiVertexDevelopmentEnabled({
+      allowLiveAiDevelopment: options.allowLiveAiDevelopment,
+      chatMode: options.chatMode,
+      provider: GEMINI_PROVIDER_KEY,
+      runtime: options.runtime,
+      transport: transport.transport,
+    });
+    if (!hasInjectedClient && options.runtime !== 'production' && !allowsLiveVertexDevelopment) {
       throw new LanguageModelProviderError(
         'Gemini network transport is disabled outside production.',
         'provider_network_disabled',

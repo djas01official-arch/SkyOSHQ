@@ -8,6 +8,7 @@ import {
   LanguageModelProviderRegistry,
   type LanguageModelRequest,
 } from './language-model-provider';
+import type { GeminiGenerateContentClientFactory } from './gemini-language-model-provider';
 
 const request: LanguageModelRequest = {
   citations: [],
@@ -498,4 +499,106 @@ test('non-production Gemini selection requires an explicitly injected offline tr
     (error: unknown) =>
       error instanceof LanguageModelProviderError && error.code === 'provider_network_disabled',
   );
+});
+
+test('development permits only the exact local Gemini Vertex FAST opt-in', async () => {
+  const vertexOptions = {
+    configuredProvider: 'gemini',
+    geminiTransport: 'vertex',
+    googleCloudLocation: 'global',
+    googleCloudProject: 'skyos-test-project',
+    model: 'gemini-3.6-flash',
+  } as const;
+  const assertNetworkDisabled = async (
+    options: Parameters<typeof createDefaultLanguageModelProviderRegistry>[0],
+  ) => {
+    const provider = createDefaultLanguageModelProviderRegistry(options).getCurrent();
+    assert.equal(provider.providerKey, 'unconfigured');
+    await assert.rejects(
+      provider.generate(request),
+      (error: unknown) =>
+        error instanceof LanguageModelProviderError && error.code === 'provider_network_disabled',
+    );
+  };
+
+  for (const liveAiDevelopmentOptIn of [undefined, '0', 'true'] as const) {
+    await assertNetworkDisabled({
+      ...vertexOptions,
+      chatMode: 'FAST',
+      liveAiDevelopmentOptIn,
+      runtime: 'development',
+    });
+  }
+
+  let vertexFactoryCalls = 0;
+  const vertexFactory: GeminiGenerateContentClientFactory = () => {
+    vertexFactoryCalls += 1;
+    return {
+      generateContent: async () => {
+        throw new Error('A registry construction test must not call a provider.');
+      },
+    };
+  };
+  const allowed = createDefaultLanguageModelProviderRegistry({
+    ...vertexOptions,
+    chatMode: ' ',
+    geminiGenerateContentClientFactory: vertexFactory,
+    liveAiDevelopmentOptIn: '1',
+    runtime: 'development',
+  }).getCurrent();
+  assert.equal(allowed.providerKey, 'gemini');
+  assert.equal(allowed.modelKey, 'gemini-3.6-flash');
+  assert.equal(vertexFactoryCalls, 1);
+
+  await assertNetworkDisabled({
+    chatMode: 'FAST',
+    configuredProvider: 'gemini',
+    geminiApiKey: 'offline-test-value',
+    geminiTransport: 'developer',
+    liveAiDevelopmentOptIn: '1',
+    model: 'gemini-3.6-flash',
+    runtime: 'development',
+  });
+  await assertNetworkDisabled({
+    chatMode: 'FAST',
+    configuredProvider: 'openai',
+    liveAiDevelopmentOptIn: '1',
+    model: 'gpt-5.6-terra',
+    openAiApiKey: 'offline-test-value',
+    runtime: 'development',
+  });
+  await assertNetworkDisabled({
+    anthropicApiKey: 'offline-test-value',
+    chatMode: 'FAST',
+    configuredProvider: 'anthropic',
+    liveAiDevelopmentOptIn: '1',
+    model: 'claude-sonnet-5',
+    runtime: 'development',
+  });
+  for (const chatMode of ['BALANCED', 'DEEP', 'CRITICAL', 'AUTO'] as const) {
+    await assertNetworkDisabled({
+      ...vertexOptions,
+      anthropicApiKey: 'offline-test-value',
+      chatMode,
+      liveAiDevelopmentOptIn: '1',
+      openAiApiKey: 'offline-test-value',
+      runtime: 'development',
+    });
+  }
+  await assertNetworkDisabled({
+    ...vertexOptions,
+    chatMode: 'FAST',
+    liveAiDevelopmentOptIn: '1',
+    runtime: 'test',
+  });
+
+  const production = createDefaultLanguageModelProviderRegistry({
+    ...vertexOptions,
+    chatMode: 'FAST',
+    geminiGenerateContentClientFactory: vertexFactory,
+    liveAiDevelopmentOptIn: '0',
+    runtime: 'production',
+  }).getCurrent();
+  assert.equal(production.providerKey, 'gemini');
+  assert.equal(vertexFactoryCalls, 2);
 });
