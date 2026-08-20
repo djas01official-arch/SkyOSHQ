@@ -91,6 +91,38 @@ export interface GeminiInteractionClient {
   ): Promise<GeminiInteractionResponse>;
 }
 
+export type GeminiGenerateContentRequest = Readonly<{
+  config: Readonly<{
+    abortSignal: AbortSignal;
+    httpOptions: Readonly<{ retryOptions: Readonly<{ attempts: 1 }> }>;
+    labels: Readonly<Record<string, string>>;
+    maxOutputTokens: number;
+    responseJsonSchema: Record<string, unknown>;
+    responseMimeType: 'application/json';
+    systemInstruction: string;
+  }>;
+  contents: string;
+  model: string;
+}>;
+
+export type GeminiGenerateContentResponse = Readonly<{
+  candidates?: ReadonlyArray<Readonly<{ finishReason?: string }>>;
+  responseId?: string;
+  text?: string;
+  usageMetadata?: Readonly<{
+    cachedContentTokenCount?: number;
+    candidatesTokenCount?: number;
+    promptTokenCount?: number;
+    thoughtsTokenCount?: number;
+    toolUsePromptTokenCount?: number;
+    totalTokenCount?: number;
+  }>;
+}>;
+
+export interface GeminiGenerateContentClient {
+  generateContent(request: GeminiGenerateContentRequest): Promise<GeminiGenerateContentResponse>;
+}
+
 export type GeminiTransport = 'developer' | 'vertex';
 
 export type GeminiSdkClientConfiguration =
@@ -99,6 +131,10 @@ export type GeminiSdkClientConfiguration =
 export type GeminiInteractionClientFactory = (
   configuration: GeminiSdkClientConfiguration,
 ) => GeminiInteractionClient;
+
+export type GeminiGenerateContentClientFactory = (
+  configuration: GeminiSdkClientConfiguration,
+) => GeminiGenerateContentClient;
 
 export type GeminiTransportConfig = Readonly<{
   clientConfiguration: GeminiSdkClientConfiguration;
@@ -109,6 +145,8 @@ export type GeminiLanguageModelProviderOptions = Readonly<{
   apiKey?: string;
   clientFactory?: GeminiInteractionClientFactory;
   clock?: GeminiProviderClock;
+  generateContentClient?: GeminiGenerateContentClient;
+  generateContentClientFactory?: GeminiGenerateContentClientFactory;
   interactionClient?: GeminiInteractionClient;
   model: string;
   runtime?: string;
@@ -202,6 +240,14 @@ const defaultInteractionClientFactory: GeminiInteractionClientFactory = (configu
   return {
     create: (request, requestOptions) =>
       sdk.interactions.create(request, requestOptions) as Promise<GeminiInteractionResponse>,
+  };
+};
+
+const defaultGenerateContentClientFactory: GeminiGenerateContentClientFactory = (configuration) => {
+  const sdk = new GoogleGenAI(configuration);
+  return {
+    generateContent: (request) =>
+      sdk.models.generateContent(request) as Promise<GeminiGenerateContentResponse>,
   };
 };
 
@@ -461,8 +507,9 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
   readonly maxOutputCharacters = MAX_OUTPUT_CHARACTERS;
   readonly timeoutMs = AGGREGATE_TIMEOUT_MS;
   readonly modelKey: string;
-  readonly #client: GeminiInteractionClient;
   readonly #clock: GeminiProviderClock;
+  readonly #generateContentClient?: GeminiGenerateContentClient;
+  readonly #interactionClient?: GeminiInteractionClient;
   readonly #transport: GeminiTransport;
 
   constructor(options: GeminiLanguageModelProviderOptions) {
@@ -473,7 +520,12 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
       );
     }
     const transport = resolveGeminiTransportConfig(options);
-    if (!options.interactionClient && !options.clientFactory && options.runtime !== 'production') {
+    const hasInjectedClient =
+      transport.transport === 'vertex'
+        ? options.generateContentClient !== undefined ||
+          options.generateContentClientFactory !== undefined
+        : options.interactionClient !== undefined || options.clientFactory !== undefined;
+    if (!hasInjectedClient && options.runtime !== 'production') {
       throw new LanguageModelProviderError(
         'Gemini network transport is disabled outside production.',
         'provider_network_disabled',
@@ -482,12 +534,16 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
     this.modelKey = options.model;
     this.#clock = options.clock ?? defaultClock;
     this.#transport = transport.transport;
-    if (options.interactionClient) {
-      this.#client = options.interactionClient;
+    if (transport.transport === 'vertex') {
+      this.#generateContentClient =
+        options.generateContentClient ??
+        (options.generateContentClientFactory ?? defaultGenerateContentClientFactory)(
+          transport.clientConfiguration,
+        );
     } else {
-      this.#client = (options.clientFactory ?? defaultInteractionClientFactory)(
-        transport.clientConfiguration,
-      );
+      this.#interactionClient =
+        options.interactionClient ??
+        (options.clientFactory ?? defaultInteractionClientFactory)(transport.clientConfiguration);
     }
   }
 
@@ -538,12 +594,10 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
         );
       }
     }
+    const preparedInput = requestInput(request);
     const interactionRequest: GeminiInteractionRequest = {
       generation_config: { max_output_tokens: maxOutputTokens },
-      input: requestInput(request),
-      ...(vertexCorrelation
-        ? { labels: { [vertexCorrelation.labelKey]: vertexCorrelation.labelValue } }
-        : {}),
+      input: preparedInput,
       model: this.modelKey,
       response_format: {
         mime_type: 'application/json',
@@ -578,6 +632,22 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
     options.signal?.addEventListener('abort', abortFromCaller, { once: true });
     if (options.signal?.aborted) abortFromCaller();
 
+    const vertexRequest: GeminiGenerateContentRequest | undefined = vertexCorrelation
+      ? {
+          config: {
+            abortSignal: controller.signal,
+            httpOptions: { retryOptions: { attempts: 1 } },
+            labels: { [vertexCorrelation.labelKey]: vertexCorrelation.labelValue },
+            maxOutputTokens,
+            responseJsonSchema: transportSchema,
+            responseMimeType: 'application/json',
+            systemInstruction: SYSTEM_PROMPT,
+          },
+          contents: preparedInput,
+          model: this.modelKey,
+        }
+      : undefined;
+
     const execute = async (): Promise<LanguageModelResponse> => {
       while (attempts <= MAX_AUTOMATIC_RETRIES) {
         if (controller.signal.aborted) {
@@ -590,7 +660,86 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
         }
         attempts += 1;
         try {
-          const response = await this.#client.create(interactionRequest, {
+          if (this.#transport === 'vertex') {
+            if (!this.#generateContentClient || !vertexRequest) {
+              throw new LanguageModelProviderError(
+                'Gemini provider configuration is invalid.',
+                'provider_configuration_invalid',
+              );
+            }
+            const response = await this.#generateContentClient.generateContent(vertexRequest);
+            if (response.candidates?.[0]?.finishReason !== 'STOP') {
+              throw new LanguageModelProviderError(
+                'The language model response did not complete.',
+                'provider_output_incomplete',
+              );
+            }
+            if (typeof response.text !== 'string' || response.text.trim().length < 1) {
+              throw new LanguageModelProviderError(
+                'The language model returned an invalid structured response.',
+                'provider_output_invalid',
+              );
+            }
+            const output = parseStructuredOutput(response.text, responseFormat);
+            const usage = response.usageMetadata;
+            const inputTokens = safeInteger(usage?.promptTokenCount);
+            const outputTokens = safeInteger(usage?.candidatesTokenCount);
+            const reasoningTokens = safeInteger(usage?.thoughtsTokenCount);
+            const cachedInputTokens = safeInteger(usage?.cachedContentTokenCount);
+            const toolUseTokens = safeInteger(usage?.toolUsePromptTokenCount);
+            const reportedTotalTokens = safeInteger(usage?.totalTokenCount);
+            if ((toolUseTokens ?? 0) > 0) {
+              throw new LanguageModelProviderError(
+                'The language model provider used an unsupported tool.',
+                'provider_output_invalid',
+              );
+            }
+            if (
+              cachedInputTokens !== undefined &&
+              inputTokens !== undefined &&
+              cachedInputTokens > inputTokens
+            ) {
+              throw new LanguageModelProviderError(
+                'The language model returned invalid usage metadata.',
+                'provider_output_invalid',
+              );
+            }
+            const totalTokens =
+              inputTokens !== undefined && outputTokens !== undefined
+                ? inputTokens + outputTokens + (reasoningTokens ?? 0)
+                : undefined;
+            if (
+              reportedTotalTokens !== undefined &&
+              totalTokens !== undefined &&
+              reportedTotalTokens !== totalTokens
+            ) {
+              throw new LanguageModelProviderError(
+                'The language model returned invalid usage metadata.',
+                'provider_output_invalid',
+              );
+            }
+            return {
+              attemptCount: attempts,
+              cachedInputTokens,
+              citationIds: output.citationIds,
+              durationMs: Math.max(0, this.#clock.now() - startedAt),
+              inputTokens,
+              modelKey: this.modelKey,
+              outputTokens,
+              providerRequestId: safeRequestId(response.responseId),
+              reasoningTokens,
+              text: output.answer,
+              totalTokens,
+            };
+          }
+
+          if (!this.#interactionClient) {
+            throw new LanguageModelProviderError(
+              'Gemini provider configuration is invalid.',
+              'provider_configuration_invalid',
+            );
+          }
+          const response = await this.#interactionClient.create(interactionRequest, {
             fetchOptions: { signal: controller.signal },
             maxRetries: 0,
           });

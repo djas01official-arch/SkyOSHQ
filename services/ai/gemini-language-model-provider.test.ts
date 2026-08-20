@@ -7,6 +7,10 @@ import {
 } from './ai-input-token-measurement';
 import {
   GeminiLanguageModelProvider,
+  type GeminiGenerateContentClient,
+  type GeminiGenerateContentClientFactory,
+  type GeminiGenerateContentRequest,
+  type GeminiGenerateContentResponse,
   type GeminiInteractionClient,
   type GeminiInteractionClientFactory,
   type GeminiInteractionRequest,
@@ -65,6 +69,26 @@ function interaction(
   };
 }
 
+function generatedContent(
+  result: unknown = { answer: 'Grounded answer.', citationIds: ['cite_allowed'] },
+  overrides: Partial<GeminiGenerateContentResponse> = {},
+): GeminiGenerateContentResponse {
+  return {
+    candidates: [{ finishReason: 'STOP' }],
+    responseId: 'vertex_response_offline_123',
+    text: JSON.stringify(result),
+    usageMetadata: {
+      cachedContentTokenCount: 20,
+      candidatesTokenCount: 20,
+      promptTokenCount: 100,
+      thoughtsTokenCount: 10,
+      totalTokenCount: 130,
+      toolUsePromptTokenCount: 0,
+    },
+    ...overrides,
+  };
+}
+
 function mockClient(
   handler: (
     request: GeminiInteractionRequest,
@@ -90,6 +114,27 @@ function mockClient(
   };
 }
 
+function mockGenerateContentClient(
+  handler: (
+    request: GeminiGenerateContentRequest,
+    call: number,
+  ) => GeminiGenerateContentResponse | Promise<GeminiGenerateContentResponse>,
+): {
+  client: GeminiGenerateContentClient;
+  requests: GeminiGenerateContentRequest[];
+} {
+  const requests: GeminiGenerateContentRequest[] = [];
+  return {
+    client: {
+      generateContent: async (request) => {
+        requests.push(request);
+        return handler(request, requests.length);
+      },
+    },
+    requests,
+  };
+}
+
 function provider(
   client: GeminiInteractionClient,
   clock?: GeminiProviderClock,
@@ -101,6 +146,23 @@ function provider(
     interactionClient: client,
     model: MODEL,
     runtime: 'test',
+    ...overrides,
+  });
+}
+
+function vertexProvider(
+  client: GeminiGenerateContentClient,
+  clock?: GeminiProviderClock,
+  overrides: Partial<ConstructorParameters<typeof GeminiLanguageModelProvider>[0]> = {},
+): GeminiLanguageModelProvider {
+  return new GeminiLanguageModelProvider({
+    clock,
+    generateContentClient: client,
+    model: MODEL,
+    runtime: 'test',
+    transport: 'vertex',
+    vertexLocation: 'global',
+    vertexProject: 'skyos-test-project',
     ...overrides,
   });
 }
@@ -217,16 +279,16 @@ test('rejects invalid Gemini transport configuration before client construction'
   assert.equal(factoryCalls, 0);
 });
 
-test('constructs Developer and Vertex clients explicitly and limits labels to Vertex requests', async () => {
+test('constructs Developer and Vertex clients explicitly and routes Vertex only through GenerateContent', async () => {
   const developerTransport = mockClient(() => interaction());
-  const vertexTransport = mockClient(() => interaction());
+  const vertexTransport = mockGenerateContentClient(() => generatedContent());
   const developerConfigurations: unknown[] = [];
   const vertexConfigurations: unknown[] = [];
   const developerFactory: GeminiInteractionClientFactory = (configuration) => {
     developerConfigurations.push(configuration);
     return developerTransport.client;
   };
-  const vertexFactory: GeminiInteractionClientFactory = (configuration) => {
+  const vertexFactory: GeminiGenerateContentClientFactory = (configuration) => {
     vertexConfigurations.push(configuration);
     return vertexTransport.client;
   };
@@ -237,8 +299,7 @@ test('constructs Developer and Vertex clients explicitly and limits labels to Ve
     runtime: 'production',
   });
   const vertex = new GeminiLanguageModelProvider({
-    apiKey: TEST_API_KEY,
-    clientFactory: vertexFactory,
+    generateContentClientFactory: vertexFactory,
     model: MODEL,
     runtime: 'production',
     transport: 'vertex',
@@ -247,40 +308,191 @@ test('constructs Developer and Vertex clients explicitly and limits labels to Ve
   });
 
   await developer.generate({ ...baseRequest, aiRunId: 'a16b8d88-c8b8-4a4f-8c7f-a16311fe1e5d' });
-  await vertex.generate({ ...baseRequest, aiRunId: 'b26b8d88-c8b8-4a4f-8c7f-a16311fe1e5d' });
+  await vertex.generate({
+    ...baseRequest,
+    aiRunId: 'b26b8d88-c8b8-4a4f-8c7f-a16311fe1e5d',
+    executionLimits: { maxOutputTokens: 137 },
+  });
 
   assert.deepEqual(developerConfigurations, [{ apiKey: TEST_API_KEY }]);
   assert.deepEqual(vertexConfigurations, [
     { location: 'global', project: 'skyos-test-project', vertexai: true },
   ]);
   assert.equal('labels' in developerTransport.requests[0]!, false);
-  assert.deepEqual(vertexTransport.requests[0]!.labels, {
-    skyos_run: 'run-b26b8d88-c8b8-4a4f-8c7f-a16311fe1e5d',
-  });
   assert.equal(vertexTransport.requests.length, 1);
-  assert.equal(vertexTransport.requests[0]!.model, MODEL);
-  assert.equal(vertexTransport.requests[0]!.input, developerTransport.requests[0]!.input);
   assert.equal(
-    vertexTransport.requests[0]!.system_instruction,
+    vertexTransport.requests[0]!.config.labels.skyos_run,
+    'run-b26b8d88-c8b8-4a4f-8c7f-a16311fe1e5d',
+  );
+  assert.deepEqual(Object.keys(vertexTransport.requests[0]!.config.labels), ['skyos_run']);
+  assert.equal(vertexTransport.requests[0]!.model, MODEL);
+  assert.equal(vertexTransport.requests[0]!.contents, developerTransport.requests[0]!.input);
+  assert.equal(
+    vertexTransport.requests[0]!.config.systemInstruction,
     developerTransport.requests[0]!.system_instruction,
   );
   assert.deepEqual(
-    vertexTransport.requests[0]!.response_format,
-    developerTransport.requests[0]!.response_format,
+    vertexTransport.requests[0]!.config.responseJsonSchema,
+    developerTransport.requests[0]!.response_format.schema,
   );
-  assert.deepEqual(
-    vertexTransport.requests[0]!.generation_config,
-    developerTransport.requests[0]!.generation_config,
-  );
+  assert.equal(vertexTransport.requests[0]!.config.responseMimeType, 'application/json');
+  assert.deepEqual(vertexTransport.requests[0]!.config.maxOutputTokens, 137);
+  assert.deepEqual(vertexTransport.requests[0]!.config.httpOptions, {
+    retryOptions: { attempts: 1 },
+  });
+  assert.equal(developerTransport.requests.length, 1);
 });
 
-test('fails closed without an authoritative AiRun identity before a Vertex interaction request', async () => {
-  const transport = mockClient(() => interaction());
-  const adapter = provider(transport.client, undefined, {
+test('maps Vertex GenerateContent output, response identity, and usage through canonical validation', async () => {
+  const transport = mockGenerateContentClient(() =>
+    generatedContent({
+      answer: 'Grounded answer.',
+      citationIds: ['cite_allowed', 'cite_fabricated'],
+    }),
+  );
+  const result = await vertexProvider(transport.client).generate({
+    ...baseRequest,
+    aiRunId: 'b26b8d88-c8b8-4a4f-8c7f-a16311fe1e5d',
+  });
+
+  assert.equal(transport.requests.length, 1);
+  assert.equal(result.providerRequestId, 'vertex_response_offline_123');
+  assert.deepEqual(result.citationIds, ['cite_allowed', 'cite_fabricated']);
+  assert.equal(result.inputTokens, 100);
+  assert.equal(result.cachedInputTokens, 20);
+  assert.equal(result.outputTokens, 20);
+  assert.equal(result.reasoningTokens, 10);
+  assert.equal(result.totalTokens, 130);
+});
+
+test('fails closed for incomplete Vertex GenerateContent responses and invalid canonical output', async () => {
+  const cases: Array<readonly [GeminiGenerateContentResponse, string]> = [
+    [generatedContent(undefined, { candidates: undefined }), 'provider_output_incomplete'],
+    [
+      generatedContent(undefined, { candidates: [{ finishReason: 'MAX_TOKENS' }] }),
+      'provider_output_incomplete',
+    ],
+    [
+      generatedContent(undefined, { candidates: [{ finishReason: 'SAFETY' }] }),
+      'provider_output_incomplete',
+    ],
+    [generatedContent(undefined, { text: '{' }), 'provider_output_invalid'],
+    [
+      generatedContent({ answer: 'a'.repeat(2_001), citationIds: ['cite_allowed'] }),
+      'provider_output_invalid',
+    ],
+  ];
+
+  for (const [response, code] of cases) {
+    const transport = mockGenerateContentClient(() => response);
+    await providerError(
+      vertexProvider(transport.client).generate({
+        ...baseRequest,
+        aiRunId: 'b26b8d88-c8b8-4a4f-8c7f-a16311fe1e5d',
+      }),
+      code,
+    );
+    assert.equal(transport.requests.length, 1);
+  }
+});
+
+test('preserves unknown Vertex metadata and rejects inconsistent or unsupported usage', async () => {
+  const missing = mockGenerateContentClient(() =>
+    generatedContent(undefined, { responseId: undefined, usageMetadata: undefined }),
+  );
+  const missingResult = await vertexProvider(missing.client).generate({
+    ...baseRequest,
+    aiRunId: 'b26b8d88-c8b8-4a4f-8c7f-a16311fe1e5d',
+  });
+  assert.equal(missingResult.providerRequestId, undefined);
+  assert.equal(missingResult.inputTokens, undefined);
+  assert.equal(missingResult.outputTokens, undefined);
+  assert.equal(missingResult.reasoningTokens, undefined);
+  assert.equal(missingResult.totalTokens, undefined);
+
+  for (const usageMetadata of [
+    {
+      candidatesTokenCount: 20,
+      promptTokenCount: 100,
+      thoughtsTokenCount: 10,
+      totalTokenCount: 129,
+    },
+    {
+      cachedContentTokenCount: 101,
+      candidatesTokenCount: 20,
+      promptTokenCount: 100,
+      totalTokenCount: 120,
+    },
+    {
+      candidatesTokenCount: 20,
+      promptTokenCount: 100,
+      toolUsePromptTokenCount: 1,
+      totalTokenCount: 121,
+    },
+  ]) {
+    const transport = mockGenerateContentClient(() =>
+      generatedContent(undefined, { usageMetadata }),
+    );
+    await providerError(
+      vertexProvider(transport.client).generate({
+        ...baseRequest,
+        aiRunId: 'b26b8d88-c8b8-4a4f-8c7f-a16311fe1e5d',
+      }),
+      'provider_output_invalid',
+    );
+    assert.equal(transport.requests.length, 1);
+  }
+});
+
+test('uses SkyOS-owned bounded retries for Vertex GenerateContent without an Interactions fallback', async () => {
+  const vertex = mockGenerateContentClient(() =>
+    Promise.reject(new FakeGeminiError(503, 'offline Vertex unavailable')),
+  );
+  const developer = mockClient(() => interaction());
+  const adapter = new GeminiLanguageModelProvider({
+    clock: immediateClock(),
+    generateContentClient: vertex.client,
+    interactionClient: developer.client,
+    model: MODEL,
+    runtime: 'test',
     transport: 'vertex',
     vertexLocation: 'global',
     vertexProject: 'skyos-test-project',
   });
+
+  await providerError(
+    adapter.generate({ ...baseRequest, aiRunId: 'b26b8d88-c8b8-4a4f-8c7f-a16311fe1e5d' }),
+    'provider_unavailable',
+  );
+  assert.equal(vertex.requests.length, 3);
+  assert.equal(developer.requests.length, 0);
+});
+
+test('uses Vertex GenerateContent for canonical Knowledge Action schemas without changing Developer actions', async () => {
+  const vertex = mockGenerateContentClient(() =>
+    generatedContent({
+      keyPoints: [{ citationIds: ['cite_allowed'], point: 'Bounded evidence.' }],
+      summary: 'SkyOS uses bounded evidence.',
+      summaryCitationIds: ['cite_allowed'],
+    }),
+  );
+  const result = await vertexProvider(vertex.client).generate({
+    ...baseRequest,
+    aiRunId: 'b26b8d88-c8b8-4a4f-8c7f-a16311fe1e5d',
+    responseFormat: 'knowledge_summary',
+  });
+
+  assert.match(result.text, /Summary/u);
+  assert.deepEqual(result.citationIds, ['cite_allowed']);
+  assert.deepEqual(
+    vertex.requests[0]!.config.responseJsonSchema,
+    normalizeGeminiTransportSchema(knowledgeActionResponseSchema('knowledge_summary')),
+  );
+});
+
+test('fails closed without an authoritative AiRun identity before a Vertex GenerateContent request', async () => {
+  const transport = mockGenerateContentClient(() => generatedContent());
+  const adapter = vertexProvider(transport.client);
   await providerError(adapter.generate(baseRequest), 'provider_configuration_invalid');
   await providerError(
     adapter.generate({ ...baseRequest, aiRunId: 'not-a-canonical-run-id' }),
