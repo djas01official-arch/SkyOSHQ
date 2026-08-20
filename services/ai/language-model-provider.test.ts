@@ -91,6 +91,7 @@ test('production selects only explicitly configured providers and never falls ba
   });
   assert.equal(vertexGeminiRegistry.getCurrent().providerKey, 'gemini');
   assert.equal(vertexGeminiRegistry.getCurrent().modelKey, 'gemini-3.6-flash');
+  assert.equal(vertexGeminiRegistry.getCurrent().modelVersion, 'generate-content-json-schema-v1');
 
   for (const options of [
     { configuredProvider: '', model: 'gpt-5.6-terra', openAiApiKey: 'valid-value' },
@@ -208,7 +209,8 @@ test('multi-provider registry accepts explicitly configured Vertex Gemini withou
   });
   assert.equal(registry.getCurrent().providerKey, 'openai');
   assert.equal(
-    registry.getVersion('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1').providerKey,
+    registry.getVersion('gemini', 'gemini-3.6-flash', 'generate-content-json-schema-v1')
+      .providerKey,
     'gemini',
   );
 });

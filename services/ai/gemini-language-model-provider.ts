@@ -26,7 +26,8 @@ import {
 const GEMINI_PROVIDER_KEY = 'gemini';
 export const GEMINI_DEFAULT_MODEL = 'gemini-3.6-flash';
 export const GEMINI_APPROVED_MODELS = [GEMINI_DEFAULT_MODEL] as const;
-const GEMINI_MODEL_POLICY_VERSION = 'interactions-json-schema-v1';
+export const GEMINI_INTERACTIONS_MODEL_POLICY_VERSION = 'interactions-json-schema-v1';
+export const GEMINI_GENERATE_CONTENT_MODEL_POLICY_VERSION = 'generate-content-json-schema-v1';
 const MAX_INPUT_CHARACTERS = 20_000;
 const MAX_OUTPUT_CHARACTERS = 2_000;
 const MAX_OUTPUT_TOKENS = 16_000;
@@ -124,6 +125,12 @@ export interface GeminiGenerateContentClient {
 }
 
 export type GeminiTransport = 'developer' | 'vertex';
+
+export function resolveGeminiModelPolicyVersion(transport: GeminiTransport): string {
+  return transport === 'vertex'
+    ? GEMINI_GENERATE_CONTENT_MODEL_POLICY_VERSION
+    : GEMINI_INTERACTIONS_MODEL_POLICY_VERSION;
+}
 
 export function parseLiveAiDevelopmentOptIn(value: unknown): boolean {
   return value === '1';
@@ -532,7 +539,7 @@ function normalizedProviderError(
 export class GeminiLanguageModelProvider implements LanguageModelProvider {
   readonly inputTokenMeasurementAccounting = 'NO_PROVIDER_CALL' as const;
   readonly providerKey = GEMINI_PROVIDER_KEY;
-  readonly modelVersion = GEMINI_MODEL_POLICY_VERSION;
+  readonly modelVersion: string;
   readonly maxInputCharacters = MAX_INPUT_CHARACTERS;
   readonly maxOutputCharacters = MAX_OUTPUT_CHARACTERS;
   readonly timeoutMs = AGGREGATE_TIMEOUT_MS;
@@ -571,6 +578,7 @@ export class GeminiLanguageModelProvider implements LanguageModelProvider {
     this.modelKey = options.model;
     this.#clock = options.clock ?? defaultClock;
     this.#transport = transport.transport;
+    this.modelVersion = resolveGeminiModelPolicyVersion(transport.transport);
     if (transport.transport === 'vertex') {
       this.#generateContentClient =
         options.generateContentClient ??

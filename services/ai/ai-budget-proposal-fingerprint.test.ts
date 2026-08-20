@@ -31,6 +31,11 @@ const gemini = Object.freeze({
   modelVersion: 'interactions-json-schema-v1',
   providerKey: 'gemini',
 });
+const vertexGemini = Object.freeze({
+  modelKey: 'gemini-3.6-flash',
+  modelVersion: 'generate-content-json-schema-v1',
+  providerKey: 'gemini',
+});
 const tokenProfile: AiTokenBudgetProfile = Object.freeze({
   candidate: Object.freeze({ inputTokens: 100, outputTokens: 10 }),
   critic: Object.freeze({ inputTokens: 110, outputTokens: 11 }),
@@ -178,6 +183,22 @@ test('the execution-plan fingerprint changes for provider, model, version, input
     ]),
   });
   assert.throws(() => fingerprints(roleOrStepChanged), AiBudgetProposalFingerprintValidationError);
+});
+
+test('Gemini transport policy identities produce deterministic, distinct execution-plan fingerprints', () => {
+  const developerPlan = plan('BALANCED');
+  const vertexPlan = buildAiExecutionCostPlan({
+    mode: 'BALANCED',
+    plannedTokenBudget: tokenProfile,
+    providerAssignment: { candidates: [openai, anthropic], synthesizer: vertexGemini },
+  });
+
+  assert.deepEqual(fingerprints(developerPlan), fingerprints(developerPlan));
+  assert.deepEqual(fingerprints(vertexPlan), fingerprints(vertexPlan));
+  assert.notEqual(
+    fingerprints(vertexPlan).executionPlanFingerprint,
+    fingerprints(developerPlan).executionPlanFingerprint,
+  );
 });
 
 test('the estimate fingerprint changes with effective measured input, pricing time, and exact estimated cost', () => {

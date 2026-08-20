@@ -7,6 +7,8 @@ import {
 } from './ai-input-token-measurement';
 import {
   GeminiLanguageModelProvider,
+  GEMINI_GENERATE_CONTENT_MODEL_POLICY_VERSION,
+  GEMINI_INTERACTIONS_MODEL_POLICY_VERSION,
   type GeminiGenerateContentClient,
   type GeminiGenerateContentClientFactory,
   type GeminiGenerateContentRequest,
@@ -334,6 +336,9 @@ test('constructs Developer and Vertex clients explicitly and routes Vertex only 
     vertexProject: 'skyos-test-project',
   });
 
+  assert.equal(developer.modelVersion, GEMINI_INTERACTIONS_MODEL_POLICY_VERSION);
+  assert.equal(vertex.modelVersion, GEMINI_GENERATE_CONTENT_MODEL_POLICY_VERSION);
+
   await developer.generate({ ...baseRequest, aiRunId: 'a16b8d88-c8b8-4a4f-8c7f-a16311fe1e5d' });
   await vertex.generate({
     ...baseRequest,
@@ -368,6 +373,18 @@ test('constructs Developer and Vertex clients explicitly and routes Vertex only 
     retryOptions: { attempts: 1 },
   });
   assert.equal(developerTransport.requests.length, 1);
+});
+
+test('defaults blank Gemini transport to the Developer Interactions identity', () => {
+  const blankTransport = new GeminiLanguageModelProvider({
+    apiKey: TEST_API_KEY,
+    interactionClient: mockClient(() => interaction()).client,
+    model: MODEL,
+    runtime: 'test',
+    transport: ' ',
+  });
+
+  assert.equal(blankTransport.modelVersion, GEMINI_INTERACTIONS_MODEL_POLICY_VERSION);
 });
 
 test('maps Vertex GenerateContent output, response identity, and usage through canonical validation', async () => {
