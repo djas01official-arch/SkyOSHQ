@@ -10,6 +10,8 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
+    "dev:web": "tsx scripts/run-web-dev.ts",
+    "dev:auth:check": "tsx scripts/check-local-dev-auth.ts",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "hygiene": "tsx scripts/check-repository-hygiene.ts",

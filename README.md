@@ -43,6 +43,8 @@ pnpm lint         # Lint repository configuration and source files
 pnpm typecheck    # Type-check the root configuration
 pnpm build        # Run build tasks in all workspaces that define one
 pnpm dev          # Run development tasks in all workspaces that define one
+pnpm dev:web      # Start the web app with authoritative root .env values
+pnpm dev:auth:check # Read-only local credential/database preflight
 pnpm db:generate  # Generate the ignored Prisma Client from the committed schema
 pnpm test:domain  # Test the application-owned role and permission policy
 pnpm test:ai:provider # Test local/OpenAI/Anthropic provider mapping entirely offline
@@ -143,10 +145,23 @@ pnpm db:test
 ## Run the web application
 
 ```sh
-pnpm --filter @skyos/web dev
+pnpm dev:web
 ```
 
 The SkyOS placeholder homepage is then available at [http://localhost:3000](http://localhost:3000).
+
+`pnpm dev:web` reads the monorepo-root `.env` into the spawned Next.js process with root-file
+values taking precedence over inherited shell values. It preserves unrelated OS environment values,
+runs a read-only local credential preflight, and never seeds or changes the database. To expose the
+server on a local-network interface, configure `SKYOS_DEV_ALLOWED_ORIGINS` in `.env`, then run:
+
+```sh
+pnpm dev:web -- --hostname <your-local-host-or-ip> --port 3000
+```
+
+Use your own local hostname or IP address; do not commit it. `pnpm dev` and the workspace-level
+`pnpm --filter @skyos/web dev` remain available for Turborepo and direct workspace use, but do not
+override stale inherited environment variables.
 
 ## Authentication foundation
 

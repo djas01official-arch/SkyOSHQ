@@ -4,7 +4,8 @@ import { resolve } from 'node:path';
 import { config as loadEnvironment } from 'dotenv';
 import type { NextConfig } from 'next';
 
-// Next runs this workspace from apps/web; SkyOS keeps local configuration at the monorepo root.
+// The root dev launcher establishes the canonical local child environment. This non-overriding
+// load remains a fallback when the web workspace is run directly.
 loadEnvironment({ path: resolve(process.cwd(), '../../.env') });
 
 const HOSTNAME_PATTERN =
