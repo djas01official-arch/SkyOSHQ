@@ -42,7 +42,7 @@ async function listLocalStorageKeys(root: string): Promise<string[]> {
 export async function createBackgroundJobReconciliationReport(
   prisma: PrismaClient,
   storage: ObjectStorage,
-  localStorageRoot: string,
+  localStorageRoot?: string,
   queuedAgeMs = 5 * 60_000,
 ): Promise<BackgroundJobReconciliationReport> {
   const queuedBefore = new Date(Date.now() - queuedAgeMs);
@@ -86,7 +86,9 @@ export async function createBackgroundJobReconciliationReport(
     }
   }
   const metadataKeys = new Set(attachments.map((attachment) => attachment.storageKey));
-  const localKeys = await listLocalStorageKeys(localStorageRoot);
+  // GCS runtime identities intentionally receive no object-list permission.
+  // Orphan-object enumeration remains a local-development reconciliation aid.
+  const localKeys = localStorageRoot ? await listLocalStorageKeys(localStorageRoot) : [];
 
   return {
     attachmentsWithoutBinaries,

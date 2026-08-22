@@ -1,14 +1,12 @@
 import 'dotenv/config';
 
-import { isAbsolute, resolve } from 'node:path';
-
 import { PrismaPg } from '@prisma/adapter-pg';
 
 import { recoverDomainJobAfterExpiredLease } from '../background-jobs/domain-handlers';
 import { createBackgroundJobReconciliationReport } from '../background-jobs/reconciliation';
 import { recoverExpiredBackgroundJobs } from '../background-jobs/runtime';
 import { PrismaClient } from '../generated/client/client';
-import { LocalObjectStorage } from '../../services/storage/local-object-storage';
+import { createKnowledgeObjectStorage } from '../../services/storage/knowledge-object-storage';
 
 async function main(): Promise<void> {
   const connectionString = process.env.DATABASE_URL;
@@ -18,15 +16,17 @@ async function main(): Promise<void> {
     .slice(2)
     .filter((option) => option !== '--repair-expired-leases');
   if (unknownOptions.length > 0) throw new Error(`Unknown option: ${unknownOptions[0]}`);
-  const configuredRoot = process.env.KNOWLEDGE_STORAGE_ROOT?.trim() || '.skyos/knowledge';
-  const storageRoot = isAbsolute(configuredRoot)
-    ? configuredRoot
-    : resolve(process.cwd(), configuredRoot);
-  const storage = new LocalObjectStorage(storageRoot);
+  const knowledgeStorage = createKnowledgeObjectStorage({
+    runtime: process.env.NODE_ENV ?? 'development',
+  });
   const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
 
   try {
-    const report = await createBackgroundJobReconciliationReport(prisma, storage, storageRoot);
+    const report = await createBackgroundJobReconciliationReport(
+      prisma,
+      knowledgeStorage.storage,
+      knowledgeStorage.configuration.localRoot ?? undefined,
+    );
     console.log(JSON.stringify({ mode: 'report-only', ...report }, null, 2));
     if (repairExpiredLeases) {
       const result = await recoverExpiredBackgroundJobs(

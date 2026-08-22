@@ -16,7 +16,7 @@ import {
 } from '../../../../database/knowledge/document-processing';
 
 import { requireCurrentUser } from '@/lib/auth/current-user';
-import { knowledgeAttachmentDependencies } from '@/lib/knowledge-storage';
+import { getKnowledgeAttachmentDependencies } from '@/lib/knowledge-storage';
 import { documentProcessingRequestDependencies } from '@/lib/document-processing';
 import { requireWorkspaceCapability } from '@/lib/organization-context';
 import { prisma } from '@/lib/prisma';
@@ -105,27 +105,21 @@ export async function uploadKnowledgeAttachmentAction(
   if (!(file instanceof File) || !slug) {
     return { error: 'Choose a supported attachment and try again.' };
   }
-  if (file.size > knowledgeAttachmentDependencies.maxFileSizeBytes) {
+  const dependencies = getKnowledgeAttachmentDependencies();
+  if (file.size > dependencies.maxFileSizeBytes) {
     return {
-      error: `The attachment exceeds the configured ${knowledgeAttachmentDependencies.maxFileSizeBytes}-byte limit.`,
+      error: `The attachment exceeds the configured ${dependencies.maxFileSizeBytes}-byte limit.`,
     };
   }
 
   const { userId, workspaceId } = await getWriteScope();
 
   try {
-    await uploadKnowledgeAttachment(
-      prisma,
-      knowledgeAttachmentDependencies,
-      userId,
-      workspaceId,
-      slug,
-      {
-        bytes: new Uint8Array(await file.arrayBuffer()),
-        mimeType: file.type,
-        originalFilename: file.name,
-      },
-    );
+    await uploadKnowledgeAttachment(prisma, dependencies, userId, workspaceId, slug, {
+      bytes: new Uint8Array(await file.arrayBuffer()),
+      mimeType: file.type,
+      originalFilename: file.name,
+    });
   } catch (error) {
     return getErrorState(error);
   }

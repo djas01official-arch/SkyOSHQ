@@ -2,6 +2,7 @@ import { mkdir, readFile, realpath, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import {
+  getStorageKeySegments,
   type ObjectStorage,
   type PutObjectInput,
   StorageKeyError,
@@ -16,27 +17,6 @@ function hasErrorCode(error: unknown, code: string): boolean {
     'code' in error &&
     (error as { code?: unknown }).code === code
   );
-}
-
-function getStorageKeySegments(key: string): string[] {
-  if (key.length < 1 || key.length > 1024 || isAbsolute(key) || key.includes('\\')) {
-    throw new StorageKeyError('The object key is not a safe relative storage key.');
-  }
-
-  const segments = key.split('/');
-  if (
-    segments.some(
-      (segment) =>
-        !segment ||
-        segment === '.' ||
-        segment === '..' ||
-        !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment),
-    )
-  ) {
-    throw new StorageKeyError('The object key contains an unsafe path segment.');
-  }
-
-  return segments;
 }
 
 function assertWithinRoot(root: string, target: string): void {

@@ -1,7 +1,5 @@
 import 'dotenv/config';
 
-import { isAbsolute, resolve } from 'node:path';
-
 import { PrismaPg } from '@prisma/adapter-pg';
 
 import {
@@ -15,14 +13,7 @@ import { getBackgroundWorkerConfig } from '../../services/background-jobs/config
 import { runBackgroundWorker } from '../../services/background-jobs/worker';
 import { createDefaultKnowledgeChunkingStrategyRegistry } from '../../services/knowledge-chunking/chunking-strategy';
 import { createDefaultEmbeddingProviderRegistry } from '../../services/embeddings/embedding-provider';
-import { LocalObjectStorage } from '../../services/storage/local-object-storage';
-
-function createStorage(): LocalObjectStorage {
-  const configuredRoot = process.env.KNOWLEDGE_STORAGE_ROOT?.trim() || '.skyos/knowledge';
-  return new LocalObjectStorage(
-    isAbsolute(configuredRoot) ? configuredRoot : resolve(process.cwd(), configuredRoot),
-  );
-}
+import { createKnowledgeObjectStorage } from '../../services/storage/knowledge-object-storage';
 
 async function main(): Promise<void> {
   const connectionString = process.env.DATABASE_URL;
@@ -34,10 +25,15 @@ async function main(): Promise<void> {
   process.once('SIGINT', requestShutdown);
   process.once('SIGTERM', requestShutdown);
   const config = getBackgroundWorkerConfig();
+  const knowledgeStorage = createKnowledgeObjectStorage({
+    // `pnpm worker` is the documented local development command. Production
+    // Cloud Run sets NODE_ENV=production in the immutable image.
+    runtime: process.env.NODE_ENV ?? 'development',
+  });
   const dependencies = {
     documentProcessing: {
       parsers: createDefaultDocumentParserRegistry(),
-      storage: createStorage(),
+      storage: knowledgeStorage.storage,
     },
     knowledgeChunking: {
       strategies: createDefaultKnowledgeChunkingStrategyRegistry(),

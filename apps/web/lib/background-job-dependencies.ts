@@ -3,21 +3,23 @@ import { createDefaultDocumentParserRegistry } from '../../../services/document-
 import { createDefaultKnowledgeChunkingStrategyRegistry } from '../../../services/knowledge-chunking/chunking-strategy';
 import { createDefaultEmbeddingProviderRegistry } from '../../../services/embeddings/embedding-provider';
 
-import { knowledgeAttachmentDependencies } from '@/lib/knowledge-storage';
+import { getKnowledgeAttachmentDependencies } from '@/lib/knowledge-storage';
 
 export const documentParsers = createDefaultDocumentParserRegistry();
 export const chunkingStrategies = createDefaultKnowledgeChunkingStrategyRegistry();
 export const embeddingProviders = createDefaultEmbeddingProviderRegistry();
 
-export const domainBackgroundJobDependencies: DomainBackgroundJobDependencies = {
-  documentProcessing: {
-    parsers: documentParsers,
-    storage: knowledgeAttachmentDependencies.storage,
-  },
-  knowledgeChunking: {
-    strategies: chunkingStrategies,
-  },
-  knowledgeEmbedding: {
-    providers: embeddingProviders,
-  },
-};
+export function getDomainBackgroundJobDependencies(): DomainBackgroundJobDependencies {
+  return {
+    documentProcessing: {
+      parsers: documentParsers,
+      storage: getKnowledgeAttachmentDependencies().storage,
+    },
+    knowledgeChunking: {
+      strategies: chunkingStrategies,
+    },
+    knowledgeEmbedding: {
+      providers: embeddingProviders,
+    },
+  };
+}

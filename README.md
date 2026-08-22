@@ -280,7 +280,8 @@ Audit events are append-only. SkyOS application services do not expose update or
 - The Knowledge page searches the current successfully chunked Markdown revision and active attachment extractions using the existing keyword, semantic, or hybrid retrieval service. Search always uses the effective selected workspace, requires `knowledge.read`, and never accepts workspace authority from the query string.
 - Knowledge documents support workspace-scoped PDF, DOCX, PNG, and JPEG attachments. Readers may list and download active attachments; writers may upload, archive, and restore them with optimistic concurrency and transactional audit events.
 - Upload validation matches the original extension, declared MIME type, and binary signature; filenames never form storage paths. Active duplicate content is rejected within the same document by SHA-256 checksum.
-- Local development binaries use the key-based storage adapter under `KNOWLEDGE_STORAGE_ROOT` (default `.skyos/knowledge`, ignored by Git). `KNOWLEDGE_MAX_FILE_SIZE_BYTES` defaults to 10 MiB and is capped at 100 MiB. Relative storage roots resolve from the monorepo root; deployments should configure an absolute durable path until an S3-compatible adapter is introduced.
+- Knowledge binaries use one key-based `ObjectStorage` factory across web, workers, and reconciliation. Development and test default to `KNOWLEDGE_STORAGE_PROVIDER=local`, with `KNOWLEDGE_STORAGE_ROOT` defaulting to `.skyos/knowledge` (ignored by Git). Production fails closed unless `KNOWLEDGE_STORAGE_PROVIDER=gcs` and a non-blank `KNOWLEDGE_GCS_BUCKET` are supplied; local disk is never selected there. The GCS adapter uses attached-workload Application Default Credentials, atomic create-only writes, and server-mediated downloads—no public objects, ACLs, or URLs are created.
+- `KNOWLEDGE_MAX_FILE_SIZE_BYTES` defaults to 10 MiB and is capped at 100 MiB. The current bounded in-memory `Uint8Array` upload contract is deliberate; future larger objects require a separately reviewed streaming/resumable design.
 - Downloads require current `knowledge.read`, are returned with `Content-Disposition: attachment`, `nosniff`, private/no-store caching, and a restrictive sandbox policy. Files are not parsed, rendered as HTML, or made public.
 - PDF and DOCX attachments can be processed into immutable plain-text extraction records. The original binary is retained unchanged, and PNG/JPEG attachments remain downloadable but are not text-processable.
 
@@ -558,8 +559,11 @@ This command assumes `OPENAI_API_KEY` was already injected into the shell by the
 The repository includes one immutable-image contract for the future Cloud Run
 web service, worker pool, migrator job, and reconciliation job. It creates no
 cloud resources and does not make SkyOS ready for a user production launch:
-`LocalObjectStorage` remains a P0 blocker until the approved Google Cloud Storage
-adapter is implemented. See the [Cloud Run runtime contract](./docs/deployment/cloud-run-runtime.md).
+The code-level object-storage blocker is closed: production selects the private
+GCS adapter only, while local disk is development/test-only. Launch still requires
+an approved private bucket, bucket-scoped workload IAM, lifecycle/retention and
+versioning decisions, and non-production runtime verification. See the
+[Cloud Run runtime contract](./docs/deployment/cloud-run-runtime.md).
 
 The built production web command is:
 

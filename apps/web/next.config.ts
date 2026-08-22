@@ -111,7 +111,7 @@ export function createSkyosNextConfig(
         bodySizeLimit: getAttachmentBodySizeLimit(),
       },
     },
-    serverExternalPackages: ['argon2', 'mammoth', 'pdf-parse'],
+    serverExternalPackages: ['@google-cloud/storage', 'argon2', 'mammoth', 'pdf-parse'],
   };
 }
 

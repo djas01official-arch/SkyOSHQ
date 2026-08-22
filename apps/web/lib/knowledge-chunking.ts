@@ -9,7 +9,7 @@ import {
 
 import {
   chunkingStrategies,
-  domainBackgroundJobDependencies,
+  getDomainBackgroundJobDependencies,
 } from '@/lib/background-job-dependencies';
 import { prisma } from '@/lib/prisma';
 
@@ -19,7 +19,7 @@ const queue =
     : new SynchronousBackgroundJobQueue(async (jobId) => {
         await executeDurableDomainJobByReference(
           prisma,
-          domainBackgroundJobDependencies,
+          getDomainBackgroundJobDependencies(),
           BackgroundJobKind.KNOWLEDGE_CHUNKING,
           jobId,
           `web-sync-${process.pid}`,

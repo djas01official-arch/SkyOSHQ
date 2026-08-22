@@ -9,7 +9,7 @@ import {
 
 import {
   documentParsers,
-  domainBackgroundJobDependencies,
+  getDomainBackgroundJobDependencies,
 } from '@/lib/background-job-dependencies';
 import { prisma } from '@/lib/prisma';
 
@@ -19,7 +19,7 @@ const queue =
     : new SynchronousDocumentProcessingQueue(async (jobId) => {
         await executeDurableDomainJobByReference(
           prisma,
-          domainBackgroundJobDependencies,
+          getDomainBackgroundJobDependencies(),
           BackgroundJobKind.DOCUMENT_EXTRACTION,
           jobId,
           `web-sync-${process.pid}`,

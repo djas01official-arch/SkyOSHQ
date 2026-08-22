@@ -1,14 +1,14 @@
-import { isAbsolute, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
-import { LocalObjectStorage } from '../../../services/storage/local-object-storage';
+import { createKnowledgeObjectStorage } from '../../../services/storage/knowledge-object-storage';
 import { getKnowledgeMaxFileSizeBytes } from '../../../services/storage/storage-config';
 
-const configuredRoot = process.env.KNOWLEDGE_STORAGE_ROOT?.trim() || '.skyos/knowledge';
-const storageRoot = isAbsolute(configuredRoot)
-  ? configuredRoot
-  : resolve(/* turbopackIgnore: true */ process.cwd(), '../..', configuredRoot);
+const repositoryRoot = resolve(/* turbopackIgnore: true */ process.cwd(), '../..');
 
-export const knowledgeAttachmentDependencies = {
-  maxFileSizeBytes: getKnowledgeMaxFileSizeBytes(),
-  storage: new LocalObjectStorage(storageRoot),
-} as const;
+/** Defers production storage validation/client construction until a request needs it. */
+export function getKnowledgeAttachmentDependencies() {
+  return {
+    maxFileSizeBytes: getKnowledgeMaxFileSizeBytes(),
+    storage: createKnowledgeObjectStorage({ localRootBaseDirectory: repositoryRoot }).storage,
+  } as const;
+}

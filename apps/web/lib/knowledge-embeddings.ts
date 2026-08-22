@@ -8,8 +8,8 @@ import {
 } from '../../../services/document-processing/processing-queue';
 
 import {
-  domainBackgroundJobDependencies,
   embeddingProviders,
+  getDomainBackgroundJobDependencies,
 } from '@/lib/background-job-dependencies';
 import { prisma } from '@/lib/prisma';
 
@@ -19,7 +19,7 @@ const queue =
     : new SynchronousBackgroundJobQueue(async (domainJobId) => {
         await executeDurableDomainJobByReference(
           prisma,
-          domainBackgroundJobDependencies,
+          getDomainBackgroundJobDependencies(),
           BackgroundJobKind.KNOWLEDGE_EMBEDDING,
           domainJobId,
           `web-sync-${process.pid}`,

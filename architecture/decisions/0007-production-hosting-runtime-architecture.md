@@ -181,14 +181,16 @@ existing key-based `ObjectStorage` interface. PostgreSQL remains authoritative f
 attachment metadata, authorization, checksum, status, and `storageKey`; object
 storage contains only binary bodies.
 
-- A future GCS adapter must preserve `putObject`, `getObject`, and `deleteObject`
-  semantics, server-side generated relative keys, create-only writes, missing-key
-  handling, and checksum verification. The current key shape is
+- The GCS adapter preserves `putObject`, `getObject`, and `deleteObject`
+  semantics, server-side generated relative keys, create-only writes using the
+  atomic `ifGenerationMatch: 0` precondition, missing-key handling, and checksum
+  verification. The current key shape is
   `<workspaceId>/<documentId>/<attachmentId><extension>`; it is an opaque storage
   identity, not a client path or filename.
-- Web writes uploads through the adapter; workers read the same object by trusted
-  `storageKey`; download authorization remains in SkyOS and streams or issues a
-  short-lived private signed download only after `knowledge.read` is checked.
+- Web writes uploads through the shared factory; workers and reconciliation use
+  the same provider and namespace by trusted `storageKey`. Download authorization
+  remains in SkyOS and is server-mediated after `knowledge.read` is checked; the
+  adapter creates no public URLs, signed URLs, or object ACLs.
 - The bucket is private by default, encrypted at rest, restricted to dedicated
   web/worker/reconciliation identities, and never exposed as a public bucket.
 - Define lifecycle retention, versioning/backup, legal-hold, object deletion, and
@@ -196,9 +198,14 @@ storage contains only binary bodies.
   object storage cannot commit atomically, so the adapter must retain existing
   compensation and reconciliation behavior.
 
-`LocalObjectStorage` and `KNOWLEDGE_STORAGE_ROOT` are development-only. The next
-implementation task must add and test a GCS/S3-compatible production adapter and
-its configuration boundary before any attachment-enabled production launch.
+`LocalObjectStorage` and `KNOWLEDGE_STORAGE_ROOT` are development/test-only. The
+production factory requires exactly `KNOWLEDGE_STORAGE_PROVIDER=gcs` and a
+non-blank `KNOWLEDGE_GCS_BUCKET`; blank, local, unknown, or incomplete production
+configuration fails closed. The adapter uses Application Default Credentials from
+the attached Cloud Run workload identity, never a key file or inline credentials.
+Its bounded client retry policy preserves generation preconditions. Readiness
+remains database-only because the object port deliberately does not require bucket
+metadata/list permissions.
 
 ## Identity, ingress, and secrets
 
@@ -247,7 +254,7 @@ Blank means deliberately absent, not a default.
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`                                                                                                                                             | Provider-specific Secret Manager values, injected only when that API-key transport is enabled. Do not inject unused provider secrets. `GEMINI_API_KEY` remains absent for Vertex transport.              |
 | `GEMINI_TRANSPORT`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`                                                                                                                                 | Controlled non-secret Vertex configuration. Vertex relies on the attached runtime identity, not a key file.                                                                                              |
 | `BACKGROUND_JOB_MODE`, `BACKGROUND_WORKER_ID`, `BACKGROUND_JOB_POLL_MS`, `BACKGROUND_JOB_RECOVERY_MS`, `BACKGROUND_JOB_LEASE_MS`, `BACKGROUND_JOB_BACKOFF_BASE_MS`, `BACKGROUND_JOB_BACKOFF_MAX_MS` | Worker configuration. Set mode to `durable`; use a unique runtime-generated worker ID unless a deployment system can inject a unique value. Values must satisfy existing parser bounds.                  |
-| `KNOWLEDGE_MAX_FILE_SIZE_BYTES`, `KNOWLEDGE_SEARCH_*`, `KNOWLEDGE_RETRIEVAL_*`                                                                                                                      | Controlled non-secret limits. `KNOWLEDGE_STORAGE_ROOT` is prohibited with the local adapter; a future storage adapter will define its own bucket/prefix configuration.                                   |
+| `KNOWLEDGE_STORAGE_PROVIDER`, `KNOWLEDGE_GCS_BUCKET`, `KNOWLEDGE_MAX_FILE_SIZE_BYTES`, `KNOWLEDGE_SEARCH_*`, `KNOWLEDGE_RETRIEVAL_*`                                                                | Storage/limit configuration. Production requires `KNOWLEDGE_STORAGE_PROVIDER=gcs` and a private bucket name. `KNOWLEDGE_STORAGE_ROOT` applies only when provider is `local` in development/test.         |
 | `EMBEDDING_PROVIDER`                                                                                                                                                                                | Controlled non-secret provider selection. Current `local` deterministic embeddings are not a production semantic-quality decision; select, review, and deploy a production embedding adapter separately. |
 | `AI_BUDGET_*`, `AI_COST_*`, `AI_INPUT_TOKEN_MEASUREMENT`                                                                                                                                            | Controlled non-secret budget/estimation configuration. Treat changes as reviewed deployment changes because they affect enforcement, confirmation, and telemetry.                                        |
 | `AI_BALANCED_*`, `AI_DEEP_*`, `AI_CRITICAL_*` provider/model/model-version triples                                                                                                                  | Controlled non-secret role-independent assignments. Keep unset while the initial production policy is FAST-only; validate all exact identities before enabling a deeper mode.                            |
@@ -339,9 +346,10 @@ Required follow-ups, in order:
 
 1. **Production authentication boundary:** select and implement a production IdP,
    then define trusted host/callback/MFA policy.
-2. **Production object storage:** implement and test a private GCS-compatible
-   `ObjectStorage` adapter, storage configuration, upload/download access,
-   lifecycle, and reconciliation behavior.
+2. **Production object-storage infrastructure:** create and verify a private GCS
+   bucket, bucket-scoped attached-identity IAM, data-residency location,
+   encryption, retention/lifecycle, versioning/soft-delete, and non-production
+   end-to-end upload/download/reconciliation behavior.
 3. **Deployment contract:** add a production image/start command, health and
    readiness endpoints, Cloud Run service/worker-pool/job manifests or IaC, and
    validated database connection limits.

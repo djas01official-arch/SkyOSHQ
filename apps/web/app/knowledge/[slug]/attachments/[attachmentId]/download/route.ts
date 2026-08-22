@@ -11,7 +11,7 @@ import {
 } from '../../../../../../../../database/knowledge/knowledge-documents';
 
 import { getCurrentUser } from '@/lib/auth/current-user';
-import { knowledgeAttachmentDependencies } from '@/lib/knowledge-storage';
+import { getKnowledgeAttachmentDependencies } from '@/lib/knowledge-storage';
 import { getCurrentOrganizationContext } from '@/lib/organization-context';
 import { prisma } from '@/lib/prisma';
 
@@ -51,7 +51,7 @@ export async function GET(_request: Request, { params }: DownloadRouteContext) {
   try {
     const { attachment, bytes } = await downloadKnowledgeAttachment(
       prisma,
-      knowledgeAttachmentDependencies,
+      getKnowledgeAttachmentDependencies(),
       user.id,
       context.activeWorkspace.id,
       route.slug,

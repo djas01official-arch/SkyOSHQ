@@ -4,11 +4,12 @@ SkyOS uses one immutable, reviewed Node.js image for four distinct Cloud Run
 runtime roles. This document defines a repository contract only; it neither
 creates nor configures Google Cloud resources.
 
-> **Production launch blocker:** the current `LocalObjectStorage` writes to an
-> instance-local filesystem. The image is deployable, but real user production
-> launch, Knowledge uploads, document processing, and reconciliation remain
-> blocked until the approved Google Cloud Storage `ObjectStorage` adapter exists.
-> Do not use an ephemeral Cloud Run filesystem as a substitute.
+> **Object-storage boundary:** production code fails closed unless the private
+> Google Cloud Storage adapter is selected with a bucket name. `LocalObjectStorage`
+> is development/test-only and Cloud Run's ephemeral filesystem is never a
+> substitute for Knowledge binaries. Provisioning the private bucket, bucket-level
+> IAM, lifecycle/retention, versioning/soft-delete, and region decisions remains a
+> separate infrastructure launch gate.
 
 ## Image and commands
 
@@ -37,8 +38,9 @@ needed by one of the other roles.
   one-second application response deadline. It returns `{ "status": "ok" }`
   on success or generic `{ "status": "unavailable" }` with HTTP 503 on failure
   or timeout. It never migrates, seeds, calls providers/Google, checks optional
-  AI configuration, or exposes connection details. Readiness will gain a durable
-  storage check only after the GCS adapter exists.
+  AI configuration, or exposes connection details. Readiness remains database-only: the current object port
+  intentionally has only create/get/delete operations, and a bucket metadata
+  probe would add `storage.buckets.get` IAM solely for health checks.
 
 Cloud Run must inject `PORT`; the server listens on `0.0.0.0` and does not
 hardcode a production port. The web process retains Next.js graceful shutdown.
@@ -51,12 +53,12 @@ to its durable lease-expiry recovery path.
 All values are server-side runtime configuration or secrets. Never use
 `NEXT_PUBLIC_*` for any value below and never bake them into the image.
 
-| Role           | Required / conditional configuration                                                                                                                                                                                                                                              |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Web            | `DATABASE_URL`, `AUTH_SECRET`, approved `AI_PROVIDER`/`AI_MODEL`/`AI_CHAT_MODE`; `AUTH_GOOGLE_ID` and `AUTH_GOOGLE_SECRET` only when Google OIDC is deliberately enabled; selected provider credentials only; `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` only for Vertex. |
-| Worker         | `DATABASE_URL`, `BACKGROUND_JOB_MODE=durable`, applicable job timing values, Knowledge/storage configuration, and only provider/embedding configuration needed by enabled job handlers. It does not require Auth.js secrets.                                                      |
-| Migrator       | `DATABASE_URL` for the dedicated migration role plus Prisma runtime requirements. It does not require authentication, Google, or AI configuration.                                                                                                                                |
-| Reconciliation | `DATABASE_URL`; storage configuration only when reconciliation can use the future durable adapter. It remains report-only by default.                                                                                                                                             |
+| Role           | Required / conditional configuration                                                                                                                                                                                                                                                                                                        |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Web            | `DATABASE_URL`, `AUTH_SECRET`, `KNOWLEDGE_STORAGE_PROVIDER=gcs`, `KNOWLEDGE_GCS_BUCKET`, approved `AI_PROVIDER`/`AI_MODEL`/`AI_CHAT_MODE`; `AUTH_GOOGLE_ID` and `AUTH_GOOGLE_SECRET` only when Google OIDC is deliberately enabled; selected provider credentials only; `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` only for Vertex. |
+| Worker         | `DATABASE_URL`, `BACKGROUND_JOB_MODE=durable`, `KNOWLEDGE_STORAGE_PROVIDER=gcs`, `KNOWLEDGE_GCS_BUCKET`, applicable job timing values, and only provider/embedding configuration needed by enabled job handlers. It does not require Auth.js secrets.                                                                                       |
+| Migrator       | `DATABASE_URL` for the dedicated migration role plus Prisma runtime requirements. It does not require authentication, Google, or AI configuration.                                                                                                                                                                                          |
+| Reconciliation | `DATABASE_URL`, `KNOWLEDGE_STORAGE_PROVIDER=gcs`, and `KNOWLEDGE_GCS_BUCKET`. It remains report-only by default; without object-list permission it verifies metadata references but does not enumerate remote orphaned objects.                                                                                                             |
 
 The Next configuration reads the root `.env` only for direct development runs.
 Production builds do not load it. Server-only values such as `DATABASE_URL`,
@@ -68,7 +70,13 @@ runtime and are not `NEXT_PUBLIC_*` values or browser-bundle configuration.
 When a separate, approved infrastructure task creates resources, the web service
 must use public HTTPS ingress for browser/OIDC login, private database access,
 attached workload identity, runtime secret injection, and no service-account JSON
-keys. Web startup must not mutate schema. The worker pool has no HTTP endpoint.
+keys. The attached web/worker/reconciliation identities need only
+`storage.objects.create`, `storage.objects.get`, and `storage.objects.delete` on
+the private bucket for the current port. `roles/storage.objectUser` is a convenient
+bucket-level predefined role but grants more than those minimum permissions.
+Uniform bucket-level access, public-access prevention, encryption at rest, and a
+reviewed lifecycle/retention, versioning/soft-delete, and region policy are required
+before uploads. Web startup must not mutate schema. The worker pool has no HTTP endpoint.
 Migrator and reconciliation are Cloud Run Jobs; the migrator needs a dedicated
 least-privilege database role, while reconciliation must remain report-only until
 explicitly approved otherwise.

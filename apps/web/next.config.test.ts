@@ -68,6 +68,11 @@ test('keeps existing Next configuration values intact', () => {
     assert.equal(config.output, 'standalone');
     assert.deepEqual(config.transpilePackages, ['@skyos/domain']);
     assert.equal(config.experimental?.serverActions?.bodySizeLimit, 11 * 1024 * 1024);
-    assert.deepEqual(config.serverExternalPackages, ['argon2', 'mammoth', 'pdf-parse']);
+    assert.deepEqual(config.serverExternalPackages, [
+      '@google-cloud/storage',
+      'argon2',
+      'mammoth',
+      'pdf-parse',
+    ]);
   }
 });

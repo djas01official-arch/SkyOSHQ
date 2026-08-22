@@ -42,7 +42,7 @@ import { KnowledgeAiActions } from '@/components/knowledge/knowledge-ai-actions'
 import { MarkdownDocument } from '@/components/knowledge/markdown-document';
 import { Card } from '@/components/ui/card';
 import { requireCurrentUser } from '@/lib/auth/current-user';
-import { knowledgeAttachmentDependencies } from '@/lib/knowledge-storage';
+import { getKnowledgeAttachmentDependencies } from '@/lib/knowledge-storage';
 import { hasWorkspaceCapability, requireWorkspaceCapability } from '@/lib/organization-context';
 import { prisma } from '@/lib/prisma';
 
@@ -153,6 +153,7 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
   }
 
   const canWrite = hasWorkspaceCapability(workspace.role, 'knowledge.write');
+  const attachmentDependencies = getKnowledgeAttachmentDependencies();
   let document;
   let attachments;
   let chunking;
@@ -303,7 +304,7 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
         {canWrite && !isArchived ? (
           <KnowledgeAttachmentUpload
             action={uploadKnowledgeAttachmentAction}
-            maxFileSizeBytes={knowledgeAttachmentDependencies.maxFileSizeBytes}
+            maxFileSizeBytes={attachmentDependencies.maxFileSizeBytes}
             slug={document.slug}
           />
         ) : null}
