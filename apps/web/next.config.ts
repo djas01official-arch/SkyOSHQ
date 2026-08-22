@@ -1,12 +1,18 @@
 import { isIP } from 'node:net';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { config as loadEnvironment } from 'dotenv';
 import type { NextConfig } from 'next';
 
 // The root dev launcher establishes the canonical local child environment. This non-overriding
-// load remains a fallback when the web workspace is run directly.
-loadEnvironment({ path: resolve(process.cwd(), '../../.env') });
+// load remains a fallback when the web workspace is run directly. Production builds and
+// containers must receive secrets only at runtime, never from a copied local environment file.
+if (process.env.NODE_ENV === 'development') {
+  loadEnvironment({ path: resolve(process.cwd(), '../../.env') });
+}
+
+const workspaceRoot = fileURLToPath(new URL('../..', import.meta.url));
 
 const HOSTNAME_PATTERN =
   /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/u;
@@ -97,6 +103,8 @@ export function createSkyosNextConfig(
   return {
     ...(allowedDevOrigins ? { allowedDevOrigins } : {}),
     distDir: getTestBuildDirectory(),
+    output: 'standalone',
+    outputFileTracingRoot: workspaceRoot,
     transpilePackages: ['@skyos/domain'],
     experimental: {
       serverActions: {

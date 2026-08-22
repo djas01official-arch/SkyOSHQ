@@ -6,6 +6,8 @@ const globalForPrisma = globalThis as typeof globalThis & {
   prisma?: PrismaClient;
 };
 
+let productionPrisma: PrismaClient | undefined;
+
 function createPrismaClient(): PrismaClient {
   const connectionString = process.env.DATABASE_URL;
 
@@ -18,8 +20,30 @@ function createPrismaClient(): PrismaClient {
   });
 }
 
-export const prisma = globalForPrisma.prisma ?? createPrismaClient();
+export function getPrisma(): PrismaClient {
+  const cached = process.env.NODE_ENV === 'production' ? productionPrisma : globalForPrisma.prisma;
+  if (cached) {
+    return cached;
+  }
 
-if (process.env.NODE_ENV !== 'production') {
-  globalForPrisma.prisma = prisma;
+  const client = createPrismaClient();
+
+  if (process.env.NODE_ENV === 'production') {
+    productionPrisma = client;
+  } else {
+    globalForPrisma.prisma = client;
+  }
+
+  return client;
 }
+
+/**
+ * Defers database configuration validation until a server request actually
+ * needs Prisma. This keeps production image builds free of runtime secrets.
+ */
+export const prisma = new Proxy({} as PrismaClient, {
+  get(_target, property, receiver) {
+    const value = Reflect.get(getPrisma(), property, receiver);
+    return typeof value === 'function' ? value.bind(getPrisma()) : value;
+  },
+});

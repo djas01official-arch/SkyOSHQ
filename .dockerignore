@@ -1,0 +1,37 @@
+# Secrets and local environment files must never enter a Docker build context.
+.env
+.env.*
+!.env.example
+.env.backup-*
+
+# Source control and developer-only dependencies/build outputs.
+.git
+.gitignore
+node_modules
+**/node_modules
+.pnpm-store
+.turbo
+**/.turbo
+.next
+**/.next
+coverage
+**/coverage
+
+# Local state and generated artifacts.
+.skyos
+.worker
+.workers
+database/generated
+parser-output
+**/parser-output
+artifacts
+tmp
+temp
+logs
+*.log
+*.tmp
+*.tsbuildinfo
+
+# Tests are not needed to build or execute any Cloud Run runtime role.
+**/*.test.*
+**/tests

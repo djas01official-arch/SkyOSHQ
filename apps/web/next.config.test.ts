@@ -65,6 +65,7 @@ test('keeps existing Next configuration values intact', () => {
   assert.equal(production.allowedDevOrigins, undefined);
   for (const config of [development, production]) {
     assert.equal(config.distDir, undefined);
+    assert.equal(config.output, 'standalone');
     assert.deepEqual(config.transpilePackages, ['@skyos/domain']);
     assert.equal(config.experimental?.serverActions?.bodySizeLimit, 11 * 1024 * 1024);
     assert.deepEqual(config.serverExternalPackages, ['argon2', 'mammoth', 'pdf-parse']);

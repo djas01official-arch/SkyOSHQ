@@ -18,6 +18,10 @@ export const metadata: Metadata = {
   description: 'SkyOS enterprise operating platform. Your system. Your sky.',
 };
 
+// The shell resolves session and tenancy state from server-only runtime
+// dependencies. It must not be evaluated as static build-time page data.
+export const dynamic = 'force-dynamic';
+
 const themeScript = `
   try {
     const savedTheme = localStorage.getItem('skyos-theme');

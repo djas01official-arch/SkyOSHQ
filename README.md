@@ -553,6 +553,23 @@ This command assumes `OPENAI_API_KEY` was already injected into the shell by the
 - `scripts/` — automation scripts
 - `tests/` — shared tests
 
+## Cloud Run runtime foundation
+
+The repository includes one immutable-image contract for the future Cloud Run
+web service, worker pool, migrator job, and reconciliation job. It creates no
+cloud resources and does not make SkyOS ready for a user production launch:
+`LocalObjectStorage` remains a P0 blocker until the approved Google Cloud Storage
+adapter is implemented. See the [Cloud Run runtime contract](./docs/deployment/cloud-run-runtime.md).
+
+The built production web command is:
+
+```sh
+pnpm start:web
+```
+
+It runs `next start` on `0.0.0.0` and honors the runtime `PORT` value. It never
+builds, migrates, seeds, or starts a worker.
+
 ## Repository hygiene
 
 Generated build output, local storage, worker/parser scratch data, coverage output, logs, and local environment files are ignored by Git. Keep secrets in `.env`; only the documented `.env.example` template may be committed.
