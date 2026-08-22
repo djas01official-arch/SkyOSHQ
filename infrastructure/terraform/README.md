@@ -13,12 +13,12 @@ accepting a region variable, so a `.tfvars` override cannot deploy it elsewhere.
 
 ## State boundary
 
-The checked-in root includes an empty partial GCS backend declaration, but no
-state bucket name. **The first real apply is blocked** until a separately reviewed
-state-backend bootstrap task creates and secures a private remote backend. Terraform
-state is sensitive operational data and must never be committed. This task does not
-authorize `terraform apply`. Do not commit local state, `terraform.tfvars`,
-credentials, or service-account keys.
+The [bootstrap state root](./bootstrap/state/README.md) defines the separately
+reviewed Terraform-state bucket. The bucket must first be created by the explicit
+operator bootstrap flow, then imported directly into the initialized GCS backend.
+This deliberately avoids a local-state migration. Terraform state is sensitive
+operational data and must never be committed. Do not commit local state,
+`terraform.tfvars`, `backend.hcl`, credentials, or service-account keys.
 
 Use a temporary local backend only for offline validation:
 
@@ -28,6 +28,13 @@ terraform init -backend=false
 terraform fmt -check -recursive
 terraform validate
 ```
+
+After the state bootstrap is complete, copy
+`environments/nonprod/backend.hcl.example` to ignored `backend.hcl`, fill in the
+reviewed state-bucket name, and initialize with
+`terraform init -backend-config=backend.hcl`. The non-production root uses the
+distinct `environments/nonprod` state prefix; it must never share the bootstrap
+root's `bootstrap/state` prefix.
 
 Terraform provider authentication is intentionally absent from committed files.
 A future apply identity must use Application Default Credentials or Workload

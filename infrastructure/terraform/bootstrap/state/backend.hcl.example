@@ -1,0 +1,3 @@
+# Copy to ignored backend.hcl and replace only the bucket placeholder.
+bucket = "<globally-unique-state-bucket>"
+prefix = "bootstrap/state"

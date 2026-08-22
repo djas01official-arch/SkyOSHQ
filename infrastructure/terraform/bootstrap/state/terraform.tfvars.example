@@ -1,0 +1,3 @@
+# Copy to ignored terraform.tfvars and replace both placeholders after review.
+project_id                  = "replace-with-gcp-project-id"
+terraform_state_bucket_name = "replace-with-globally-unique-skyos-state-bucket"
