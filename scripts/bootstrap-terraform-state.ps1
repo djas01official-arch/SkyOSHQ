@@ -13,6 +13,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'terraform-state-bootstrap-probe.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'gcloud-command.psm1') -Force
 
 $primaryRegion = 'europe-west1'
 $expectedLabels = @{ application = 'skyos'; environment = 'nonprod'; component = 'terraform-state' }
@@ -29,11 +30,7 @@ function Get-ObjectProperty {
 function Invoke-Gcloud {
   param([Parameter(Mandatory)][string[]]$Arguments)
 
-  $output = & gcloud @Arguments 2>&1
-  if ($LASTEXITCODE -ne 0) {
-    throw 'A gcloud command failed while validating or provisioning the reviewed Terraform state bucket.'
-  }
-  return $output
+  return Invoke-GcloudCommand -Arguments $Arguments
 }
 
 function Get-BucketDescription {
