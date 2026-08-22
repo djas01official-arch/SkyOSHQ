@@ -12,6 +12,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSScriptRoot 'terraform-state-bootstrap-probe.psm1') -Force
+
 $primaryRegion = 'europe-west1'
 $expectedLabels = @{ application = 'skyos'; environment = 'nonprod'; component = 'terraform-state' }
 
@@ -37,9 +39,21 @@ function Invoke-Gcloud {
 function Get-BucketDescription {
   param([Parameter(Mandatory)][string]$BucketName)
 
-  $output = & gcloud storage buckets describe "gs://$BucketName" --format=json 2>$null
-  if ($LASTEXITCODE -ne 0) { return $null }
-  return ($output | ConvertFrom-Json)
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    # Windows PowerShell invokes gcloud through gcloud.ps1. Keep native stderr
+    # non-terminating only for this expected-existence probe and capture it for
+    # strict result classification below.
+    $ErrorActionPreference = 'Continue'
+    $output = & gcloud storage buckets describe "gs://$BucketName" --format=json 2>&1
+    $exitCode = $LASTEXITCODE
+  } catch {
+    throw 'Unable to determine whether the reviewed Terraform state bucket exists.'
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+
+  return Resolve-TerraformStateBucketDescription -ExitCode $exitCode -CapturedOutput @($output)
 }
 
 function Assert-ExpectedBucket {
