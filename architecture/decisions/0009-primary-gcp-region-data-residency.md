@@ -30,13 +30,13 @@ SKYOS_PRIMARY_GCP_REGION=europe-west1
 `europe-west1` is Belgium and is the primary region for both the first
 non-production environment and production. The initial topology is single-region:
 
-| Resource | Required initial location |
-| --- | --- |
-| Cloud Run web service | `europe-west1` |
-| Cloud Run worker pool | `europe-west1` |
-| Cloud Run Jobs (migrator and reconciliation) | `europe-west1` |
-| Cloud SQL for PostgreSQL | `europe-west1` |
-| Knowledge Google Cloud Storage bucket | regional `europe-west1` |
+| Resource                                     | Required initial location |
+| -------------------------------------------- | ------------------------- |
+| Cloud Run web service                        | `europe-west1`            |
+| Cloud Run worker pool                        | `europe-west1`            |
+| Cloud Run Jobs (migrator and reconciliation) | `europe-west1`            |
+| Cloud SQL for PostgreSQL                     | `europe-west1`            |
+| Knowledge Google Cloud Storage bucket        | regional `europe-west1`   |
 
 The initial Knowledge bucket must be a **regional** bucket in `europe-west1`; do
 not select a multi-region or dual-region bucket for the first launch.
