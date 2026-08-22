@@ -1,0 +1,3 @@
+# Replace both placeholders only in an ignored terraform.tfvars file.
+project_id            = "replace-with-gcp-project-id"
+knowledge_bucket_name = "replace-with-globally-unique-skyos-nonprod-bucket"
