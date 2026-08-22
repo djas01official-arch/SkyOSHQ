@@ -2,6 +2,10 @@ import { PrismaAdapter } from '@auth/prisma-adapter';
 import NextAuth from 'next-auth';
 
 import { authenticateCredentials } from '../../database/auth/credentials';
+import {
+  admitPreProvisionedGoogleIdentity,
+  recordGoogleIdentitySignInSuccess,
+} from '../../database/auth/google-identity';
 import { findActiveSessionUser } from '../../database/auth/session-user';
 import { getOrganizationContext } from '../../database/context/organization-context';
 
@@ -12,6 +16,8 @@ import {
   requireAuthSecret,
 } from '@/lib/auth/security';
 import { createSkyosAuthProviders } from '@/lib/auth/auth-providers';
+import { isDevelopmentCredentialsEnabled } from '@/lib/auth/development-credentials';
+import { getGoogleOidcConfiguration } from '@/lib/auth/google-oidc';
 import { prisma } from '@/lib/prisma';
 
 function getSessionSelection(value: unknown): string | null {
@@ -23,6 +29,15 @@ export const { auth, handlers, signIn, signOut, unstable_update } = NextAuth({
   callbacks: {
     authorized({ auth: session }) {
       return hasAuthenticatedUser(session);
+    },
+    async signIn({ account, profile }) {
+      if (account?.provider === 'google') {
+        return (await admitPreProvisionedGoogleIdentity(prisma, { account, profile })).allowed;
+      }
+
+      return (
+        account?.provider === 'credentials' && isDevelopmentCredentialsEnabled(process.env.NODE_ENV)
+      );
     },
     async jwt({ session, token, trigger, user }) {
       const userId = user?.id ?? token.sub;
@@ -58,14 +73,25 @@ export const { auth, handlers, signIn, signOut, unstable_update } = NextAuth({
       return session;
     },
   },
+  events: {
+    async signIn({ account, profile, user }) {
+      if (account?.provider === 'google' && user.id) {
+        await recordGoogleIdentitySignInSuccess(prisma, { account, profile, userId: user.id });
+      }
+    },
+  },
   pages: {
     signIn: '/login',
   },
   cookies: {
     sessionToken: getSessionCookie(process.env.NODE_ENV === 'production'),
   },
-  providers: createSkyosAuthProviders((credentials) =>
-    authenticateCredentials(prisma, credentials),
+  providers: createSkyosAuthProviders(
+    (credentials) => authenticateCredentials(prisma, credentials),
+    {
+      googleOidcConfiguration: getGoogleOidcConfiguration(),
+      runtime: process.env.NODE_ENV,
+    },
   ),
   session: {
     maxAge: AUTH_SESSION_MAX_AGE_SECONDS,

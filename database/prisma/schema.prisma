@@ -321,6 +321,8 @@ model User {
   aiBudgetConfirmationsRequested AiBudgetConfirmation[]     @relation("AiBudgetConfirmationRequester")
   aiBudgetConfirmationsDecided   AiBudgetConfirmation[]     @relation("AiBudgetConfirmationDecider")
   aiBudgetExecutionClaims        AiBudgetExecutionClaim[]   @relation("AiBudgetExecutionClaimant")
+  identityAuditEventsAsActor     IdentityAuditEvent[]        @relation("IdentityAuditActor")
+  identityAuditEventsAsTarget    IdentityAuditEvent[]        @relation("IdentityAuditTarget")
   createdTasks                   Task[]                     @relation("TaskCreator")
   assignedTasks                  Task[]                     @relation("TaskAssignee")
   organizationMemberships        OrganizationMembership[]
@@ -391,6 +393,27 @@ model AuditEvent {
   @@index([actorUserId, createdAt])
   @@index([targetType, targetId, createdAt])
   @@map("audit_events")
+}
+
+/// Global, append-only identity security evidence. Unlike AuditEvent, identity
+/// events are intentionally not assigned a tenant because authentication and
+/// operator pre-provisioning can occur before any organization membership exists.
+model IdentityAuditEvent {
+  id                 String   @id @default(uuid()) @db.Uuid
+  actorUserId        String?  @db.Uuid
+  targetUserId       String?  @db.Uuid
+  provider           String
+  subjectFingerprint String   @db.Char(64)
+  action             String
+  metadata           Json     @default("{}") @db.JsonB
+  createdAt          DateTime @default(now()) @db.Timestamptz(6)
+  actor              User?    @relation("IdentityAuditActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  target             User?    @relation("IdentityAuditTarget", fields: [targetUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([provider, subjectFingerprint, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([targetUserId, createdAt])
+  @@map("identity_audit_events")
 }
 
 model Organization {

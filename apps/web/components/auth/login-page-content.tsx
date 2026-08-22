@@ -3,14 +3,23 @@ import React, { type ReactNode } from 'react';
 import { Wordmark } from '../brand/wordmark';
 
 type LoginPageContentProps = {
-  children: ReactNode;
   credentialsEnabled: boolean;
+  credentialsForm?: ReactNode;
+  googleEnabled: boolean;
+  googleSignInForm?: ReactNode;
 };
 
-export function LoginPageContent({ children, credentialsEnabled }: LoginPageContentProps) {
-  const supportingText = credentialsEnabled
-    ? 'Use the configured development credentials to access the foundation environment.'
-    : 'Sign-in is not configured for this environment.';
+export function LoginPageContent({
+  credentialsEnabled,
+  credentialsForm,
+  googleEnabled,
+  googleSignInForm,
+}: LoginPageContentProps) {
+  const supportingText = googleEnabled
+    ? 'Continue only with a pre-provisioned SkyOS account.'
+    : credentialsEnabled
+      ? 'Use the configured development credentials to access the foundation environment.'
+      : 'Sign-in is not configured for this environment.';
 
   return (
     <main className="relative grid min-h-screen place-items-center overflow-hidden bg-background p-4">
@@ -24,7 +33,8 @@ export function LoginPageContent({ children, credentialsEnabled }: LoginPageCont
         </p>
         <h1 className="mt-2 text-2xl font-semibold tracking-[-0.03em] text-foreground">Sign in</h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">{supportingText}</p>
-        {credentialsEnabled ? <div className="mt-7">{children}</div> : null}
+        {googleEnabled ? <div className="mt-7">{googleSignInForm}</div> : null}
+        {credentialsEnabled ? <div className="mt-5">{credentialsForm}</div> : null}
       </section>
     </main>
   );

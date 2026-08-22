@@ -1,6 +1,8 @@
+import { GoogleLoginForm } from '@/components/auth/google-login-form';
 import { LoginForm } from '@/components/auth/login-form';
 import { LoginPageContent } from '@/components/auth/login-page-content';
 import { isDevelopmentCredentialsEnabled } from '@/lib/auth/development-credentials';
+import { getGoogleOidcConfiguration, isGoogleOidcProviderEnabled } from '@/lib/auth/google-oidc';
 import { getSafeSignInRedirect } from '@/lib/auth/security';
 
 export const metadata = {
@@ -17,10 +19,17 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
     Array.isArray(callbackUrl) ? callbackUrl[0] : callbackUrl,
   );
   const credentialsEnabled = isDevelopmentCredentialsEnabled();
+  const googleEnabled = isGoogleOidcProviderEnabled(
+    process.env.NODE_ENV,
+    getGoogleOidcConfiguration(),
+  );
 
   return (
-    <LoginPageContent credentialsEnabled={credentialsEnabled}>
-      {credentialsEnabled ? <LoginForm redirectTo={redirectTo} /> : null}
-    </LoginPageContent>
+    <LoginPageContent
+      credentialsEnabled={credentialsEnabled}
+      credentialsForm={credentialsEnabled ? <LoginForm redirectTo={redirectTo} /> : null}
+      googleEnabled={googleEnabled}
+      googleSignInForm={googleEnabled ? <GoogleLoginForm redirectTo={redirectTo} /> : null}
+    />
   );
 }

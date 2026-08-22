@@ -5,7 +5,7 @@ import { createSkyosAuthProviders } from './auth-providers';
 import { isDevelopmentCredentialsEnabled } from './development-credentials';
 
 function providerIds(runtime: unknown): string[] {
-  return createSkyosAuthProviders(async () => null, runtime).map((provider) => provider.id);
+  return createSkyosAuthProviders(async () => null, { runtime }).map((provider) => provider.id);
 }
 
 test('development and test runtimes enable development Credentials authentication', () => {
@@ -23,14 +23,14 @@ test('production and unknown runtimes fail closed for development Credentials au
 });
 
 test('production Auth.js configuration has no Credentials provider or callback endpoint', () => {
-  const providers = createSkyosAuthProviders(async () => null, 'production');
+  const providers = createSkyosAuthProviders(async () => null, { runtime: 'production' });
 
   assert.deepEqual(providers, []);
   assert.equal(providerIds('production').includes('credentials'), false);
 });
 
 test('unknown runtime Auth.js configuration has no Credentials provider or callback endpoint', () => {
-  const providers = createSkyosAuthProviders(async () => null, 'preview');
+  const providers = createSkyosAuthProviders(async () => null, { runtime: 'preview' });
 
   assert.deepEqual(providers, []);
   assert.equal(providerIds('preview').includes('credentials'), false);
