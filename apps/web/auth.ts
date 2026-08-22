@@ -1,6 +1,5 @@
 import { PrismaAdapter } from '@auth/prisma-adapter';
 import NextAuth from 'next-auth';
-import Credentials from 'next-auth/providers/credentials';
 
 import { authenticateCredentials } from '../../database/auth/credentials';
 import { findActiveSessionUser } from '../../database/auth/session-user';
@@ -12,6 +11,7 @@ import {
   hasAuthenticatedUser,
   requireAuthSecret,
 } from '@/lib/auth/security';
+import { createSkyosAuthProviders } from '@/lib/auth/auth-providers';
 import { prisma } from '@/lib/prisma';
 
 function getSessionSelection(value: unknown): string | null {
@@ -64,18 +64,9 @@ export const { auth, handlers, signIn, signOut, unstable_update } = NextAuth({
   cookies: {
     sessionToken: getSessionCookie(process.env.NODE_ENV === 'production'),
   },
-  providers: [
-    Credentials({
-      credentials: {
-        email: { label: 'Email', type: 'email' },
-        password: { label: 'Password', type: 'password' },
-      },
-      name: 'Development credentials',
-      async authorize(credentials) {
-        return authenticateCredentials(prisma, credentials);
-      },
-    }),
-  ],
+  providers: createSkyosAuthProviders((credentials) =>
+    authenticateCredentials(prisma, credentials),
+  ),
   session: {
     maxAge: AUTH_SESSION_MAX_AGE_SECONDS,
     strategy: 'jwt',

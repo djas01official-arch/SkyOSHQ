@@ -225,15 +225,14 @@ its configuration boundary before any attachment-enabled production launch.
 
 ### Production authentication boundary
 
-Production deployment is **blocked** until the Credentials provider is disabled
-in production or replaced by an approved production identity provider. This ADR
-does not select or implement that IdP. The follow-up must decide OAuth/OIDC or
-enterprise SSO, account linking/provisioning, verified identity lifecycle,
-trusted host and callback policy, MFA, and whether SCIM/enterprise provisioning
-is required. It must then make production credentials unreachable and test that
-property. The canonical production hostname must be explicitly trusted by Auth.js;
-callback redirects remain validated relative application paths, not host-derived
-absolute URLs.
+Credentials are disabled in production and unknown runtimes by a fail-closed code
+policy. Production deployment is nevertheless **blocked** until an approved
+production identity provider exists. This ADR does not select or implement that
+IdP. The follow-up must decide OAuth/OIDC or enterprise SSO, account
+linking/provisioning, verified identity lifecycle, trusted host and callback
+policy, MFA, and whether SCIM/enterprise provisioning is required. The canonical
+production hostname must be explicitly trusted by Auth.js; callback redirects
+remain validated relative application paths, not host-derived absolute URLs.
 
 ## Production environment contract
 
@@ -339,7 +338,7 @@ introduces operational work before a production launch can occur.
 Required follow-ups, in order:
 
 1. **Production authentication boundary:** select and implement a production IdP,
-   disable Credentials in production, and define trusted host/callback/MFA policy.
+   then define trusted host/callback/MFA policy.
 2. **Production object storage:** implement and test a private GCS-compatible
    `ObjectStorage` adapter, storage configuration, upload/download access,
    lifecycle, and reconciliation behavior.

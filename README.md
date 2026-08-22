@@ -167,7 +167,7 @@ override stale inherited environment variables.
 
 The web application uses Auth.js with the Prisma adapter and the App Router. For local development, sign in at [http://localhost:3000/login](http://localhost:3000/login) with `AUTH_DEV_EMAIL` and `AUTH_DEV_PASSWORD` after running `pnpm db:seed`.
 
-- The web workspace loads the root `.env` for local monorepo commands; deployed environments must provide the same values through their platform configuration.
+- The web workspace loads the root `.env` for local monorepo commands. Credentials authentication is registered only when `NODE_ENV` is exactly `development` or `test`; it is deliberately unavailable in production and unknown runtimes. Production remains blocked until an approved identity provider is selected and configured.
 - Sessions use Auth.js encrypted and signed JWT cookies with an eight-hour maximum lifetime. Cookies are `HttpOnly`, `SameSite=Lax`, scoped to `/`, and `Secure` with the `__Secure-` prefix in production. The development credentials provider does not persist sessions through the adapter.
 - Every session read resolves the signed stable `User.id` against PostgreSQL. Suspended, deactivated, and soft-deleted users are denied on their next request; email addresses and session-selected tenant IDs are not authorization identities.
 - `/dashboard`, `/ai`, `/knowledge`, `/tasks`, and `/settings`, including nested routes, are protected by the server-side Next.js proxy and re-check the persisted user in pages and actions. `GET /api/me` returns the active signed-in user or `401`.
