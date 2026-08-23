@@ -44,6 +44,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "package=$(git hash-object package.json)"
+          echo "lock=$(git hash-object pnpm-lock.yaml)"
+          echo "bootstrap_ts=$(git hash-object database/scripts/bootstrap-production-database-roles.ts)"
+          echo "bootstrap_sql=$(git hash-object database/production/bootstrap-database-roles.sql)"
+          echo "migrator=$(git hash-object infrastructure/terraform/environments/nonprod/migrator_job.tf)"
           test "$(git hash-object package.json)" = "70d918a89ae4e4c299fe2e001554590377898872"
           test "$(git hash-object pnpm-lock.yaml)" = "57e473c8efe3f9ffd7e10fac8306649559256fd7"
           test "$(git hash-object database/scripts/bootstrap-production-database-roles.ts)" = "e4ae06c4aea53b9f5a41da8bc3d0d62e4e513247"
