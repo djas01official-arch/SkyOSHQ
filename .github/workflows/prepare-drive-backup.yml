@@ -1,0 +1,52 @@
+name: Prepare Drive Backup
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    name: Build sanitized source archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Reject forbidden tracked runtime or secret files
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden="$({ git ls-files | grep -E '(^|/)(node_modules|\.pnpm-store|\.turbo|\.terraform|tmp|temp)(/|$)|(^|/)\.env($|\.)|(^|/)backend\.hcl$|(^|/)terraform\.tfvars$|\.auto\.tfvars$|\.tfstate($|\.)' || true; } | grep -Ev '(^|/)\.env\.example$' || true)"
+          if [[ -n "$forbidden" ]]; then
+            echo '::error::Backup refused because forbidden files are tracked.'
+            printf '%s\n' "$forbidden"
+            exit 1
+          fi
+
+      - name: Build source-only archive and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="SkyOSHQ-main-${GITHUB_SHA}.zip"
+          git archive --format=zip --output="$archive" HEAD
+          sha256sum "$archive" > "$archive.sha256"
+
+      - name: Upload transfer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skyos-drive-backup-${{ github.sha }}
+          path: |
+            SkyOSHQ-main-${{ github.sha }}.zip
+            SkyOSHQ-main-${{ github.sha }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
