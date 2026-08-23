@@ -15,6 +15,54 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  finalize_drive_sync:
+    name: Finalize verified Drive bootstrap sync
+    if: github.event_name == 'pull_request' && github.head_ref == 'sync/drive-nonprod-20260823'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Check out PR head
+        uses: actions/checkout@v6
+        with:
+          ref: sync/drive-nonprod-20260823
+          fetch-depth: 1
+
+      - name: Reconstruct exact Drive source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .sync/package.b64 > package.json
+          base64 -d .sync/bootstrap-ts.b64 > database/scripts/bootstrap-production-database-roles.ts
+          base64 -d .sync/bootstrap-sql.b64 > database/production/bootstrap-database-roles.sql
+          base64 -d .sync/migrator.b64 > infrastructure/terraform/environments/nonprod/migrator_job.tf
+          cat .sync/lockxz.00 .sync/lockxz.01 .sync/lockxz.02 .sync/lockxz.03 | base64 -d | xz -dc > pnpm-lock.yaml
+
+      - name: Verify exact Git blob SHAs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object package.json)" = "70d918a89ae4e4c299fe2e001554590377898872"
+          test "$(git hash-object pnpm-lock.yaml)" = "57e473c8efe3f9ffd7e10fac8306649559256fd7"
+          test "$(git hash-object database/scripts/bootstrap-production-database-roles.ts)" = "e4ae06c4aea53b9f5a41da8bc3d0d62e4e513247"
+          test "$(git hash-object database/production/bootstrap-database-roles.sql)" = "7012592a5d166feaed9f512f1036f8310a535850"
+          test "$(git hash-object infrastructure/terraform/environments/nonprod/migrator_job.tf)" = "8ffbb85952c004abe43dc2940909e95c0a69e1d6"
+
+      - name: Commit verified Drive bootstrap runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json pnpm-lock.yaml \
+            database/scripts/bootstrap-production-database-roles.ts \
+            database/production/bootstrap-database-roles.sql \
+            infrastructure/terraform/environments/nonprod/migrator_job.tf
+          git diff --cached --quiet && exit 0
+          git commit -m "feat(database): add production role bootstrap runtime"
+          git push origin HEAD:sync/drive-nonprod-20260823
+
   validate:
     name: Monorepo and database
     runs-on: ubuntu-latest
