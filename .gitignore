@@ -29,3 +29,6 @@ crash.*.log
 terraform.tfvars
 *.auto.tfvars
 backend.hcl
+skyos-recovery.agekey
+skyos-secrets-recovery-*.age
+skyos-secrets-recovery-*.age.sha256
