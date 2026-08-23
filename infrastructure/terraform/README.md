@@ -1,10 +1,9 @@
 # SkyOS GCP Terraform foundation
 
-Terraform is the selected infrastructure-as-code contract for the initial SkyOS
-Google Cloud platform. This foundation defines only the non-production regional
-Knowledge bucket, workload service-account identities, and exact bucket-scoped
-runtime IAM. It does not define Cloud Run, Cloud SQL, networking, Artifact
-Registry, OAuth, secrets, or deployment resources.
+Terraform is the selected infrastructure-as-code contract for the SkyOS Google
+Cloud platform. The non-production root defines the regional data plane and the
+reviewed runtime foundation needed by Cloud Run, Cloud SQL, private Knowledge
+storage, Artifact Registry, Secret Manager, and workload identities.
 
 The authoritative initial region is `europe-west1` (Belgium), as locked by
 [ADR 0009](../../architecture/decisions/0009-primary-gcp-region-data-residency.md).
@@ -38,19 +37,61 @@ root's `bootstrap/state` prefix.
 
 Terraform provider authentication is intentionally absent from committed files.
 A future apply identity must use Application Default Credentials or Workload
-Identity Federation, never a JSON key. `terraform.tfvars.example` contains only
-non-secret placeholders for a project ID and globally unique bucket name.
+Identity Federation, never a JSON key. Real `terraform.tfvars` files remain
+ignored.
 
 ## Current resource boundary
+
+The reviewed root defines:
 
 - one private, regional, Standard Knowledge bucket in `europe-west1`;
 - four separate user-managed service-account identities: web, worker, migrator,
   and reconciliation;
 - one exact project custom role containing only `storage.objects.create`,
-  `storage.objects.get`, and `storage.objects.delete`; and
-- bucket-scoped grants of that role to web, worker, and reconciliation only.
+  `storage.objects.get`, and `storage.objects.delete`;
+- bucket-scoped grants of that role to web, worker, and reconciliation only;
+- a dedicated VPC, runtime subnet, and Private Services Access path for Cloud SQL;
+- a PostgreSQL Cloud SQL instance and the reviewed migration identity foundation;
+- one immutable-tag Artifact Registry repository for the shared SkyOS runtime image;
+- the Cloud Run migration role-bootstrap job; and
+- Secret Manager containers plus an opt-in Cloud Run web service definition.
 
-The migrator intentionally has no storage grant. The runtime does not need object
-listing, direct browser bucket access, public ACLs, signed URLs, CORS, or a bucket
-website configuration. A future Cloud Run/Cloud SQL slice must attach these
-identities and add only separately reviewed permissions.
+The migrator intentionally has no Knowledge storage grant. Runtime identities are
+separate so future worker and reconciliation slices can receive only their exact
+permissions.
+
+## Web runtime activation
+
+The Cloud Run web service is deliberately disabled by default with
+`enable_web_service = false`. Committing the Terraform definition does not deploy
+or expose the application.
+
+Secret Manager containers are defined for:
+
+- `DATABASE_URL`;
+- `AUTH_SECRET`;
+- `AUTH_GOOGLE_SECRET`;
+- `OPENAI_API_KEY`;
+- `ANTHROPIC_API_KEY`; and
+- `GEMINI_API_KEY`.
+
+Terraform creates only the secret containers. It does not create versions for
+these runtime secrets and does not accept their values as ordinary Terraform
+variables. Secret values must be populated through a separately controlled
+operator or deployment path. The web service accepts only pinned positive numeric
+Secret Manager version IDs through `web_secret_versions`.
+
+Before `enable_web_service` may be set to true, the configuration requires pinned
+versions for `DATABASE_URL`, `AUTH_SECRET`, and `AUTH_GOOGLE_SECRET`, plus the
+non-secret Google OAuth client ID. Optional AI provider key versions may be pinned
+without changing the service definition; the initial runtime remains configured
+with local AI and embedding providers until a separately reviewed provider switch.
+
+The web revision uses the dedicated web service account, Direct VPC egress to the
+runtime subnet, the private Knowledge bucket, and the immutable `runtime_image`
+digest. Unauthenticated invocation is also disabled by default and requires the
+separate explicit `web_allow_unauthenticated = true` decision.
+
+No Terraform change in this root should populate plaintext runtime secrets, upload
+service-account keys, or perform an application deployment as a side effect of
+source review.
