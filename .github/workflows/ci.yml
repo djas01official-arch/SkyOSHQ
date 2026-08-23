@@ -33,6 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p database/production
           base64 -d .sync/package.b64 > package.json
           base64 -d .sync/bootstrap-ts.b64 > database/scripts/bootstrap-production-database-roles.ts
           base64 -d .sync/bootstrap-sql.b64 > database/production/bootstrap-database-roles.sql
