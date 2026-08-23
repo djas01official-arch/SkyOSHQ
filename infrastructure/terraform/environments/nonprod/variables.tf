@@ -28,6 +28,49 @@ variable "migration_database_password" {
   nullable    = false
 }
 
+variable "enable_application_database_user" {
+  description = "Create the restricted SkyOS application database login after database roles have been bootstrapped."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "application_database_roles_bootstrapped" {
+  description = "Operator acknowledgement that skyos_application_role exists in Cloud SQL before the application login is enabled."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "application_database_password" {
+  description = "Ephemeral URL-safe password for the non-production SkyOS application database login. Never place this value in tfvars."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = (
+      var.application_database_password == null ||
+      can(regex("^[A-Za-z0-9_-]{32,128}$", var.application_database_password))
+    )
+    error_message = "application_database_password must be 32-128 URL-safe characters using letters, digits, underscore, or hyphen."
+  }
+}
+
+variable "application_database_password_version" {
+  description = "Monotonic write-only rotation version for the application database password. Increment when the password changes."
+  type        = number
+  default     = 0
+  nullable    = false
+
+  validation {
+    condition     = var.application_database_password_version >= 0 && floor(var.application_database_password_version) == var.application_database_password_version
+    error_message = "application_database_password_version must be a non-negative integer."
+  }
+}
+
 variable "runtime_image" {
   description = "Immutable Artifact Registry image digest reference shared by SkyOS runtime roles."
   type        = string
