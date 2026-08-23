@@ -14,7 +14,7 @@ output "knowledge_object_runtime_role" {
 }
 
 output "web_service_account_email" {
-  description = "Future Cloud Run web workload identity."
+  description = "Cloud Run web workload identity."
   value       = google_service_account.workload["web"].email
 }
 
@@ -24,7 +24,7 @@ output "worker_service_account_email" {
 }
 
 output "migrator_service_account_email" {
-  description = "Future Cloud Run migrator workload identity."
+  description = "Cloud Run migrator workload identity."
   value       = google_service_account.workload["migrator"].email
 }
 
@@ -64,17 +64,17 @@ output "network_self_link" {
 }
 
 output "runtime_subnet_name" {
-  description = "Future Cloud Run Direct VPC runtime subnet name."
+  description = "Cloud Run Direct VPC runtime subnet name."
   value       = google_compute_subnetwork.runtime.name
 }
 
 output "runtime_subnet_region" {
-  description = "Future Cloud Run Direct VPC runtime subnet region."
+  description = "Cloud Run Direct VPC runtime subnet region."
   value       = google_compute_subnetwork.runtime.region
 }
 
 output "runtime_subnet_cidr" {
-  description = "Future Cloud Run Direct VPC runtime subnet CIDR range."
+  description = "Cloud Run Direct VPC runtime subnet CIDR range."
   value       = google_compute_subnetwork.runtime.ip_cidr_range
 }
 
@@ -101,4 +101,22 @@ output "cloud_sql_private_ip" {
 output "cloud_sql_database_version" {
   description = "Non-production Cloud SQL PostgreSQL database version."
   value       = google_sql_database_instance.postgres.database_version
+}
+
+output "web_runtime_secret_ids" {
+  description = "Secret Manager secret IDs reserved for the SkyOS web runtime. Values are never exposed by this output."
+  value = {
+    for env_name, secret in google_secret_manager_secret.web_runtime :
+    env_name => secret.secret_id
+  }
+}
+
+output "web_service_name" {
+  description = "Cloud Run web service name when enable_web_service is true."
+  value       = try(google_cloud_run_v2_service.web[0].name, null)
+}
+
+output "web_service_uri" {
+  description = "Cloud Run web service URI when enable_web_service is true."
+  value       = try(google_cloud_run_v2_service.web[0].uri, null)
 }
