@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   validate:
-    name: Monorepo and database
+    name: Monorepo, database, and Terraform
     runs-on: ubuntu-latest
     timeout-minutes: 35
 
@@ -49,6 +49,18 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Validate Terraform
+        working-directory: infrastructure/terraform/environments/nonprod
+        run: |
+          terraform init -backend=false -input=false
+          terraform fmt -check -recursive
+          terraform validate
 
       - name: Enable pinned pnpm
         uses: pnpm/action-setup@v6
