@@ -1,3 +1,23 @@
-# Replace both placeholders only in an ignored terraform.tfvars file.
+# Copy this file to ignored terraform.tfvars and replace only non-secret placeholders.
+# Secret VALUES never belong in tfvars. Populate Secret Manager versions separately
+# and pin only their numeric version IDs below when the web runtime is ready.
 project_id            = "replace-with-gcp-project-id"
 knowledge_bucket_name = "replace-with-globally-unique-skyos-nonprod-bucket"
+
+# runtime_image must be an immutable Artifact Registry digest, for example:
+# runtime_image = "europe-west1-docker.pkg.dev/replace-with-gcp-project-id/skyos-np-runtime/skyos@sha256:<64-hex-digest>"
+
+# Keep the service disabled until DATABASE_URL, AUTH_SECRET, and AUTH_GOOGLE_SECRET
+# exist in Secret Manager and their reviewed versions are pinned below.
+enable_web_service        = false
+web_allow_unauthenticated = false
+web_google_oauth_client_id = ""
+
+web_secret_versions = {
+  # DATABASE_URL       = "1"
+  # AUTH_SECRET        = "1"
+  # AUTH_GOOGLE_SECRET = "1"
+  # OPENAI_API_KEY     = "1"
+  # ANTHROPIC_API_KEY  = "1"
+  # GEMINI_API_KEY     = "1"
+}
