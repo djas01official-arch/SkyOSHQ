@@ -42,7 +42,7 @@ function Get-BucketDescription {
     # non-terminating only for this expected-existence probe and capture it for
     # strict result classification below.
     $ErrorActionPreference = 'Continue'
-    $output = & gcloud storage buckets describe "gs://$BucketName" --format=json 2>&1
+    $output = & gcloud storage buckets describe "gs://$BucketName" --raw --format=json 2>&1
     $exitCode = $LASTEXITCODE
   } catch {
     throw 'Unable to determine whether the reviewed Terraform state bucket exists.'

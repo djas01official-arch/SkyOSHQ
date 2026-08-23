@@ -6,13 +6,22 @@
 FROM node:24-bookworm-slim AS base
 
 ENV PNPM_HOME=/pnpm
+ENV COREPACK_HOME=/corepack
 ENV PATH=${PNPM_HOME}:${PATH}
 
 RUN corepack enable pnpm
 
 WORKDIR /app
 
-FROM base AS dependencies
+FROM base AS package-manager
+
+COPY package.json ./package.json
+
+RUN corepack install \
+  && pnpm --version \
+  && chmod -R a+rX "${COREPACK_HOME}"
+
+FROM package-manager AS dependencies
 
 # Copy workspace manifests first so dependency installation is cacheable and
 # always verified against the committed lockfile.
@@ -37,10 +46,11 @@ COPY . .
 RUN pnpm db:generate \
   && pnpm --filter @skyos/web build
 
-FROM base AS runtime
+FROM package-manager AS runtime
 
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
+ENV COREPACK_ENABLE_NETWORK=0
 
 WORKDIR /app
 
