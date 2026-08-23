@@ -77,6 +77,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Diagnose canonical Prettier output
+        run: |
+          pnpm exec prettier scripts/publish-database-url-secret.ts --write
+          git diff -- scripts/publish-database-url-secret.ts
+          exit 1
+
       - name: Run operator tooling tests
         run: pnpm test:ops
 
