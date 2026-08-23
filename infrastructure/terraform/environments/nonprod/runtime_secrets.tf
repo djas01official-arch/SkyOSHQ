@@ -27,7 +27,7 @@ locals {
   ])
 
   web_configured_secret_env_names = toset(keys(var.web_secret_versions))
-  web_active_secret_env_names = var.enable_web_service ? local.web_configured_secret_env_names : toset([])
+  web_active_secret_env_names     = var.enable_web_service ? local.web_configured_secret_env_names : toset([])
 }
 
 resource "google_secret_manager_secret" "web_runtime" {
