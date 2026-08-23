@@ -102,7 +102,13 @@ The manifest currently covers:
 - `ANTHROPIC_API_KEY`
 - `GEMINI_API_KEY`
 
-The nonprod database migrator password remains primarily recoverable through GCP Secret Manager versioning or a controlled password reset/rotation, and is intentionally not pulled from local `.env` by the bundle script.
+Cloud SQL credentials are deliberately outside the local `.env` recovery bundle:
+
+- the nonprod migrator password is recovered through GCP Secret Manager versioning or a controlled password reset/rotation;
+- the restricted nonprod application database password is likewise stored in GCP Secret Manager and recovered through versioning or controlled rotation;
+- neither database password should be copied into `SkyOS Secret Recovery` merely to duplicate GCP Secret Manager.
+
+If an application database credential must be rotated, use the controlled Terraform/operator path with a fresh ephemeral password and incremented write-only rotation version, then update the dependent runtime secret version before enabling or rolling the web service.
 
 Local development-only credentials such as test PostgreSQL passwords are not part of the disaster-recovery bundle.
 
