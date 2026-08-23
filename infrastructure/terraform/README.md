@@ -87,10 +87,11 @@ Secret Manager arguments require Terraform 1.11 or newer. Rotation increments
 The Secret Manager container itself exists even while the login is disabled so the
 recovery boundary can be established before activation.
 
-The web runtime still receives `DATABASE_URL` from its separately controlled
-Secret Manager runtime secret. Building and pinning that URL is a later operator
-step after the restricted login exists; this foundation does not copy the database
-password into ordinary Terraform state or outputs.
+The web runtime receives `DATABASE_URL` from its separately controlled Secret
+Manager runtime secret. After the restricted login exists, use the reviewed
+[database runtime secret publication runbook](../../docs/operations/database-runtime-secret.md)
+to create a new `DATABASE_URL` version without writing the password or URL to a
+plaintext file. Pin only the resulting numeric version in Terraform.
 
 ## Web runtime activation
 
