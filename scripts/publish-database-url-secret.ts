@@ -29,7 +29,10 @@ function isPrivateIpv4Address(value: string): boolean {
   if (
     numbers.some(
       (octet, index) =>
-        !Number.isInteger(octet) || octet < 0 || octet > 255 || String(octet) !== octets[index],
+        !Number.isInteger(octet) ||
+        octet < 0 ||
+        octet > 255 ||
+        String(octet) !== octets[index],
     )
   ) {
     return false;
@@ -196,7 +199,8 @@ export function parseDatabaseUrlSecretPublisherArgs(
     databasePort: parsePort(readFlag(argv, '--database-port')),
     databaseName: readFlag(argv, '--database-name') ?? DEFAULT_DATABASE_NAME,
     databaseUser: readFlag(argv, '--database-user') ?? DEFAULT_DATABASE_USER,
-    passwordSecretId: readFlag(argv, '--password-secret') ?? DEFAULT_PASSWORD_SECRET_ID,
+    passwordSecretId:
+      readFlag(argv, '--password-secret') ?? DEFAULT_PASSWORD_SECRET_ID,
     runtimeSecretId: readFlag(argv, '--runtime-secret') ?? DEFAULT_RUNTIME_SECRET_ID,
   };
 
@@ -215,7 +219,9 @@ async function main(): Promise<void> {
   }
 }
 
-const entryPoint = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null;
+const entryPoint = process.argv[1]
+  ? pathToFileURL(resolve(process.argv[1])).href
+  : null;
 
 if (entryPoint === import.meta.url) {
   void main();
