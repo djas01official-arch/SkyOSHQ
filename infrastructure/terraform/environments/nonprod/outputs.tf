@@ -103,6 +103,16 @@ output "cloud_sql_database_version" {
   value       = google_sql_database_instance.postgres.database_version
 }
 
+output "application_database_user_name" {
+  description = "Restricted application database login when enable_application_database_user is true."
+  value       = try(google_sql_user.application[0].name, null)
+}
+
+output "application_database_password_secret_id" {
+  description = "Secret Manager secret ID holding the application database password. The password value is never exposed."
+  value       = google_secret_manager_secret.application_database_password.secret_id
+}
+
 output "web_runtime_secret_ids" {
   description = "Secret Manager secret IDs reserved for the SkyOS web runtime. Values are never exposed by this output."
   value = {
