@@ -53,12 +53,44 @@ The reviewed root defines:
 - a dedicated VPC, runtime subnet, and Private Services Access path for Cloud SQL;
 - a PostgreSQL Cloud SQL instance and the reviewed migration identity foundation;
 - one immutable-tag Artifact Registry repository for the shared SkyOS runtime image;
-- the Cloud Run migration role-bootstrap job; and
+- the Cloud Run migration role-bootstrap job;
+- a protected Secret Manager container plus gated restricted application database
+  login foundation; and
 - Secret Manager containers plus an opt-in Cloud Run web service definition.
 
 The migrator intentionally has no Knowledge storage grant. Runtime identities are
 separate so future worker and reconciliation slices can receive only their exact
 permissions.
+
+## Application database activation
+
+The application login is deliberately disabled by default with
+`enable_application_database_user = false`. The intended rollout is two-stage
+because `skyos_application_role` is a PostgreSQL custom role created by the
+separately executed migrator role-bootstrap job.
+
+1. Apply the base foundation with the application login disabled.
+2. Execute and verify the `skyos-np-migrator-role-bootstrap` Cloud Run job so
+   `skyos_application_role` exists in Cloud SQL.
+3. Set `application_database_roles_bootstrapped = true`, increment
+   `application_database_password_version`, and enable the application login.
+4. Supply `TF_VAR_application_database_password` only for that controlled apply.
+   The value must never be written to `terraform.tfvars`, committed, logged, or
+   copied to Drive in plaintext.
+5. Terraform writes the password through write-only provider arguments to both
+   the Cloud SQL login and its protected Secret Manager version. The login is
+   assigned only `skyos_application_role`, never `cloudsqlsuperuser`.
+
+The password variable is `sensitive` and `ephemeral`; the write-only Cloud SQL and
+Secret Manager arguments require Terraform 1.11 or newer. Rotation increments
+`application_database_password_version` and supplies a fresh ephemeral password.
+The Secret Manager container itself exists even while the login is disabled so the
+recovery boundary can be established before activation.
+
+The web runtime still receives `DATABASE_URL` from its separately controlled
+Secret Manager runtime secret. Building and pinning that URL is a later operator
+step after the restricted login exists; this foundation does not copy the database
+password into ordinary Terraform state or outputs.
 
 ## Web runtime activation
 
@@ -75,11 +107,11 @@ Secret Manager containers are defined for:
 - `ANTHROPIC_API_KEY`; and
 - `GEMINI_API_KEY`.
 
-Terraform creates only the secret containers. It does not create versions for
-these runtime secrets and does not accept their values as ordinary Terraform
-variables. Secret values must be populated through a separately controlled
-operator or deployment path. The web service accepts only pinned positive numeric
-Secret Manager version IDs through `web_secret_versions`.
+Terraform creates only the web runtime secret containers. It does not create
+versions for these runtime secrets and does not accept their values as ordinary
+Terraform variables. Secret values must be populated through a separately
+controlled operator or deployment path. The web service accepts only pinned
+positive numeric Secret Manager version IDs through `web_secret_versions`.
 
 Before `enable_web_service` may be set to true, the configuration requires pinned
 versions for `DATABASE_URL`, `AUTH_SECRET`, and `AUTH_GOOGLE_SECRET`, plus the
