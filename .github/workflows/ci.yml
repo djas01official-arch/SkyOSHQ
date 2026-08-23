@@ -34,7 +34,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p database/production
-          base64 -d .sync/package.b64 > package.json
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('package.json')
+          text = path.read_text()
+          text = text.replace(
+              '    "db:migrate:deploy": "prisma migrate deploy",\n    "db:seed": "prisma db seed",',
+              '    "db:migrate:deploy": "prisma migrate deploy",\n    "db:roles:bootstrap": "tsx database/scripts/bootstrap-production-database-roles.ts",\n    "db:seed": "prisma db seed",',
+              1,
+          )
+          text = text.replace(
+              '    "@types/node": "^24.10.1",\n    "dotenv": "^17.0.0",',
+              '    "@types/node": "^24.10.1",\n    "@types/pg": "8.23.1",\n    "dotenv": "^17.0.0",',
+              1,
+          )
+          path.write_text(text)
+          PY
           base64 -d .sync/bootstrap-ts.b64 > database/scripts/bootstrap-production-database-roles.ts
           base64 -d .sync/bootstrap-sql.b64 > database/production/bootstrap-database-roles.sql
           base64 -d .sync/migrator.b64 > infrastructure/terraform/environments/nonprod/migrator_job.tf
