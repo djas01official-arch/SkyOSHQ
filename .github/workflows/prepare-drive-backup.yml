@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   backup:
@@ -50,3 +51,13 @@ jobs:
             SkyOSHQ-main-${{ github.sha }}.zip.sha256
           if-no-files-found: error
           retention-days: 7
+
+      - name: Publish Drive backup handoff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh issue comment 3 \
+            --repo "${GITHUB_REPOSITORY}" \
+            --body "drive-backup-handoff sha=${GITHUB_SHA} run_id=${GITHUB_RUN_ID} artifact=skyos-drive-backup-${GITHUB_SHA}"
