@@ -29,10 +29,7 @@ function isPrivateIpv4Address(value: string): boolean {
   if (
     numbers.some(
       (octet, index) =>
-        !Number.isInteger(octet) ||
-        octet < 0 ||
-        octet > 255 ||
-        String(octet) !== octets[index],
+        !Number.isInteger(octet) || octet < 0 || octet > 255 || String(octet) !== octets[index],
     )
   ) {
     return false;
@@ -116,14 +113,7 @@ function runGcloud(args: readonly string[], input?: string): string {
 }
 
 function requireSecret(runner: GcloudRunner, projectId: string, secretId: string): void {
-  runner([
-    'secrets',
-    'describe',
-    secretId,
-    '--project',
-    projectId,
-    '--format=value(name)',
-  ]);
+  runner(['secrets', 'describe', secretId, '--project', projectId, '--format=value(name)']);
 }
 
 export function publishDatabaseUrlSecret(
