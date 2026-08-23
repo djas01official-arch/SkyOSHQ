@@ -38,3 +38,57 @@ variable "runtime_image" {
     error_message = "runtime_image must be an Artifact Registry image reference pinned by a lowercase sha256 digest."
   }
 }
+
+variable "enable_web_service" {
+  description = "Create the SkyOS Cloud Run web service after its pinned runtime secret versions are ready."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "web_allow_unauthenticated" {
+  description = "Grant allUsers the Cloud Run invoker role for the web service. Keep false until public exposure is explicitly reviewed."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "web_google_oauth_client_id" {
+  description = "Non-secret Google OAuth client ID injected into the production web runtime."
+  type        = string
+  default     = ""
+  nullable    = false
+
+  validation {
+    condition     = length(var.web_google_oauth_client_id) <= 4096
+    error_message = "web_google_oauth_client_id must not exceed 4096 characters."
+  }
+}
+
+variable "web_secret_versions" {
+  description = "Pinned numeric Secret Manager versions exposed to the web runtime. This map contains version numbers only, never secret values."
+  type        = map(string)
+  default     = {}
+  nullable    = false
+
+  validation {
+    condition = alltrue([
+      for name in keys(var.web_secret_versions) : contains([
+        "DATABASE_URL",
+        "AUTH_SECRET",
+        "AUTH_GOOGLE_SECRET",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+      ], name)
+    ])
+    error_message = "web_secret_versions contains an unsupported runtime secret name."
+  }
+
+  validation {
+    condition = alltrue([
+      for version in values(var.web_secret_versions) : can(regex("^[1-9][0-9]*$", version))
+    ])
+    error_message = "web_secret_versions must pin each configured secret to a positive numeric Secret Manager version."
+  }
+}
