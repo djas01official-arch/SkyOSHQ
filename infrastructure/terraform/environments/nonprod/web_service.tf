@@ -1,4 +1,8 @@
+data "google_project" "current" {
+  project_id = var.project_id
+}
 locals {
+  web_auth_url = "https://skyos-np-web-${data.google_project.current.number}.${local.primary_region}.run.app"
   web_required_secrets_configured = alltrue([
     for secret_name in local.web_required_secret_env_names :
     contains(local.web_configured_secret_env_names, secret_name)
@@ -26,6 +30,11 @@ resource "google_cloud_run_v2_service" "web" {
 
     containers {
       image = var.runtime_image
+
+      env {
+        name  = "AUTH_URL"
+        value = local.web_auth_url
+      }
 
       env {
         name  = "AUTH_GOOGLE_ID"
