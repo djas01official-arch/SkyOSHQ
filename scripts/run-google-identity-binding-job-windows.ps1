@@ -107,12 +107,27 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "request_secret_create_failed" }
   }
 
-  gcloud secrets add-iam-policy-binding $requestSecret `
+  $stage = "REQUEST_SECRET_IAM"
+  $policy = gcloud secrets get-iam-policy $requestSecret `
     --project $ProjectId `
-    --member="serviceAccount:$serviceAccount" `
-    --role="roles/secretmanager.secretAccessor" `
-    --quiet *> $null
-  if ($LASTEXITCODE -ne 0) { throw "request_secret_iam_failed" }
+    --format=json | ConvertFrom-Json
+  if ($LASTEXITCODE -ne 0) { throw "request_secret_iam_read_failed" }
+
+  $accessorBinding = $policy.bindings | Where-Object {
+    $_.role -eq "roles/secretmanager.secretAccessor"
+  }
+  $member = "serviceAccount:$serviceAccount"
+  $hasAccessor = [bool]($accessorBinding.members -contains $member)
+
+  if (-not $hasAccessor) {
+    gcloud secrets add-iam-policy-binding $requestSecret `
+      --project $ProjectId `
+      --member=$member `
+      --role="roles/secretmanager.secretAccessor" `
+      --condition=None `
+      --quiet *> $null
+    if ($LASTEXITCODE -ne 0) { throw "request_secret_iam_failed" }
+  }
 
   $stage = "REQUEST_VERSION"
   $requestJson = @{ googleSubject = $googleSubject } | ConvertTo-Json -Compress
