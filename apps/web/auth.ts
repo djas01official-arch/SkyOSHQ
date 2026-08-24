@@ -1,4 +1,4 @@
-import { PrismaAdapter } from '@auth/prisma-adapter';
+﻿import { PrismaAdapter } from '@auth/prisma-adapter';
 import NextAuth from 'next-auth';
 
 import { authenticateCredentials } from '../../database/auth/credentials';
@@ -32,6 +32,7 @@ function getAuthResult(): AuthResult {
   if (authResult) return authResult;
 
   authResult = NextAuth({
+    trustHost: true,
     adapter: PrismaAdapter(prisma),
     callbacks: {
       authorized({ auth: session }) {
