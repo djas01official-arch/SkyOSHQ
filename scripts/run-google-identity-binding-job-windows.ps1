@@ -199,7 +199,7 @@ void main().catch(() => {
   $jobName = "skyos-np-google-bind-" + (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
   $network = "projects/$ProjectId/global/networks/skyos-np"
   $subnet = "projects/$ProjectId/regions/$Region/subnetworks/skyos-np-runtime"
-  $shellScript = 'set -eu; export DATABASE_URL="postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"; printf %s "$SKYOS_BINDER_PAYLOAD_B64" | base64 -d > /tmp/skyos-google-binder.ts; exec /app/node_modules/.bin/tsx /tmp/skyos-google-binder.ts'
+  $shellScript = 'set -eu; export DATABASE_URL="postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"; export NODE_PATH="/app/node_modules"; cd /app; printf %s "$SKYOS_BINDER_PAYLOAD_B64" | base64 -d > /tmp/skyos-google-binder.ts; exec /app/node_modules/.bin/tsx /tmp/skyos-google-binder.ts'
 
   gcloud run jobs create $jobName `
     --project $ProjectId `
@@ -237,10 +237,18 @@ catch {
 }
 finally {
   if ($requestVersion -and $requestVersion -match '^[1-9][0-9]*$') {
-    gcloud secrets versions destroy $requestVersion `
-      --secret $requestSecret `
-      --project $ProjectId `
-      --quiet *> $null
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+      gcloud secrets versions destroy $requestVersion `
+        --secret $requestSecret `
+        --project $ProjectId `
+        --quiet 1>$null 2>$null
+    } catch {
+      # Cleanup is best-effort and must not mask the binding result.
+    } finally {
+      $ErrorActionPreference = $previousErrorActionPreference
+    }
   }
 }
 
