@@ -6,14 +6,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $stage = "PREFLIGHT"
+$failedStage = $null
 $requestVersion = $null
 $requestSecret = "skyos-np-google-binding-request"
-
-function Fail([string]$Stage) {
-  Write-Error "Google identity binding: FAIL"
-  Write-Output "FAILED_STAGE=$Stage"
-  exit 1
-}
 
 function Get-EnvEntry($Container, [string]$Name) {
   return $Container.env | Where-Object { $_.name -eq $Name } | Select-Object -First 1
@@ -223,7 +218,7 @@ void main().catch(() => {
   Write-Output "Google identity binding: PASS"
 }
 catch {
-  Fail $stage
+  $failedStage = $stage
 }
 finally {
   if ($requestVersion -and $requestVersion -match '^[1-9][0-9]*$') {
@@ -232,4 +227,10 @@ finally {
       --project $ProjectId `
       --quiet *> $null
   }
+}
+
+if ($failedStage) {
+  Write-Output "Google identity binding: FAIL"
+  Write-Output "FAILED_STAGE=$failedStage"
+  exit 1
 }
