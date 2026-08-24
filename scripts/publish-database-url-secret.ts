@@ -95,12 +95,15 @@ export function buildDatabaseUrl(
   return `postgresql://${encodeURIComponent(config.databaseUser)}:${encodeURIComponent(password)}@${config.databaseHost}:${config.databasePort}/${encodeURIComponent(config.databaseName)}`;
 }
 
+export function gcloudUsesShell(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'win32';
+}
+
 function runGcloud(args: readonly string[], input?: string): string {
-  const executable = process.platform === 'win32' ? 'gcloud.cmd' : 'gcloud';
-  const result = spawnSync(executable, [...args], {
+  const result = spawnSync('gcloud', [...args], {
     encoding: 'utf8',
     input,
-    shell: false,
+    shell: gcloudUsesShell(),
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -113,7 +116,22 @@ function runGcloud(args: readonly string[], input?: string): string {
 }
 
 function requireSecret(runner: GcloudRunner, projectId: string, secretId: string): void {
-  runner(['secrets', 'describe', secretId, '--project', projectId, '--format=value(name)']);
+  runner(['secrets', 'describe', secretId, '--project', projectId, '--format=json']);
+}
+
+function readVersionResourceName(response: string): string {
+  try {
+    const parsed: unknown = JSON.parse(response);
+
+    if (typeof parsed !== 'object' || parsed === null || !('name' in parsed)) {
+      return '';
+    }
+
+    const name = (parsed as { name?: unknown }).name;
+    return typeof name === 'string' ? name : '';
+  } catch {
+    return '';
+  }
 }
 
 export function publishDatabaseUrlSecret(
@@ -136,7 +154,7 @@ export function publishDatabaseUrlSecret(
   ]).trim();
 
   const databaseUrl = buildDatabaseUrl(config, password);
-  const versionResource = runner(
+  const versionResponse = runner(
     [
       'secrets',
       'versions',
@@ -145,10 +163,11 @@ export function publishDatabaseUrlSecret(
       '--project',
       config.projectId,
       '--data-file=-',
-      '--format=value(name)',
+      '--format=json',
     ],
     databaseUrl,
   );
+  const versionResource = readVersionResourceName(versionResponse);
   const version = versionResource.split('/').at(-1) ?? '';
 
   if (!/^[1-9][0-9]*$/.test(version)) {
