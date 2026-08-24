@@ -154,6 +154,34 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { bindGoogleIdentity } from '/app/database/auth/google-identity.ts';
 import { PrismaClient, UserStatus } from '/app/database/generated/client/client.js';
 
+function classifyFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+
+  switch (message) {
+    case 'invalid_binding_job_configuration':
+      return 'CONFIGURATION_INVALID';
+    case 'invalid_binding_request':
+      return 'REQUEST_INVALID';
+    case 'bootstrap_binding_requires_exactly_one_active_user':
+      return 'ACTIVE_USER_COUNT';
+    case 'A Google subject is required.':
+      return 'GOOGLE_SUBJECT_INVALID';
+    case 'The target or operator is not an active SkyOS user.':
+      return 'ACTIVE_USER_REQUIRED';
+    case 'This Google identity is already bound.':
+      return 'BINDING_CONFLICT';
+  }
+
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && /^P[0-9]{4}$/.test(code)) {
+      return `PRISMA_${code}`;
+    }
+  }
+
+  return 'UNCLASSIFIED';
+}
+
 async function main() {
   const requestRaw = process.env.SKYOS_GOOGLE_BINDING_REQUEST;
   const databaseUrl = process.env.DATABASE_URL;
@@ -189,8 +217,8 @@ async function main() {
   }
 }
 
-void main().catch(() => {
-  console.error('Google identity binding job: FAIL');
+void main().catch((error: unknown) => {
+  console.error(`Google identity binding job: FAIL_CODE=${classifyFailure(error)}`);
   process.exitCode = 1;
 });
 '@
