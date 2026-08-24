@@ -70,6 +70,6 @@ COPY --from=builder --chown=skyos:skyos /app/apps/web/.next/static ./apps/web/.n
 
 USER skyos
 
-# Cloud Run provides PORT. The traced server reads PORT and HOSTNAME at runtime;
-# it does not build, migrate, seed, or start the worker.
-CMD ["pnpm", "start:web"]
+# Cloud Run provides PORT. Start the traced Next server directly so pnpm never
+# performs dependency verification or attempts a runtime install in read-only /app.
+CMD ["node", "apps/web/.next/standalone/apps/web/server.js"]

@@ -78,7 +78,9 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run operator tooling tests
-        run: pnpm test:ops
+        run: |
+          pnpm test:ops
+          pnpm exec tsx --test scripts/runtime-image-contract.test.ts
 
       - name: Generate Prisma Client
         run: pnpm db:generate
