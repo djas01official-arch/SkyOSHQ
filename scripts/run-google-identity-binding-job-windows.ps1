@@ -178,8 +178,10 @@ function classifyFailure(error: unknown): string {
       return 'CONFIGURATION_INVALID';
     case 'invalid_binding_request':
       return 'REQUEST_INVALID';
-    case 'bootstrap_binding_requires_exactly_one_active_user':
-      return 'ACTIVE_USER_COUNT';
+    case 'bootstrap_binding_has_no_active_user':
+      return 'ACTIVE_USER_COUNT_ZERO';
+    case 'bootstrap_binding_has_multiple_active_users':
+      return 'ACTIVE_USER_COUNT_MULTIPLE';
     case 'A Google subject is required.':
       return 'GOOGLE_SUBJECT_INVALID';
     case 'The target or operator is not an active SkyOS user.':
@@ -243,8 +245,11 @@ async function main() {
         take: 2,
       });
 
-      if (users.length !== 1 || !users[0]) {
-        throw new Error('bootstrap_binding_requires_exactly_one_active_user');
+      if (users.length === 0) {
+        throw new Error('bootstrap_binding_has_no_active_user');
+      }
+      if (users.length > 1) {
+        throw new Error('bootstrap_binding_has_multiple_active_users');
       }
 
       step = 'BIND';
