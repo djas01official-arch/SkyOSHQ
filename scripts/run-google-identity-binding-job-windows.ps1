@@ -154,6 +154,22 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { bindGoogleIdentity } from '/app/database/auth/google-identity.ts';
 import { PrismaClient, UserStatus } from '/app/database/generated/client/client.js';
 
+function safeNestedCode(error: unknown, depth = 0): string | null {
+  if (depth > 4 || typeof error !== 'object' || error === null) return null;
+
+  const candidate = error as { code?: unknown; cause?: unknown };
+  if (typeof candidate.code === 'string') {
+    if (/^P[0-9]{4}$/.test(candidate.code)) return `PRISMA_${candidate.code}`;
+    if (/^[0-9A-Z]{5}$/.test(candidate.code)) return `SQLSTATE_${candidate.code}`;
+  }
+
+  if (candidate.cause && candidate.cause !== error) {
+    return safeNestedCode(candidate.cause, depth + 1);
+  }
+
+  return null;
+}
+
 function classifyFailure(error: unknown): string {
   const message = error instanceof Error ? error.message : '';
 
@@ -172,10 +188,27 @@ function classifyFailure(error: unknown): string {
       return 'BINDING_CONFLICT';
   }
 
-  if (typeof error === 'object' && error !== null && 'code' in error) {
-    const code = (error as { code?: unknown }).code;
-    if (typeof code === 'string' && /^P[0-9]{4}$/.test(code)) {
-      return `PRISMA_${code}`;
+  const nestedCode = safeNestedCode(error);
+  if (nestedCode) return nestedCode;
+
+  if (error instanceof Error) {
+    switch (error.name) {
+      case 'PrismaClientInitializationError':
+        return 'PRISMA_INITIALIZATION';
+      case 'PrismaClientKnownRequestError':
+        return 'PRISMA_KNOWN_REQUEST';
+      case 'PrismaClientUnknownRequestError':
+        return 'PRISMA_UNKNOWN_REQUEST';
+      case 'PrismaClientValidationError':
+        return 'PRISMA_VALIDATION';
+      case 'DriverAdapterError':
+        return 'DRIVER_ADAPTER';
+      case 'AggregateError':
+        return 'AGGREGATE_ERROR';
+      case 'TypeError':
+        return 'TYPE_ERROR';
+      case 'SyntaxError':
+        return 'SYNTAX_ERROR';
     }
   }
 
@@ -183,44 +216,53 @@ function classifyFailure(error: unknown): string {
 }
 
 async function main() {
-  const requestRaw = process.env.SKYOS_GOOGLE_BINDING_REQUEST;
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!requestRaw || !databaseUrl) throw new Error('invalid_binding_job_configuration');
-
-  const request = JSON.parse(requestRaw);
-  const googleSubject = request?.googleSubject;
-  if (typeof googleSubject !== 'string' || googleSubject.length === 0 || googleSubject.length > 512) {
-    throw new Error('invalid_binding_request');
-  }
-
-  const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
+  let step = 'CONFIG';
   try {
-    const users = await prisma.user.findMany({
-      where: { status: UserStatus.ACTIVE, deletedAt: null },
-      select: { id: true },
-      take: 2,
-    });
+    const requestRaw = process.env.SKYOS_GOOGLE_BINDING_REQUEST;
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!requestRaw || !databaseUrl) throw new Error('invalid_binding_job_configuration');
 
-    if (users.length !== 1 || !users[0]) {
-      throw new Error('bootstrap_binding_requires_exactly_one_active_user');
+    const request = JSON.parse(requestRaw);
+    const googleSubject = request?.googleSubject;
+    if (typeof googleSubject !== 'string' || googleSubject.length === 0 || googleSubject.length > 512) {
+      throw new Error('invalid_binding_request');
     }
 
-    await bindGoogleIdentity(prisma, {
-      actorUserId: users[0].id,
-      targetUserId: users[0].id,
-      googleSubject,
-    });
+    step = 'PRISMA_INIT';
+    const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
+    try {
+      step = 'USER_QUERY';
+      const users = await prisma.user.findMany({
+        where: { status: UserStatus.ACTIVE, deletedAt: null },
+        select: { id: true },
+        take: 2,
+      });
 
-    console.log('Google identity binding job: PASS');
-  } finally {
-    await prisma.$disconnect();
+      if (users.length !== 1 || !users[0]) {
+        throw new Error('bootstrap_binding_requires_exactly_one_active_user');
+      }
+
+      step = 'BIND';
+      await bindGoogleIdentity(prisma, {
+        actorUserId: users[0].id,
+        targetUserId: users[0].id,
+        googleSubject,
+      });
+
+      step = 'PASS';
+      console.log('Google identity binding job: PASS');
+    } finally {
+      step = step === 'PASS' ? 'DISCONNECT_AFTER_PASS' : `DISCONNECT_AFTER_${step}`;
+      await prisma.$disconnect();
+    }
+  } catch (error: unknown) {
+    console.error(`Google identity binding job: FAIL_STEP=${step}`);
+    console.error(`Google identity binding job: FAIL_CODE=${classifyFailure(error)}`);
+    process.exitCode = 1;
   }
 }
 
-void main().catch((error: unknown) => {
-  console.error(`Google identity binding job: FAIL_CODE=${classifyFailure(error)}`);
-  process.exitCode = 1;
-});
+void main();
 '@
 
   $payloadB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
