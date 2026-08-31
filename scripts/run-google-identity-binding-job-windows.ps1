@@ -130,12 +130,12 @@ try {
   }
 
   $stage = "REQUEST_VERSION"
-  $requestJson = @{ googleSubject = $googleSubject } | ConvertTo-Json -Compress
-  $versionJson = $requestJson | gcloud secrets versions add $requestSecret `
+  $requestEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($googleSubject))
+  $versionJson = $requestEncoded | gcloud secrets versions add $requestSecret `
     --project $ProjectId `
     --data-file=- `
     --format=json
-  $requestJson = $null
+  $requestEncoded = $null
   $googleSubject = $null
 
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($versionJson)) {
@@ -218,13 +218,18 @@ function classifyFailure(error: unknown): string {
 async function main() {
   let step = 'CONFIG';
   try {
-    const requestRaw = process.env.SKYOS_GOOGLE_BINDING_REQUEST;
+    const requestEncoded = process.env.SKYOS_GOOGLE_BINDING_REQUEST?.trim();
     const databaseUrl = process.env.DATABASE_URL;
-    if (!requestRaw || !databaseUrl) throw new Error('invalid_binding_job_configuration');
+    if (!requestEncoded || !databaseUrl) throw new Error('invalid_binding_job_configuration');
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(requestEncoded)) throw new Error('invalid_binding_request');
 
-    const request = JSON.parse(requestRaw);
-    const googleSubject = request?.googleSubject;
-    if (typeof googleSubject !== 'string' || googleSubject.length === 0 || googleSubject.length > 512) {
+    const googleSubject = Buffer.from(requestEncoded, 'base64').toString('utf8');
+    if (
+      typeof googleSubject !== 'string' ||
+      googleSubject.length === 0 ||
+      googleSubject.length > 512 ||
+      Buffer.from(googleSubject, 'utf8').toString('base64') !== requestEncoded
+    ) {
       throw new Error('invalid_binding_request');
     }
 
