@@ -2,7 +2,7 @@ import { UserStatus, type PrismaClient } from '../generated/client/client';
 
 export type ActiveSessionUser = {
   displayName: string | null;
-  email: string;
+  email: string | null;
   id: string;
   image: string | null;
 };
@@ -27,7 +27,7 @@ export async function findActiveSessionUser(
     },
   });
 
-  if (!user?.email) {
+  if (!user) {
     return null;
   }
 
