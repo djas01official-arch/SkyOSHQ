@@ -85,12 +85,32 @@ function safeNestedCode(error: unknown, depth = 0): string | null {
   return null;
 }
 
+function classifyP2028(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null) return null;
+
+  const candidate = error as { code?: unknown; meta?: { error?: unknown } };
+  if (candidate.code !== 'P2028') return null;
+
+  const detail = typeof candidate.meta?.error === 'string' ? candidate.meta.error : '';
+  if (detail.includes('Unable to start a transaction in the given time')) {
+    return 'PRISMA_P2028_START_TIMEOUT';
+  }
+  if (detail.includes('expired transaction') || detail.includes('Transaction already closed')) {
+    return 'PRISMA_P2028_EXPIRED';
+  }
+
+  return 'PRISMA_P2028';
+}
+
 function classifyFailure(error: unknown): string {
   const message = error instanceof Error ? error.message : '';
 
   if (message === 'initial_user_provisioning_requires_empty_user_table') {
     return 'USER_TABLE_NONEMPTY';
   }
+
+  const p2028 = classifyP2028(error);
+  if (p2028) return p2028;
 
   const nestedCode = safeNestedCode(error);
   if (nestedCode) return nestedCode;
@@ -123,29 +143,35 @@ async function main() {
 
     try {
       step = 'PROVISION';
-      await prisma.$transaction(async (transaction) => {
-        await transaction.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('skyos:initial-user-provisioning'))`;
+      await prisma.$transaction(
+        async (transaction) => {
+          await transaction.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('skyos:initial-user-provisioning'))`;
 
-        const totalUsers = await transaction.user.count();
-        if (totalUsers !== 0) {
-          throw new Error('initial_user_provisioning_requires_empty_user_table');
-        }
+          const totalUsers = await transaction.user.count();
+          if (totalUsers !== 0) {
+            throw new Error('initial_user_provisioning_requires_empty_user_table');
+          }
 
-        const user = await transaction.user.create({
-          data: { status: UserStatus.ACTIVE },
-          select: { id: true },
-        });
+          const user = await transaction.user.create({
+            data: { status: UserStatus.ACTIVE },
+            select: { id: true },
+          });
 
-        await transaction.identityAuditEvent.create({
-          data: {
-            action: 'user.provisioned',
-            provider: 'google',
-            subjectFingerprint: getIdentitySubjectFingerprint(null),
-            targetUserId: user.id,
-            metadata: { source: 'initial_operator_bootstrap' },
-          },
-        });
-      });
+          await transaction.identityAuditEvent.create({
+            data: {
+              action: 'user.provisioned',
+              provider: 'google',
+              subjectFingerprint: getIdentitySubjectFingerprint(null),
+              targetUserId: user.id,
+              metadata: { source: 'initial_operator_bootstrap' },
+            },
+          });
+        },
+        {
+          maxWait: 30_000,
+          timeout: 30_000,
+        },
+      );
 
       step = 'PASS';
       console.log('Initial SkyOS user provisioning job: PASS');
