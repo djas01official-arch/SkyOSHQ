@@ -9,6 +9,10 @@ ENV PNPM_HOME=/pnpm
 ENV COREPACK_HOME=/corepack
 ENV PATH=${PNPM_HOME}:${PATH}
 
+RUN apt-get update \
+  && apt-get install --no-install-recommends -y openssl \
+  && rm -rf /var/lib/apt/lists/*
+
 RUN corepack enable pnpm
 
 WORKDIR /app
