@@ -155,6 +155,17 @@ test('session subjects resolve only active users while preserving the stable use
   assert.equal(await findActiveSessionUser(prisma, user.id), null);
 });
 
+test('active session subjects do not require a stored email', async () => {
+  const user = await prisma.user.create({ data: { status: UserStatus.ACTIVE } });
+
+  assert.deepEqual(await findActiveSessionUser(prisma, user.id), {
+    displayName: null,
+    email: null,
+    id: user.id,
+    image: null,
+  });
+});
+
 test('an external provider identity maps to exactly one internal user', async () => {
   const firstUser = await prisma.user.create({ data: { status: UserStatus.ACTIVE } });
   const secondUser = await prisma.user.create({ data: { status: UserStatus.ACTIVE } });
