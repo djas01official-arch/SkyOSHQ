@@ -90,6 +90,13 @@ jobs:
           docker exec "${{ job.services.postgres.id }}"
           createdb --username=skyos_ci --owner=skyos_ci skyos_test
 
+      - name: Create application role for migration replay
+        run: >-
+          docker exec "${{ job.services.postgres.id }}"
+          psql --username=skyos_ci --dbname=skyos_ci
+          --set=ON_ERROR_STOP=1
+          --command="CREATE ROLE skyos_application_role NOLOGIN;"
+
       - name: Replay migrations from empty database
         run: pnpm db:migrate:deploy
 
