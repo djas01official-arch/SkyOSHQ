@@ -190,10 +190,7 @@ export function readJwtSubject(token: string): string {
   return subject;
 }
 
-function readLatestWebImage(
-  config: GoogleIdentityBindingJobConfig,
-  runner: GcloudRunner,
-): string {
+function readLatestWebImage(config: GoogleIdentityBindingJobConfig, runner: GcloudRunner): string {
   const service = parseJsonObject(
     runner([
       'run',
@@ -276,10 +273,7 @@ function readSecretVersion(response: string): string {
   return version;
 }
 
-function ensureRequestSecret(
-  config: GoogleIdentityBindingJobConfig,
-  runner: GcloudRunner,
-): void {
+function ensureRequestSecret(config: GoogleIdentityBindingJobConfig, runner: GcloudRunner): void {
   try {
     runner([
       'secrets',

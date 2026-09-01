@@ -18,9 +18,7 @@ test('reads only the Google subject from an identity token payload', () => {
 });
 
 test('requires explicit confirmation of the current gcloud Google account', () => {
-  assert.throws(() =>
-    parseGoogleIdentityBindingJobArgs(['--project-id', 'skyos-test-project']),
-  );
+  assert.throws(() => parseGoogleIdentityBindingJobArgs(['--project-id', 'skyos-test-project']));
 
   assert.deepEqual(
     parseGoogleIdentityBindingJobArgs([
