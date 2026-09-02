@@ -58,9 +58,33 @@ resource "google_cloud_run_v2_service" "web" {
 
       env {
         name  = "AI_PROVIDER"
-        value = "local"
+        value = "gemini"
       }
 
+      env {
+        name  = "AI_MODEL"
+        value = "gemini-3.6-flash"
+      }
+
+      env {
+        name  = "AI_CHAT_MODE"
+        value = "FAST"
+      }
+
+      env {
+        name  = "GEMINI_TRANSPORT"
+        value = "vertex"
+      }
+
+      env {
+        name  = "GOOGLE_CLOUD_PROJECT"
+        value = var.project_id
+      }
+
+      env {
+        name  = "GOOGLE_CLOUD_LOCATION"
+        value = "global"
+      }
       env {
         name  = "EMBEDDING_PROVIDER"
         value = "local"
@@ -113,7 +137,7 @@ resource "google_cloud_run_v2_service" "web" {
 
   depends_on = [
     google_project_service.cloud_run,
-    google_secret_manager_secret_iam_member.web_runtime_accessor,
+    google_project_iam_member.web_vertex_prediction_runtime, google_secret_manager_secret_iam_member.web_runtime_accessor,
   ]
 }
 
