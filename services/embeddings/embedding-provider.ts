@@ -321,7 +321,8 @@ function normalizedVertexEmbeddingError(
       true,
     );
   }
-  switch (errorStatus(error)) {
+  const status = errorStatus(error);
+  switch (status) {
     case 400:
     case 422:
       return new EmbeddingProviderError(
@@ -365,10 +366,8 @@ function normalizedVertexEmbeddingError(
     default:
       return new EmbeddingProviderError(
         'The embedding provider is unavailable.',
-        errorStatus(error) !== undefined && errorStatus(error)! >= 500
-          ? 'provider_unavailable'
-          : 'provider_failed',
-        errorStatus(error) !== undefined && errorStatus(error)! >= 500,
+        status !== undefined && status >= 500 ? 'provider_unavailable' : 'provider_failed',
+        status !== undefined && status >= 500,
       );
   }
 }
@@ -508,7 +507,15 @@ export class VertexEmbeddingProvider implements EmbeddingProvider {
               VERTEX_EMBEDDING_BACKOFF_MAX_MS,
               VERTEX_EMBEDDING_BACKOFF_BASE_MS * 2 ** (attempt - 1),
             );
-            await this.#clock.sleep(delayMs, controller.signal);
+            try {
+              await this.#clock.sleep(delayMs, controller.signal);
+            } catch (sleepError) {
+              throw normalizedVertexEmbeddingError(
+                sleepError,
+                options.signal?.aborted === true,
+                deadlineExpired,
+              );
+            }
             continue;
           }
           throw normalizedVertexEmbeddingError(
@@ -528,6 +535,7 @@ export class VertexEmbeddingProvider implements EmbeddingProvider {
 export function createDefaultEmbeddingProviderRegistry(
   configuredProvider = process.env.EMBEDDING_PROVIDER,
   runtime = process.env.NODE_ENV ?? 'development',
+  environment: NodeJS.ProcessEnv = process.env,
 ): EmbeddingProviderRegistry {
   const providerKey = configuredProvider?.trim().toLowerCase();
   if (!providerKey) {
@@ -554,11 +562,11 @@ export function createDefaultEmbeddingProviderRegistry(
 
   if (providerKey === VERTEX_EMBEDDING_PROVIDER_KEY) {
     const provider = new VertexEmbeddingProvider({
-      dimensions: configuredPositiveInteger(process.env.EMBEDDING_DIMENSIONS, 'EMBEDDING_DIMENSIONS'),
-      location: process.env.EMBEDDING_LOCATION ?? process.env.GOOGLE_CLOUD_LOCATION ?? '',
-      model: process.env.EMBEDDING_MODEL ?? '',
-      modelVersion: process.env.EMBEDDING_MODEL_VERSION ?? '',
-      project: process.env.GOOGLE_CLOUD_PROJECT ?? '',
+      dimensions: configuredPositiveInteger(environment.EMBEDDING_DIMENSIONS, 'EMBEDDING_DIMENSIONS'),
+      location: environment.EMBEDDING_LOCATION ?? environment.GOOGLE_CLOUD_LOCATION ?? '',
+      model: environment.EMBEDDING_MODEL ?? '',
+      modelVersion: environment.EMBEDDING_MODEL_VERSION ?? '',
+      project: environment.GOOGLE_CLOUD_PROJECT ?? '',
     });
     return new EmbeddingProviderRegistry([provider], provider);
   }
