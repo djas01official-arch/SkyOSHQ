@@ -8,11 +8,11 @@ function optionalPositiveInteger(value: string | undefined): number | undefined 
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-const embeddingProviders = createDefaultEmbeddingProviderRegistry();
-
 export const knowledgeSearchDependencies: KnowledgeSearchDependencies = {
   maxResults: optionalPositiveInteger(process.env.KNOWLEDGE_SEARCH_MAX_RESULTS),
   perSourceLimit: optionalPositiveInteger(process.env.KNOWLEDGE_SEARCH_PER_SOURCE_LIMIT),
-  providers: embeddingProviders,
+  get providers() {
+    return createDefaultEmbeddingProviderRegistry();
+  },
   timeoutMs: optionalPositiveInteger(process.env.KNOWLEDGE_SEARCH_TIMEOUT_MS),
 };
