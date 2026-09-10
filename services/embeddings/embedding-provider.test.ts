@@ -148,9 +148,18 @@ test('Vertex provider rejects empty input, unsupported batches, and missing task
     embedContent: async () => ({ embeddings: [{ values: finiteVector(3) }] }),
   });
 
-  await expectProviderError(provider.embed([], { task: 'retrieval-document' }), 'batch_size_invalid');
-  await expectProviderError(provider.embed(['   '], { task: 'retrieval-document' }), 'input_size_invalid');
-  await expectProviderError(provider.embed(['one', 'two'], { task: 'retrieval-document' }), 'batch_size_invalid');
+  await expectProviderError(
+    provider.embed([], { task: 'retrieval-document' }),
+    'batch_size_invalid',
+  );
+  await expectProviderError(
+    provider.embed(['   '], { task: 'retrieval-document' }),
+    'input_size_invalid',
+  );
+  await expectProviderError(
+    provider.embed(['one', 'two'], { task: 'retrieval-document' }),
+    'batch_size_invalid',
+  );
   await expectProviderError(provider.embed(['one']), 'embedding_task_required');
 });
 

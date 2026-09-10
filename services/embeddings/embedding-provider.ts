@@ -257,8 +257,7 @@ const defaultVertexEmbeddingClock: VertexEmbeddingClock = {
 const defaultVertexEmbeddingClientFactory: VertexEmbeddingClientFactory = (configuration) => {
   const sdk = new GoogleGenAI(configuration);
   return {
-    embedContent: (request) =>
-      sdk.models.embedContent(request) as Promise<VertexEmbeddingResponse>,
+    embedContent: (request) => sdk.models.embedContent(request) as Promise<VertexEmbeddingResponse>,
   };
 };
 
@@ -291,7 +290,9 @@ function isConnectionError(error: unknown): boolean {
 
 function isRetryableVertexEmbeddingError(error: unknown): boolean {
   const status = errorStatus(error);
-  return status === 408 || status === 409 || status === 429 || (status !== undefined && status >= 500);
+  return (
+    status === 408 || status === 409 || status === 429 || (status !== undefined && status >= 500)
+  );
 }
 
 function normalizedVertexEmbeddingError(
@@ -483,9 +484,7 @@ export class VertexEmbeddingProvider implements EmbeddingProvider {
               httpOptions: { retryOptions: { attempts: 1 } },
               outputDimensionality: this.dimensions,
               taskType:
-                options.task === 'retrieval-document'
-                  ? 'RETRIEVAL_DOCUMENT'
-                  : 'RETRIEVAL_QUERY',
+                options.task === 'retrieval-document' ? 'RETRIEVAL_DOCUMENT' : 'RETRIEVAL_QUERY',
             },
             contents: input,
             model: this.modelKey,
@@ -562,7 +561,10 @@ export function createDefaultEmbeddingProviderRegistry(
 
   if (providerKey === VERTEX_EMBEDDING_PROVIDER_KEY) {
     const provider = new VertexEmbeddingProvider({
-      dimensions: configuredPositiveInteger(environment.EMBEDDING_DIMENSIONS, 'EMBEDDING_DIMENSIONS'),
+      dimensions: configuredPositiveInteger(
+        environment.EMBEDDING_DIMENSIONS,
+        'EMBEDDING_DIMENSIONS',
+      ),
       location: environment.EMBEDDING_LOCATION ?? environment.GOOGLE_CLOUD_LOCATION ?? '',
       model: environment.EMBEDDING_MODEL ?? '',
       modelVersion: environment.EMBEDDING_MODEL_VERSION ?? '',

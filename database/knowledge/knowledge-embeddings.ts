@@ -248,9 +248,12 @@ async function embedChunks(provider: EmbeddingProvider, chunks: readonly { text:
   const vectors: number[][] = [];
   for (let offset = 0; offset < chunks.length; offset += provider.maxBatchSize) {
     const batch = chunks.slice(offset, offset + provider.maxBatchSize);
-    const output = await provider.embed(batch.map((chunk) => chunk.text), {
-      task: 'retrieval-document',
-    });
+    const output = await provider.embed(
+      batch.map((chunk) => chunk.text),
+      {
+        task: 'retrieval-document',
+      },
+    );
     if (output.length !== batch.length) {
       throw new KnowledgeEmbeddingStateError(
         'The embedding provider returned the wrong number of vectors.',
