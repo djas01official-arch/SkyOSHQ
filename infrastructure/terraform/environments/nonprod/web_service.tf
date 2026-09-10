@@ -85,9 +85,30 @@ resource "google_cloud_run_v2_service" "web" {
         name  = "GOOGLE_CLOUD_LOCATION"
         value = "global"
       }
+
       env {
         name  = "EMBEDDING_PROVIDER"
-        value = "local"
+        value = "vertex"
+      }
+
+      env {
+        name  = "EMBEDDING_MODEL"
+        value = "gemini-embedding-001"
+      }
+
+      env {
+        name  = "EMBEDDING_MODEL_VERSION"
+        value = "retrieval-v1"
+      }
+
+      env {
+        name  = "EMBEDDING_DIMENSIONS"
+        value = "768"
+      }
+
+      env {
+        name  = "EMBEDDING_LOCATION"
+        value = local.primary_region
       }
 
       dynamic "env" {
@@ -137,7 +158,8 @@ resource "google_cloud_run_v2_service" "web" {
 
   depends_on = [
     google_project_service.cloud_run,
-    google_project_iam_member.web_vertex_prediction_runtime, google_secret_manager_secret_iam_member.web_runtime_accessor,
+    google_project_iam_member.web_vertex_prediction_runtime,
+    google_secret_manager_secret_iam_member.web_runtime_accessor,
   ]
 }
 
