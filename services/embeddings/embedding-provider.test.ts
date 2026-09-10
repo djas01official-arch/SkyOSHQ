@@ -18,6 +18,15 @@ function finiteVector(dimensions: number): number[] {
   return Array.from({ length: dimensions }, (_value, index) => (index + 1) / dimensions);
 }
 
+function isProviderErrorWithCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === code
+  );
+}
+
 function vertexProvider(
   client: VertexEmbeddingClient,
   overrides: Partial<ConstructorParameters<typeof VertexEmbeddingProvider>[0]> = {},
@@ -72,13 +81,11 @@ test('local embeddings remain deterministic and isolated for tests/development',
 test('production fails closed when embedding provider is absent or local', () => {
   assert.throws(
     () => createDefaultEmbeddingProviderRegistry(undefined, 'production', {}),
-    (error: unknown) =>
-      error instanceof EmbeddingProviderError && error.code === 'provider_not_configured',
+    (error: unknown) => isProviderErrorWithCode(error, 'provider_not_configured'),
   );
   assert.throws(
     () => createDefaultEmbeddingProviderRegistry('local', 'production', {}),
-    (error: unknown) =>
-      error instanceof EmbeddingProviderError && error.code === 'provider_local_forbidden',
+    (error: unknown) => isProviderErrorWithCode(error, 'provider_local_forbidden'),
   );
 });
 
@@ -211,8 +218,7 @@ test('Vertex provider returns safe nonretryable permission errors and never fall
   assert.throws(
     () => registry.getVersion('local', 'deterministic-feature-hash', '1.0.0'),
     (registryError: unknown) =>
-      registryError instanceof EmbeddingProviderError &&
-      registryError.code === 'provider_version_unavailable',
+      isProviderErrorWithCode(registryError, 'provider_version_unavailable'),
   );
 });
 
@@ -222,12 +228,10 @@ test('Vertex provider rejects invalid model and dimension configuration', () => 
   };
   assert.throws(
     () => vertexProvider(client, { model: 'unexpected-model' }),
-    (error: unknown) =>
-      error instanceof EmbeddingProviderError && error.code === 'provider_configuration_invalid',
+    (error: unknown) => isProviderErrorWithCode(error, 'provider_configuration_invalid'),
   );
   assert.throws(
     () => vertexProvider(client, { dimensions: 2_001 }),
-    (error: unknown) =>
-      error instanceof EmbeddingProviderError && error.code === 'provider_configuration_invalid',
+    (error: unknown) => isProviderErrorWithCode(error, 'provider_configuration_invalid'),
   );
 });
