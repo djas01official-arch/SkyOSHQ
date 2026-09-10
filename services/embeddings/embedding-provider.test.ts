@@ -80,7 +80,7 @@ test('local embeddings remain deterministic and isolated for tests/development',
 
 test('production fails closed when embedding provider is absent or local', () => {
   assert.throws(
-    () => createDefaultEmbeddingProviderRegistry(undefined, 'production', {}),
+    () => createDefaultEmbeddingProviderRegistry('', 'production', {}),
     (error: unknown) => isProviderErrorWithCode(error, 'provider_not_configured'),
   );
   assert.throws(
