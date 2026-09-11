@@ -69,9 +69,7 @@ const DURABLE_AI_MAX_ATTEMPTS = 3;
 
 type MultiMode = 'BALANCED' | 'DEEP' | 'CRITICAL';
 type ProviderAssignment =
-  | BalancedAiProviderAssignment
-  | DeepAiProviderAssignment
-  | CriticalAiProviderAssignment;
+  BalancedAiProviderAssignment | DeepAiProviderAssignment | CriticalAiProviderAssignment;
 
 type DurableAiOrchestrationPayloadBase = Readonly<{
   budgetExecution?: AiBudgetExecutionContext;
@@ -673,10 +671,7 @@ async function prepareBudgetedStep(
   return Object.freeze({ executionLimits, preparedRequest });
 }
 
-async function interruptedAttempt(
-  prisma: PrismaClient,
-  run: AiRun,
-): Promise<AiRun> {
+async function interruptedAttempt(prisma: PrismaClient, run: AiRun): Promise<AiRun> {
   if (run.status !== AiRunStatus.PROCESSING) return run;
   return prisma.aiRun.update({
     where: { id: run.id },
@@ -735,20 +730,14 @@ async function runStep(
     if (run.status !== AiRunStatus.PROCESSING) return run;
     if (run.providerAttempted !== false) return interruptedAttempt(prisma, run);
   } else {
-    run = await createAiOrchestrationRun(
-      prisma,
-      dependencies.providers,
-      actorUserId,
-      workspaceId,
-      {
-        modelKey: provider.modelKey,
-        modelVersion: provider.modelVersion,
-        orchestrationId: orchestration.id,
-        providerKey: provider.providerKey,
-        role,
-        step: planned.step,
-      },
-    );
+    run = await createAiOrchestrationRun(prisma, dependencies.providers, actorUserId, workspaceId, {
+      modelKey: provider.modelKey,
+      modelVersion: provider.modelVersion,
+      orchestrationId: orchestration.id,
+      providerKey: provider.providerKey,
+      role,
+      step: planned.step,
+    });
   }
 
   await currentRunningOrchestration(prisma, actorUserId, workspaceId, orchestration.id);
@@ -765,9 +754,7 @@ async function runStep(
   );
   return executeGroundedRun(prisma, dependencies, {
     actorUserId,
-    ...(preparation.executionLimits
-      ? { executionLimitBinding: preparation.executionLimits }
-      : {}),
+    ...(preparation.executionLimits ? { executionLimitBinding: preparation.executionLimits } : {}),
     groundedContextId: orchestration.groundedContextId,
     ...(preparation.preparedRequest ? { preparedRequest: preparation.preparedRequest } : {}),
     responseFormat: 'grounded_answer',
@@ -963,7 +950,9 @@ async function executeBalanced(
   assignment: BalancedAiProviderAssignment,
   budgetExecution?: AiBudgetExecutionContext,
 ): Promise<void> {
-  const candidates = assignment.candidates.map((identity) => provider(dependencies.providers, identity));
+  const candidates = assignment.candidates.map((identity) =>
+    provider(dependencies.providers, identity),
+  );
   const synthesizer = provider(dependencies.providers, assignment.synthesizer);
   const plan = [
     ...candidates.map((item, step) => plannedRun(item, 'CANDIDATE', step)),
@@ -1038,7 +1027,9 @@ async function executeDeep(
   assignment: DeepAiProviderAssignment,
   budgetExecution?: AiBudgetExecutionContext,
 ): Promise<void> {
-  const candidates = assignment.candidates.map((identity) => provider(dependencies.providers, identity));
+  const candidates = assignment.candidates.map((identity) =>
+    provider(dependencies.providers, identity),
+  );
   const critic = provider(dependencies.providers, assignment.critic);
   const verifier = provider(dependencies.providers, assignment.verifier);
   const synthesizer = provider(dependencies.providers, assignment.synthesizer);
@@ -1157,9 +1148,13 @@ async function executeCritical(
   assignment: CriticalAiProviderAssignment,
   budgetExecution?: AiBudgetExecutionContext,
 ): Promise<void> {
-  const candidates = assignment.candidates.map((identity) => provider(dependencies.providers, identity));
+  const candidates = assignment.candidates.map((identity) =>
+    provider(dependencies.providers, identity),
+  );
   const critic = provider(dependencies.providers, assignment.critic);
-  const verifiers = assignment.verifiers.map((identity) => provider(dependencies.providers, identity));
+  const verifiers = assignment.verifiers.map((identity) =>
+    provider(dependencies.providers, identity),
+  );
   const synthesizer = provider(dependencies.providers, assignment.synthesizer);
   const plan = [
     ...candidates.map((item, step) => plannedRun(item, 'CANDIDATE', step)),
@@ -1368,7 +1363,11 @@ export function createDurableAiOrchestrationHandler(
         false,
       );
     }
-    const assignment = normalizedAssignment(dependencies.providers, payload.mode, payload.assignment);
+    const assignment = normalizedAssignment(
+      dependencies.providers,
+      payload.mode,
+      payload.assignment,
+    );
     const orchestration = await ensureRunning(
       prisma,
       job.requestedByUserId,

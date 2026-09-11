@@ -1,7 +1,4 @@
-import {
-  AiBudgetExecutionClaimStatus,
-  type PrismaClient,
-} from '../generated/client/client';
+import { AiBudgetExecutionClaimStatus, type PrismaClient } from '../generated/client/client';
 import type { AiApprovedConfirmationReservationResult } from './ai-budget-confirmation-reservation';
 import {
   beginAiBudgetExecutionClaim,
@@ -48,9 +45,7 @@ type ReservedConfirmation = Extract<
 >;
 type MultiMode = 'BALANCED' | 'DEEP' | 'CRITICAL';
 type MultiAssignment =
-  | BalancedAiProviderAssignment
-  | DeepAiProviderAssignment
-  | CriticalAiProviderAssignment;
+  BalancedAiProviderAssignment | DeepAiProviderAssignment | CriticalAiProviderAssignment;
 type EnabledBudgetConfiguration = Extract<
   ReturnType<typeof parseAiBudgetRuntimeConfiguration>,
   { enforcement: 'ENABLED' }
@@ -108,9 +103,7 @@ function validateInput(input: QueueApprovedDurableAiBudgetExecutionInput): void 
   }
 }
 
-function budgetConfiguration(
-  environment: AiBudgetRuntimeEnvironment,
-): EnabledBudgetConfiguration {
+function budgetConfiguration(environment: AiBudgetRuntimeEnvironment): EnabledBudgetConfiguration {
   let configuration;
   try {
     configuration = parseAiBudgetRuntimeConfiguration(environment);
