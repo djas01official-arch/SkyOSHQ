@@ -1,5 +1,4 @@
 import {
-  AiOrchestrationMode,
   AiOrchestrationRole,
   AiOrchestrationStatus,
   AiRunStatus,
@@ -51,7 +50,6 @@ import {
   resolveBalancedAiProviderAssignment,
   resolveCriticalAiProviderAssignment,
   resolveDeepAiProviderAssignment,
-  type AiOrchestrationModeKey,
   type AiOrchestrationProviderIdentity,
   type AiOrchestrationRoleKey,
   type BalancedAiProviderAssignment,

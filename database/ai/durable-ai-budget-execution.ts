@@ -1,4 +1,4 @@
-import { AiBudgetExecutionClaimStatus, type PrismaClient } from '../generated/client/client';
+import type { PrismaClient } from '../generated/client/client';
 import type { AiApprovedConfirmationReservationResult } from './ai-budget-confirmation-reservation';
 import {
   beginAiBudgetExecutionClaim,
