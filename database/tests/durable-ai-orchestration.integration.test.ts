@@ -33,23 +33,22 @@ import {
   DURABLE_AI_ORCHESTRATION_JOB_KIND,
   queueDurableAiOrchestration,
 } from '../ai/durable-ai-orchestration';
+import { createGroundedContext, persistGroundedContext } from '../ai/grounded-context';
 import {
   createAiRoutingDecision,
   explicitAiRoutingAudit,
 } from '../ai/ai-routing-decisions';
+import type { KnowledgeRetrievalResult } from '../ai/knowledge-retrieval';
+import { createDefaultDocumentParserRegistry } from '../../services/document-processing/document-parser';
 import {
-  createGroundedContext,
-  persistGroundedContext,
-} from '../ai/grounded-context';
-import { retrieveKnowledgeDocumentVersionContext } from '../ai/knowledge-retrieval';
-import { createKnowledgeDocument } from '../knowledge/knowledge-documents';
+  DeterministicLocalEmbeddingProvider,
+  EmbeddingProviderRegistry,
+} from '../../services/embeddings/embedding-provider';
+import { createDefaultKnowledgeChunkingStrategyRegistry } from '../../services/knowledge-chunking/chunking-strategy';
 import {
   LanguageModelProviderRegistry,
   type LanguageModelProvider,
 } from '../../services/ai/language-model-provider';
-import { DeterministicLocalEmbeddingProvider, EmbeddingProviderRegistry } from '../../services/embeddings/embedding-provider';
-import { createDefaultDocumentParserRegistry } from '../../services/document-processing/document-parser';
-import { createDefaultKnowledgeChunkingStrategyRegistry } from '../../services/knowledge-chunking/chunking-strategy';
 
 function testDatabaseUrl(): string {
   const value = process.env.DATABASE_TEST_URL;
@@ -169,22 +168,20 @@ async function fixture() {
     workspaceId: workspace.id,
   });
 
-  const document = await createKnowledgeDocument(prisma, owner.id, workspace.id, {
-    content: 'The approved durable orchestration evidence is ORANGE.',
-    title: 'Durable orchestration evidence',
-  });
-  const version = await prisma.knowledgeDocumentVersion.findFirstOrThrow({
-    where: { documentId: document.id, versionNumber: 1 },
-  });
-  const retrieval = await retrieveKnowledgeDocumentVersionContext(
-    prisma,
-    owner.id,
-    workspace.id,
-    version.id,
-  );
+  const retrieval: KnowledgeRetrievalResult = {
+    context: 'No workspace evidence is required for this durability regression.',
+    items: [],
+    limits: {
+      candidateCount: 0,
+      characterCount: 0,
+      maxResults: 8,
+      neighborRadius: 1,
+      perSourceCharacterBudget: 2_500,
+      totalCharacterBudget: 6_000,
+    },
+  };
   const context = createGroundedContext(workspace.id, retrieval, {
-    knowledgeDocumentVersionId: version.id,
-    type: AiGroundedContextSourceType.KNOWLEDGE_DOCUMENT_VERSION,
+    type: AiGroundedContextSourceType.WORKSPACE_RETRIEVAL,
   });
   const groundedContext = await persistGroundedContext(prisma, {
     actorUserId: owner.id,
@@ -290,12 +287,7 @@ test('durable orchestration reuses one job and never replays a provider-attempte
     1,
   );
 
-  await startAiOrchestration(
-    prisma,
-    f.ownerId,
-    f.workspaceId,
-    first.orchestration.id,
-  );
+  await startAiOrchestration(prisma, f.ownerId, f.workspaceId, first.orchestration.id);
   const interrupted = await createAiOrchestrationRun(
     prisma,
     registry,
