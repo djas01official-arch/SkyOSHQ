@@ -1,0 +1,31 @@
+name: Task 6 format diff
+
+on:
+  push:
+    branches:
+      - feat/durable-ai-orchestration
+    paths:
+      - .github/workflows/task6-format-diff.yml
+
+permissions:
+  contents: read
+
+jobs:
+  format-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Print exact Prettier diff
+        shell: bash
+        run: |
+          pnpm exec prettier --write database/ai/durable-ai-budget-execution.ts database/ai/durable-ai-orchestration.ts
+          git diff -- database/ai/durable-ai-budget-execution.ts database/ai/durable-ai-orchestration.ts
