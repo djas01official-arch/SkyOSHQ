@@ -235,7 +235,7 @@ export function parseDurableAiOrchestrationPayload(
   }
   const mode = value.mode as MultiMode;
   const assignment = parseAssignment(mode, value.assignment);
-  const base = {
+  const base: DurableAiOrchestrationPayloadBase = {
     ...(value.budgetExecution !== undefined
       ? { budgetExecution: value.budgetExecution as unknown as AiBudgetExecutionContext }
       : {}),
