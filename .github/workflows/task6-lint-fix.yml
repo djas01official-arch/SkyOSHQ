@@ -1,0 +1,58 @@
+name: Task 6 lint repair
+
+on:
+  push:
+    branches:
+      - feat/durable-ai-orchestration
+    paths:
+      - .github/workflows/task6-lint-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Remove unused Task 6 imports and validate touched files
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('database/ai/durable-ai-budget-execution.ts')
+          s = p.read_text()
+          s = s.replace("import { AiBudgetExecutionClaimStatus, type PrismaClient } from '../generated/client/client';", "import type { PrismaClient } from '../generated/client/client';", 1)
+          p.write_text(s)
+
+          p = Path('database/ai/durable-ai-chat.ts')
+          s = p.read_text()
+          s = s.replace("import {\n  queueDurableAiOrchestration,\n  type DurableAiOrchestrationPayload,\n} from './durable-ai-orchestration';", "import { queueDurableAiOrchestration } from './durable-ai-orchestration';", 1)
+          s = s.replace("import {\n  buildAiExecutionCostPlan,\n  type AiExecutionCostPlan,\n} from '../../services/ai/ai-execution-cost-plan';", "import { buildAiExecutionCostPlan } from '../../services/ai/ai-execution-cost-plan';", 1)
+          p.write_text(s)
+
+          p = Path('database/ai/durable-ai-orchestration.ts')
+          s = p.read_text()
+          s = s.replace('  AiOrchestrationMode,\n', '', 1)
+          s = s.replace('  type AiOrchestrationModeKey,\n', '', 1)
+          p.write_text(s)
+          PY
+          pnpm exec prettier --write database/ai/durable-ai-budget-execution.ts database/ai/durable-ai-chat.ts database/ai/durable-ai-orchestration.ts
+          pnpm exec eslint database/ai/durable-ai-budget-execution.ts database/ai/durable-ai-chat.ts database/ai/durable-ai-orchestration.ts
+          git rm .github/workflows/task6-lint-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add database/ai/durable-ai-budget-execution.ts database/ai/durable-ai-chat.ts database/ai/durable-ai-orchestration.ts
+          git diff --cached --check
+          git commit -m "chore(ai): remove unused durable imports"
+          git push origin HEAD:${GITHUB_REF_NAME}
