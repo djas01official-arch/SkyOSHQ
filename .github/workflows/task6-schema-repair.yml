@@ -1,0 +1,68 @@
+name: Task 6 schema repair
+
+on:
+  push:
+    branches:
+      - feat/durable-ai-orchestration
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Task 6 branch
+        uses: actions/checkout@v6
+        with:
+          ref: feat/durable-ai-orchestration
+
+      - name: Repair only accidental schema edits
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('database/prisma/schema.prisma')
+          text = path.read_text(encoding='utf-8')
+
+          if 'AI_ORCHESTRATION' not in text:
+              raise SystemExit('AI_ORCHESTRATION is missing from BackgroundJobKind')
+
+          replacements = {
+              'organizationMemberships        OrganizationMemberships[]':
+                  'organizationMemberships        OrganizationMembership[]',
+              '@@unique([organizationId, slug], map: "organizations_active_slug_key", where: raw("((status = \'ACTIVE\'::\\"OrganizationStatus\\") AND (\\"deletedAt\\" IS NULL))"))':
+                  '@@unique([organizationId, slug], map: "workspaces_active_organization_slug_key", where: raw("((status = \'ACTIVE\'::\\"WorkspaceStatus\\") AND (\\"deletedAt\\" IS NULL))"))',
+              '  workspace        Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)':
+                  '  workspace       Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)',
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f'Expected accidental edit not found: {old}')
+              text = text.replace(old, new, 1)
+
+          comment = '''/// Global, append-only identity security evidence. Unlike AuditEvent, identity
+/// events are intentionally not assigned a tenant because authentication and
+/// operator pre-provisioning can occur before any organization membership exists.
+'''
+          marker = 'model IdentityAuditEvent {'
+          if comment not in text:
+              if marker not in text:
+                  raise SystemExit('IdentityAuditEvent marker not found')
+              text = text.replace(marker, comment + marker, 1)
+
+          path.write_text(text.rstrip('\n') + '\n', encoding='utf-8')
+          PY
+
+          rm .github/workflows/task6-schema-repair.yml
+          git diff --check
+
+      - name: Commit repaired schema
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add database/prisma/schema.prisma .github/workflows/task6-schema-repair.yml
+          git commit -m "fix(db): restore schema invariants"
+          git push origin HEAD:feat/durable-ai-orchestration
