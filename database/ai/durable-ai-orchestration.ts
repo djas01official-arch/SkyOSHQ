@@ -682,6 +682,7 @@ async function interruptedAttempt(
     where: { id: run.id },
     data: {
       completedAt: new Date(),
+      durationMs: Math.max(0, Date.now() - run.createdAt.getTime()),
       failureCode: 'durable_provider_attempt_interrupted',
       failureMessage:
         'The worker restarted after the provider execution boundary; SkyOS will not repeat the external model call.',
@@ -1510,6 +1511,7 @@ export const recoverDurableAiOrchestrationAfterExpiredLease: ExpiredLeaseRecover
       where: { id: run.id },
       data: {
         completedAt: new Date(),
+        durationMs: Math.max(0, Date.now() - run.createdAt.getTime()),
         failureCode:
           run.providerAttempted === false
             ? 'worker_lease_exhausted_before_provider'
