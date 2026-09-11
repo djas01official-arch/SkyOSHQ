@@ -68,7 +68,7 @@ resource "google_cloud_run_v2_service" "web" {
 
       env {
         name  = "AI_CHAT_MODE"
-        value = "FAST"
+        value = local.durable_ai_chat_mode
       }
 
       env {
@@ -148,6 +148,11 @@ resource "google_cloud_run_v2_service" "web" {
     precondition {
       condition     = local.web_required_secrets_configured
       error_message = "Enabling the web service requires pinned DATABASE_URL, AUTH_SECRET, and AUTH_GOOGLE_SECRET Secret Manager versions."
+    }
+
+    precondition {
+      condition     = local.durable_ai_provider_secrets_configured
+      error_message = "BALANCED, DEEP, CRITICAL, and AUTO require pinned OPENAI_API_KEY and ANTHROPIC_API_KEY Secret Manager versions."
     }
 
     precondition {
