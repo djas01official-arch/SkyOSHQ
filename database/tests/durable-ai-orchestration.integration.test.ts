@@ -338,25 +338,23 @@ test('duplicate long-mode web submissions reuse one immutable request and durabl
   let openAiCalls = 0;
   let anthropicCalls = 0;
   const registry = new LanguageModelProviderRegistry(
-    model('gemini', 'gemini-model', 'gemini-v1', 'gemini answer', () => {
+    model('gemini', 'gemini-model', 'gemini-v1', () => {
       geminiCalls += 1;
     }),
-  );
-  registry.register(
-    model('openai', 'openai-model', 'openai-v1', 'openai answer', () => {
-      openAiCalls += 1;
-    }),
-  );
-  registry.register(
-    model('anthropic', 'anthropic-model', 'anthropic-v1', 'anthropic answer', () => {
-      anthropicCalls += 1;
-    }),
+    [
+      model('openai', 'openai-model', 'openai-v1', () => {
+        openAiCalls += 1;
+      }),
+      model('anthropic', 'anthropic-model', 'anthropic-v1', () => {
+        anthropicCalls += 1;
+      }),
+    ],
   );
   const dependencies: AiConversationDependencies = {
     providers: registry,
     retrieval: retrievalDependencies,
   };
-  const assignment: BalancedAiProviderAssignment = {
+  const assignment = {
     candidates: [
       { modelKey: 'gemini-model', modelVersion: 'gemini-v1', providerKey: 'gemini' },
       { modelKey: 'openai-model', modelVersion: 'openai-v1', providerKey: 'openai' },
@@ -366,7 +364,7 @@ test('duplicate long-mode web submissions reuse one immutable request and durabl
       modelVersion: 'anthropic-v1',
       providerKey: 'anthropic',
     },
-  };
+  } as const;
   const requestId = randomUUID();
   const runtime = {
     balancedProviderConfiguration: {
@@ -383,18 +381,18 @@ test('duplicate long-mode web submissions reuse one immutable request and durabl
   const first = await submitDurableAiChatMessage(
     prisma,
     dependencies,
-    f.user.id,
-    f.workspace.id,
-    f.conversation.id,
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
     message,
     runtime,
   );
   const duplicate = await submitDurableAiChatMessage(
     prisma,
     dependencies,
-    f.user.id,
-    f.workspace.id,
-    f.conversation.id,
+    f.ownerId,
+    f.workspaceId,
+    f.conversationId,
     message,
     runtime,
   );
@@ -435,9 +433,9 @@ test('duplicate long-mode web submissions reuse one immutable request and durabl
       submitDurableAiChatMessage(
         prisma,
         dependencies,
-        f.user.id,
-        f.workspace.id,
-        f.conversation.id,
+        f.ownerId,
+        f.workspaceId,
+        f.conversationId,
         'Different immutable content for the same request identity.',
         runtime,
       ),
