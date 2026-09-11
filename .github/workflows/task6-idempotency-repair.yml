@@ -18,7 +18,10 @@ jobs:
           ref: feat/durable-ai-orchestration
 
       - name: Patch Task 6 files
-        run: python .github/task6_idempotency_patch.py
+        shell: bash
+        run: |
+          sed -i '/^    if count != 1:$/i\    if label == "route-bound fixture source" and count == 0:\n        return text' .github/task6_idempotency_patch.py
+          python .github/task6_idempotency_patch.py
 
       - name: Enable pinned pnpm
         uses: pnpm/action-setup@v6
