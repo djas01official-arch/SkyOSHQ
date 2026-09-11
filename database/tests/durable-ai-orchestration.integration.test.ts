@@ -312,6 +312,7 @@ test('durable orchestration reuses one job and never replays a provider-attempte
   assert.equal(interruptedAfter.status, AiRunStatus.FAILED);
   assert.equal(interruptedAfter.failureCode, 'durable_provider_attempt_interrupted');
   assert.equal(interruptedAfter.providerAttempted, true);
+  assert.ok(interruptedAfter.durationMs !== null);
   assert.equal(geminiCalls, 0);
   assert.equal(openAiCalls, 1);
   assert.equal(anthropicCalls, 1);
@@ -350,9 +351,12 @@ test('duplicate long-mode web submissions reuse one immutable request and durabl
       }),
     ],
   );
+  const embedding = new DeterministicLocalEmbeddingProvider();
   const dependencies: AiConversationDependencies = {
     providers: registry,
-    retrieval: retrievalDependencies,
+    retrieval: {
+      searchDependencies: { providers: new EmbeddingProviderRegistry([embedding], embedding) },
+    },
   };
   const assignment = {
     candidates: [
