@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { jsonSchemaOutputFormat } from '@anthropic-ai/sdk/helpers/json-schema';
+import type { AccessTokenProvider } from '@anthropic-ai/sdk/lib/credentials';
 
 import {
   LanguageModelProviderError,
@@ -51,8 +52,9 @@ export type AnthropicProviderClock = Readonly<{
 }>;
 
 export type AnthropicLanguageModelProviderOptions = Readonly<{
-  apiKey: string;
+  apiKey?: string;
   clock?: AnthropicProviderClock;
+  credentials?: AccessTokenProvider;
   fetch?: typeof globalThis.fetch;
   model: string;
   runtime?: string;
@@ -422,10 +424,14 @@ export class AnthropicLanguageModelProvider implements LanguageModelProvider {
   readonly #clock: AnthropicProviderClock;
 
   constructor(options: AnthropicLanguageModelProviderOptions) {
-    const apiKey = options.apiKey.trim();
+    const apiKey = options.apiKey?.trim();
+    const hasConfiguredApiKey = apiKey !== undefined && apiKey.length > 0;
+    const hasApiKey = apiKey !== undefined && isValidAnthropicApiKey(apiKey);
+    const hasCredentials = typeof options.credentials === 'function';
     if (
       !(ANTHROPIC_APPROVED_MODELS as readonly string[]).includes(options.model) ||
-      !isValidAnthropicApiKey(apiKey)
+      (hasConfiguredApiKey && !hasApiKey) ||
+      hasApiKey === hasCredentials
     ) {
       throw new LanguageModelProviderError(
         'Anthropic provider configuration is invalid.',
@@ -445,8 +451,10 @@ export class AnthropicLanguageModelProvider implements LanguageModelProvider {
         : SONNET_4_6_MAX_OUTPUT_TOKENS;
     this.#clock = options.clock ?? defaultClock;
     this.#client = new Anthropic({
-      apiKey,
+      apiKey: hasApiKey ? apiKey : null,
+      authToken: null,
       baseURL: ANTHROPIC_BASE_URL,
+      credentials: options.credentials,
       fetch: options.fetch,
       logLevel: 'off',
       maxRetries: 0,

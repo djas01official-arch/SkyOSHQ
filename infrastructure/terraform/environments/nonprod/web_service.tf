@@ -112,6 +112,15 @@ resource "google_cloud_run_v2_service" "web" {
       }
 
       dynamic "env" {
+        for_each = local.anthropic_wif_runtime_env
+
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+
+      dynamic "env" {
         for_each = var.web_secret_versions
 
         content {
@@ -153,6 +162,16 @@ resource "google_cloud_run_v2_service" "web" {
     precondition {
       condition     = trimspace(var.web_google_oauth_client_id) != ""
       error_message = "Enabling the web service requires web_google_oauth_client_id."
+    }
+
+    precondition {
+      condition     = !local.anthropic_wif_any_configured || local.anthropic_wif_required_configured
+      error_message = "Anthropic workload identity requires federation rule, organization, and Anthropic service account identifiers together."
+    }
+
+    precondition {
+      condition     = !local.anthropic_wif_any_configured || !contains(keys(var.web_secret_versions), "ANTHROPIC_API_KEY")
+      error_message = "Anthropic workload identity and ANTHROPIC_API_KEY cannot be injected into the same web revision."
     }
   }
 

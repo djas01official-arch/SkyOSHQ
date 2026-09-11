@@ -108,6 +108,54 @@ variable "web_google_oauth_client_id" {
   }
 }
 
+variable "anthropic_federation_rule_id" {
+  description = "Anthropic federation rule identifier exposed to the web runtime. This is an identifier, not a secret."
+  type        = string
+  default     = ""
+  nullable    = false
+
+  validation {
+    condition     = trimspace(var.anthropic_federation_rule_id) == "" || can(regex("^fdrl_[A-Za-z0-9_-]+$", trimspace(var.anthropic_federation_rule_id)))
+    error_message = "anthropic_federation_rule_id must be empty or a valid fdrl_ identifier."
+  }
+}
+
+variable "anthropic_organization_id" {
+  description = "Anthropic organization UUID exposed to the web runtime. This is an identifier, not a secret."
+  type        = string
+  default     = ""
+  nullable    = false
+
+  validation {
+    condition     = trimspace(var.anthropic_organization_id) == "" || can(regex("^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-8][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$", trimspace(var.anthropic_organization_id)))
+    error_message = "anthropic_organization_id must be empty or a valid UUID."
+  }
+}
+
+variable "anthropic_service_account_id" {
+  description = "Anthropic service account identifier assumed by the federated workload. This is an identifier, not a secret."
+  type        = string
+  default     = ""
+  nullable    = false
+
+  validation {
+    condition     = trimspace(var.anthropic_service_account_id) == "" || can(regex("^svac_[A-Za-z0-9_-]+$", trimspace(var.anthropic_service_account_id)))
+    error_message = "anthropic_service_account_id must be empty or a valid svac_ identifier."
+  }
+}
+
+variable "anthropic_workspace_id" {
+  description = "Optional Anthropic workspace identifier for federated tokens. This is an identifier, not a secret."
+  type        = string
+  default     = ""
+  nullable    = false
+
+  validation {
+    condition     = trimspace(var.anthropic_workspace_id) == "" || trimspace(var.anthropic_workspace_id) == "default" || can(regex("^wrkspc_[A-Za-z0-9_-]+$", trimspace(var.anthropic_workspace_id)))
+    error_message = "anthropic_workspace_id must be empty, default, or a valid wrkspc_ identifier."
+  }
+}
+
 variable "web_secret_versions" {
   description = "Pinned numeric Secret Manager versions exposed to the web runtime. This map contains version numbers only, never secret values."
   type        = map(string)

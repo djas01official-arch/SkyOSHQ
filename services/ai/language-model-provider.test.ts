@@ -150,6 +150,44 @@ test('production selects only explicitly configured providers and never falls ba
   }
 });
 
+test('production selects Anthropic with workload identity credentials and no API key', () => {
+  const registry = createDefaultLanguageModelProviderRegistry({
+    anthropicApiKey: ' ',
+    anthropicCredentials: async () => ({
+      expiresAt: null,
+      token: 'sk-ant-oat01-offline',
+    }),
+    configuredProvider: 'anthropic',
+    model: 'claude-sonnet-5',
+    runtime: 'production',
+  });
+
+  assert.equal(registry.getCurrent().providerKey, 'anthropic');
+  assert.deepEqual(
+    registry.list().map((provider) => provider.modelKey),
+    ['claude-sonnet-5', 'claude-sonnet-4-6'],
+  );
+});
+
+test('production builds Anthropic workload identity credentials from federation settings', () => {
+  const registry = createDefaultLanguageModelProviderRegistry({
+    anthropicApiKey: ' ',
+    anthropicFederationRuleId: 'fdrl_test-rule',
+    anthropicIdentityTokenProvider: () => 'header.payload.signature',
+    anthropicOrganizationId: '123e4567-e89b-42d3-a456-426614174000',
+    anthropicServiceAccountId: 'svac_test-service-account',
+    anthropicTokenExchangeFetch: async () => {
+      throw new Error('A registry construction test must not exchange a token.');
+    },
+    anthropicWorkspaceId: 'wrkspc_test-workspace',
+    configuredProvider: 'anthropic',
+    model: 'claude-sonnet-5',
+    runtime: 'production',
+  });
+
+  assert.equal(registry.getCurrent().providerKey, 'anthropic');
+});
+
 test('BALANCED production registry resolves every approved cross-provider identity', () => {
   const expectedIdentities = [
     'anthropic/claude-sonnet-4-6/messages-json-schema-v1',
