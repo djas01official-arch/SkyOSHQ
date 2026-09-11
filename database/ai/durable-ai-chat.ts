@@ -1,6 +1,9 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   AiConversationStatus,
   AiMessageRole,
+  type AiRoutingDecision,
   type AiRun,
   type PrismaClient,
 } from '../generated/client/client';
@@ -61,13 +64,12 @@ import type { FixedPrecisionUsd } from '../../services/ai/language-model-pricing
 
 const MAX_MESSAGE_CHARACTERS = 4_000;
 const MAX_REQUESTS_PER_MINUTE = 10;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 type MultiMode = 'BALANCED' | 'DEEP' | 'CRITICAL';
 type ConfiguredMode = 'FAST' | MultiMode | 'AUTO';
 type MultiAssignment =
-  | BalancedAiProviderAssignment
-  | DeepAiProviderAssignment
-  | CriticalAiProviderAssignment;
+  BalancedAiProviderAssignment | DeepAiProviderAssignment | CriticalAiProviderAssignment;
 type EnabledBudgetConfiguration = Extract<
   ReturnType<typeof parseAiBudgetRuntimeConfiguration>,
   { enforcement: 'ENABLED' }
@@ -79,6 +81,7 @@ export type DurableAiChatRuntime = Readonly<{
   criticalProviderConfiguration?: CriticalAiRuntimeConfiguration;
   deepProviderConfiguration?: DeepAiRuntimeConfiguration;
   mode?: string;
+  requestId?: string;
 }>;
 
 export type DurableAiChatSubmissionResult =
@@ -149,12 +152,96 @@ function routing(
   }
 }
 
+function durableRequestId(value: string | undefined): string {
+  if (value === undefined) return randomUUID();
+  const normalized = value.trim();
+  if (!UUID_PATTERN.test(normalized)) {
+    throw new AiConversationValidationError(
+      'The AI request identity is invalid.',
+      'chat_request_id_invalid',
+    );
+  }
+  return normalized;
+}
+
+function routingDecisionMatches(
+  decision: AiRoutingDecision,
+  resolved: ReturnType<typeof routing>,
+  conversationId: string,
+  userMessageId: string,
+  workspaceId: string,
+): boolean {
+  const input = resolved.analysis.routingInput;
+  return (
+    decision.workspaceId === workspaceId &&
+    decision.conversationId === conversationId &&
+    decision.userMessageId === userMessageId &&
+    decision.configuredMode === resolved.configuredMode &&
+    decision.resolvedMode === resolved.resolvedMode &&
+    decision.reason === resolved.decision.reason &&
+    decision.signals.length === resolved.analysis.signals.length &&
+    decision.signals.every((signal, index) => signal === resolved.analysis.signals[index]) &&
+    decision.complexity === input.complexity &&
+    decision.risk === input.risk &&
+    decision.ambiguity === input.ambiguity &&
+    decision.verificationNeed === input.verificationNeed &&
+    decision.expectedEffort === input.expectedEffort
+  );
+}
+
+async function getOrCreateRoutingDecision(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+  conversationId: string,
+  userMessageId: string,
+  resolved: ReturnType<typeof routing>,
+): Promise<AiRoutingDecision> {
+  const existing = await prisma.aiRoutingDecision.findUnique({ where: { userMessageId } });
+  if (existing) {
+    if (!routingDecisionMatches(existing, resolved, conversationId, userMessageId, workspaceId)) {
+      throw new AiConversationError(
+        'The AI request identity is already bound to a different routing decision.',
+        'routing_audit_conflict',
+      );
+    }
+    return existing;
+  }
+  try {
+    return await createAiRoutingDecision(prisma, {
+      actorUserId,
+      analysis: resolved.analysis,
+      configuredMode: resolved.configuredMode,
+      conversationId,
+      decision: resolved.decision,
+      userMessageId,
+      workspaceId,
+    });
+  } catch {
+    const raced = await prisma.aiRoutingDecision.findUnique({ where: { userMessageId } });
+    if (raced) {
+      if (!routingDecisionMatches(raced, resolved, conversationId, userMessageId, workspaceId)) {
+        throw new AiConversationError(
+          'The AI request identity is already bound to a different routing decision.',
+          'routing_audit_conflict',
+        );
+      }
+      return raced;
+    }
+    throw new AiConversationError(
+      'The AI request could not be recorded for execution.',
+      'routing_audit_failed',
+    );
+  }
+}
+
 async function persistLongModeMessage(
   prisma: PrismaClient,
   actorUserId: string,
   workspaceId: string,
   conversationId: string,
   message: string,
+  requestId: string,
 ) {
   await requireAiAccess(prisma, actorUserId, workspaceId);
   const conversation = await prisma.aiConversation.findFirst({
@@ -171,27 +258,46 @@ async function persistLongModeMessage(
       'conversation_not_found',
     );
   }
-  const recent = await prisma.aiMessage.count({
-    where: {
-      authorUserId: actorUserId,
-      createdAt: { gte: new Date(Date.now() - 60_000) },
-      role: AiMessageRole.USER,
-      workspaceId,
-    },
-  });
-  if (recent >= MAX_REQUESTS_PER_MINUTE) {
-    throw new AiConversationRateLimitError(
-      'Too many AI requests. Try again in a minute.',
-      'rate_limited',
-    );
-  }
   const acceptedAt = new Date();
   return prisma.$transaction(async (transaction) => {
+    const lockKey = `ai-chat-submit:${requestId}`;
+    await transaction.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+    const existing = await transaction.aiMessage.findUnique({ where: { id: requestId } });
+    if (existing) {
+      if (
+        existing.authorUserId !== actorUserId ||
+        existing.workspaceId !== workspaceId ||
+        existing.conversationId !== conversationId ||
+        existing.role !== AiMessageRole.USER ||
+        existing.content !== message
+      ) {
+        throw new AiConversationError(
+          'The AI request identity is already bound to different immutable input.',
+          'chat_submission_conflict',
+        );
+      }
+      return existing;
+    }
+    const recent = await transaction.aiMessage.count({
+      where: {
+        authorUserId: actorUserId,
+        createdAt: { gte: new Date(Date.now() - 60_000) },
+        role: AiMessageRole.USER,
+        workspaceId,
+      },
+    });
+    if (recent >= MAX_REQUESTS_PER_MINUTE) {
+      throw new AiConversationRateLimitError(
+        'Too many AI requests. Try again in a minute.',
+        'rate_limited',
+      );
+    }
     const created = await transaction.aiMessage.create({
       data: {
         authorUserId: actorUserId,
         content: message,
         conversationId,
+        id: requestId,
         role: AiMessageRole.USER,
         workspaceId,
       },
@@ -487,6 +593,54 @@ async function preflightLongMode(
   }
 }
 
+async function existingQueuedSubmission(
+  prisma: PrismaClient,
+  actorUserId: string,
+  workspaceId: string,
+  routingDecisionId: string,
+) {
+  return prisma.backgroundJob.findFirst({
+    where: {
+      idempotencyKey: `ai-orchestration:${routingDecisionId}`,
+      requestedByUserId: actorUserId,
+      workspaceId,
+    },
+    select: { domainJobId: true, id: true },
+  });
+}
+
+async function prepareOrReuseGroundedContext(
+  prisma: PrismaClient,
+  dependencies: AiConversationDependencies,
+  actorUserId: string,
+  workspaceId: string,
+  message: string,
+  routingDecisionId: string,
+) {
+  const existing = await prisma.aiRetrievalSnapshot.findFirst({
+    where: { createdByUserId: actorUserId, routingDecisionId, workspaceId },
+    select: { id: true },
+  });
+  if (existing) return Object.freeze({ groundedContextId: existing.id });
+  try {
+    return await prepareOrchestratedChatRequest(
+      prisma,
+      dependencies,
+      actorUserId,
+      workspaceId,
+      message,
+      routingDecisionId,
+    );
+  } catch (error) {
+    const raced = await prisma.aiRetrievalSnapshot.findFirst({
+      where: { createdByUserId: actorUserId, routingDecisionId, workspaceId },
+      select: { id: true },
+    });
+    if (raced) return Object.freeze({ groundedContextId: raced.id });
+    throw error;
+  }
+}
+
 export async function submitDurableAiChatMessage(
   prisma: PrismaClient,
   dependencies: AiConversationDependencies,
@@ -522,12 +676,14 @@ export async function submitDurableAiChatMessage(
     return result;
   }
 
+  const requestId = durableRequestId(runtime.requestId);
   const persisted = await persistLongModeMessage(
     prisma,
     actorUserId,
     workspaceId,
     conversationId,
     message,
+    requestId,
   );
   const resolved = routing(
     selected,
@@ -540,25 +696,30 @@ export async function submitDurableAiChatMessage(
       'chat_routing_changed',
     );
   }
-  let routingDecision;
-  try {
-    routingDecision = await createAiRoutingDecision(prisma, {
-      actorUserId,
-      analysis: resolved.analysis,
-      configuredMode: resolved.configuredMode,
-      conversationId,
-      decision: resolved.decision,
-      userMessageId: persisted.id,
-      workspaceId,
-    });
-  } catch {
-    throw new AiConversationError(
-      'The AI request could not be recorded for execution.',
-      'routing_audit_failed',
-    );
-  }
+  const routingDecision = await getOrCreateRoutingDecision(
+    prisma,
+    actorUserId,
+    workspaceId,
+    conversationId,
+    persisted.id,
+    resolved,
+  );
 
   const mode = resolved.resolvedMode;
+  const existingJob = await existingQueuedSubmission(
+    prisma,
+    actorUserId,
+    workspaceId,
+    routingDecision.id,
+  );
+  if (existingJob) {
+    return Object.freeze({
+      jobId: existingJob.id,
+      mode,
+      orchestrationId: existingJob.domainJobId,
+      queued: true as const,
+    });
+  }
   const assignment = resolveAssignment(dependencies, mode, runtime);
   const budgetConfiguration = parseBudgetConfiguration(runtime.budgetEnvironment ?? process.env);
   let budgetExecution: AiBudgetExecutionContext | undefined;
@@ -577,7 +738,7 @@ export async function submitDurableAiChatMessage(
 
   let prepared;
   try {
-    prepared = await prepareOrchestratedChatRequest(
+    prepared = await prepareOrReuseGroundedContext(
       prisma,
       dependencies,
       actorUserId,
@@ -622,10 +783,12 @@ export async function submitDurableAiChatMessage(
       queued: true as const,
     });
   } catch (error) {
-    const existing = await prisma.backgroundJob.findUnique({
-      where: { idempotencyKey: `ai-orchestration:${routingDecision.id}` },
-      select: { domainJobId: true, id: true },
-    });
+    const existing = await existingQueuedSubmission(
+      prisma,
+      actorUserId,
+      workspaceId,
+      routingDecision.id,
+    );
     if (existing) {
       return Object.freeze({
         jobId: existing.id,

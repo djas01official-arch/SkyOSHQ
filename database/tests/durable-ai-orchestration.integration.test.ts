@@ -19,25 +19,21 @@ import {
   WorkspaceRole,
   WorkspaceStatus,
 } from '../generated/client/client';
-import {
-  claimBackgroundJobById,
-  executeClaimedBackgroundJob,
-} from '../background-jobs/runtime';
+import { claimBackgroundJobById, executeClaimedBackgroundJob } from '../background-jobs/runtime';
 import { createSkyOsBackgroundJobHandler } from '../background-jobs/skyos-handlers';
-import { createAiConversation, type AiConversationDependencies } from '../ai/ai-conversations';
 import {
-  createAiOrchestrationRun,
-  startAiOrchestration,
-} from '../ai/ai-orchestrations';
+  AiConversationError,
+  createAiConversation,
+  type AiConversationDependencies,
+} from '../ai/ai-conversations';
+import { submitDurableAiChatMessage } from '../ai/durable-ai-chat';
+import { createAiOrchestrationRun, startAiOrchestration } from '../ai/ai-orchestrations';
 import {
   DURABLE_AI_ORCHESTRATION_JOB_KIND,
   queueDurableAiOrchestration,
 } from '../ai/durable-ai-orchestration';
 import { createGroundedContext, persistGroundedContext } from '../ai/grounded-context';
-import {
-  createAiRoutingDecision,
-  explicitAiRoutingAudit,
-} from '../ai/ai-routing-decisions';
+import { createAiRoutingDecision, explicitAiRoutingAudit } from '../ai/ai-routing-decisions';
 import type { KnowledgeRetrievalResult } from '../ai/knowledge-retrieval';
 import { createDefaultDocumentParserRegistry } from '../../services/document-processing/document-parser';
 import {
@@ -206,25 +202,10 @@ test('durable orchestration reuses one job and never replays a provider-attempte
   let openAiCalls = 0;
   let anthropicCalls = 0;
 
-  const openai = model(
-    'openai',
-    'gpt-5.6-terra',
-    'responses-json-schema-v1',
-    () => openAiCalls++,
-  );
+  const openai = model('openai', 'gpt-5.6-terra', 'responses-json-schema-v1', () => openAiCalls++);
   const registry = new LanguageModelProviderRegistry(openai, [
-    model(
-      'anthropic',
-      'claude-sonnet-5',
-      'messages-json-schema-v1',
-      () => anthropicCalls++,
-    ),
-    model(
-      'gemini',
-      'gemini-3.6-flash',
-      'interactions-json-schema-v1',
-      () => geminiCalls++,
-    ),
+    model('anthropic', 'claude-sonnet-5', 'messages-json-schema-v1', () => anthropicCalls++),
+    model('gemini', 'gemini-3.6-flash', 'interactions-json-schema-v1', () => geminiCalls++),
   ]);
   const embedding = new DeterministicLocalEmbeddingProvider();
   const dependencies: AiConversationDependencies = {
@@ -288,20 +269,14 @@ test('durable orchestration reuses one job and never replays a provider-attempte
   );
 
   await startAiOrchestration(prisma, f.ownerId, f.workspaceId, first.orchestration.id);
-  const interrupted = await createAiOrchestrationRun(
-    prisma,
-    registry,
-    f.ownerId,
-    f.workspaceId,
-    {
-      modelKey: assignment.candidates[0].modelKey,
-      modelVersion: assignment.candidates[0].modelVersion,
-      orchestrationId: first.orchestration.id,
-      providerKey: assignment.candidates[0].providerKey,
-      role: AiOrchestrationRole.CANDIDATE,
-      step: 0,
-    },
-  );
+  const interrupted = await createAiOrchestrationRun(prisma, registry, f.ownerId, f.workspaceId, {
+    modelKey: assignment.candidates[0].modelKey,
+    modelVersion: assignment.candidates[0].modelVersion,
+    orchestrationId: first.orchestration.id,
+    providerKey: assignment.candidates[0].providerKey,
+    role: AiOrchestrationRole.CANDIDATE,
+    step: 0,
+  });
   await prisma.aiRun.update({
     where: { id: interrupted.id },
     data: { providerAttempted: true },
@@ -346,10 +321,7 @@ test('durable orchestration reuses one job and never replays a provider-attempte
   });
   assert.equal(orchestration.status, AiOrchestrationStatus.PARTIALLY_SUCCEEDED);
   assert.ok(orchestration.finalRunId);
-  assert.equal(
-    await prisma.aiRun.count({ where: { orchestrationId: orchestration.id } }),
-    3,
-  );
+  assert.equal(await prisma.aiRun.count({ where: { orchestrationId: orchestration.id } }), 3);
 
   const job = await prisma.backgroundJob.findUniqueOrThrow({
     where: { id: first.job.id },
@@ -358,4 +330,119 @@ test('durable orchestration reuses one job and never replays a provider-attempte
   assert.equal(job.status, BackgroundJobStatus.SUCCEEDED);
   assert.equal(job.attemptCount, 1);
   assert.equal(job.attempts.length, 1);
+});
+
+test('duplicate long-mode web submissions reuse one immutable request and durable job', async () => {
+  const f = await fixture();
+  let geminiCalls = 0;
+  let openAiCalls = 0;
+  let anthropicCalls = 0;
+  const registry = new LanguageModelProviderRegistry(
+    model('gemini', 'gemini-model', 'gemini-v1', 'gemini answer', () => {
+      geminiCalls += 1;
+    }),
+  );
+  registry.register(
+    model('openai', 'openai-model', 'openai-v1', 'openai answer', () => {
+      openAiCalls += 1;
+    }),
+  );
+  registry.register(
+    model('anthropic', 'anthropic-model', 'anthropic-v1', 'anthropic answer', () => {
+      anthropicCalls += 1;
+    }),
+  );
+  const dependencies: AiConversationDependencies = {
+    providers: registry,
+    retrieval: retrievalDependencies,
+  };
+  const assignment: BalancedAiProviderAssignment = {
+    candidates: [
+      { modelKey: 'gemini-model', modelVersion: 'gemini-v1', providerKey: 'gemini' },
+      { modelKey: 'openai-model', modelVersion: 'openai-v1', providerKey: 'openai' },
+    ],
+    synthesizer: {
+      modelKey: 'anthropic-model',
+      modelVersion: 'anthropic-v1',
+      providerKey: 'anthropic',
+    },
+  };
+  const requestId = randomUUID();
+  const runtime = {
+    balancedProviderConfiguration: {
+      candidateA: assignment.candidates[0],
+      candidateB: assignment.candidates[1],
+      synthesizer: assignment.synthesizer,
+    },
+    budgetEnvironment: { AI_BUDGET_ENFORCEMENT: 'DISABLED' },
+    mode: 'BALANCED',
+    requestId,
+  } as const;
+  const message = 'Queue this retry-safe BALANCED request.';
+
+  const first = await submitDurableAiChatMessage(
+    prisma,
+    dependencies,
+    f.user.id,
+    f.workspace.id,
+    f.conversation.id,
+    message,
+    runtime,
+  );
+  const duplicate = await submitDurableAiChatMessage(
+    prisma,
+    dependencies,
+    f.user.id,
+    f.workspace.id,
+    f.conversation.id,
+    message,
+    runtime,
+  );
+  if (first.mode === 'FAST' || duplicate.mode === 'FAST') {
+    assert.fail('BALANCED submissions must remain durable.');
+  }
+
+  assert.equal(duplicate.jobId, first.jobId);
+  assert.equal(duplicate.orchestrationId, first.orchestrationId);
+  assert.equal(geminiCalls + openAiCalls + anthropicCalls, 0);
+  const persistedMessage = await prisma.aiMessage.findUniqueOrThrow({ where: { id: requestId } });
+  assert.equal(persistedMessage.content, message);
+  assert.equal(persistedMessage.role, AiMessageRole.USER);
+  const decision = await prisma.aiRoutingDecision.findUniqueOrThrow({
+    where: { userMessageId: requestId },
+  });
+  assert.equal(decision.configuredMode, 'BALANCED');
+  assert.equal(decision.resolvedMode, 'BALANCED');
+  assert.equal(
+    await prisma.aiRetrievalSnapshot.count({ where: { routingDecisionId: decision.id } }),
+    1,
+  );
+  assert.equal(
+    await prisma.backgroundJob.count({
+      where: { idempotencyKey: `ai-orchestration:${decision.id}` },
+    }),
+    1,
+  );
+  assert.equal(
+    await prisma.aiOrchestration.count({
+      where: { id: first.orchestrationId, userMessageId: requestId },
+    }),
+    1,
+  );
+
+  await assert.rejects(
+    () =>
+      submitDurableAiChatMessage(
+        prisma,
+        dependencies,
+        f.user.id,
+        f.workspace.id,
+        f.conversation.id,
+        'Different immutable content for the same request identity.',
+        runtime,
+      ),
+    (error: unknown) =>
+      error instanceof AiConversationError && error.code === 'chat_submission_conflict',
+  );
+  assert.equal(await prisma.aiMessage.count({ where: { id: requestId } }), 1);
 });

@@ -70,6 +70,7 @@ export async function submitMessageAction(
     return { error: 'The AI conversation is unavailable. Refresh and try again.' };
   }
   try {
+    const requestId = value(formData, 'requestId');
     await submitDurableAiChatMessage(
       prisma,
       aiConversationDependencies,
@@ -77,6 +78,7 @@ export async function submitMessageAction(
       context.activeWorkspace.id,
       conversationId,
       value(formData, 'message'),
+      requestId ? { requestId } : {},
     );
   } catch (error) {
     if (

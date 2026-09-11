@@ -26,7 +26,7 @@ Approved Task 5 budget confirmations follow the same split: approved FAST resume
 
 `BackgroundJob` is the Worker Pool execution identity and owns claim/lease/attempt/retry state. `AiOrchestration` is the domain lifecycle identity and owns AI mode, immutable policy identity, GroundedContext, child runs, final result, and aggregate provider telemetry.
 
-The durable job idempotency key is derived from the immutable routing decision. Enqueue is serialized with a PostgreSQL advisory transaction lock, and `BackgroundJob.idempotencyKey` remains the database uniqueness barrier. A duplicate web request or retry therefore reuses the same durable job instead of silently creating a second orchestration.
+The browser assigns each unchanged long-mode draft a client request UUID. SkyOS serializes that identity with a PostgreSQL advisory transaction lock and persists it as the immutable user-message identity; reusing the UUID with different content fails closed. The deterministic routing decision is then reused for that same message, a route-bound GroundedContext is created at most once, and the durable job idempotency key is derived from the immutable routing decision. `BackgroundJob.idempotencyKey` remains the final database uniqueness barrier. A duplicate web request, lost-response retry, or duplicate queue submission therefore converges on the same message, route, GroundedContext, orchestration, and durable job instead of silently creating another execution.
 
 ### Provider-call crash boundary
 

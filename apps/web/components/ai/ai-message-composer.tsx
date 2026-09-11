@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState } from 'react';
+import { useActionState, useState } from 'react';
 
 import { submitMessageAction, type AiMessageActionState } from '@/app/ai/actions';
 import { Button } from '@/components/ui/button';
@@ -10,10 +10,12 @@ const initialState: AiMessageActionState = { error: null };
 
 export function AiMessageComposer({ conversationId }: Readonly<{ conversationId: string }>) {
   const [state, formAction, pending] = useActionState(submitMessageAction, initialState);
+  const [requestId, setRequestId] = useState('');
 
   return (
     <form action={formAction} className="mt-6" data-ai-message-form="message">
       <input name="conversationId" type="hidden" value={conversationId} />
+      <input name="requestId" type="hidden" value={requestId} />
       <label className="sr-only" htmlFor="ai-message">
         Message
       </label>
@@ -22,6 +24,7 @@ export function AiMessageComposer({ conversationId }: Readonly<{ conversationId:
         id="ai-message"
         maxLength={4000}
         name="message"
+        onChange={() => setRequestId(crypto.randomUUID())}
         placeholder="Ask about workspace Knowledge"
         required
       />
