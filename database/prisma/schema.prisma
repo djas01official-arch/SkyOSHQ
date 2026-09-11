@@ -84,6 +84,7 @@ enum BackgroundJobKind {
   DOCUMENT_EXTRACTION
   KNOWLEDGE_CHUNKING
   KNOWLEDGE_EMBEDDING
+  AI_ORCHESTRATION
 }
 
 enum BackgroundJobStatus {
@@ -325,7 +326,7 @@ model User {
   identityAuditEventsAsTarget    IdentityAuditEvent[]        @relation("IdentityAuditTarget")
   createdTasks                   Task[]                     @relation("TaskCreator")
   assignedTasks                  Task[]                     @relation("TaskAssignee")
-  organizationMemberships        OrganizationMembership[]
+  organizationMemberships        OrganizationMemberships[]
   sessions                       Session[]
   workspaceMemberships           WorkspaceMembership[]
 
@@ -395,9 +396,6 @@ model AuditEvent {
   @@map("audit_events")
 }
 
-/// Global, append-only identity security evidence. Unlike AuditEvent, identity
-/// events are intentionally not assigned a tenant because authentication and
-/// operator pre-provisioning can occur before any organization membership exists.
 model IdentityAuditEvent {
   id                 String   @id @default(uuid()) @db.Uuid
   actorUserId        String?  @db.Uuid
@@ -495,7 +493,7 @@ model Workspace {
   aiBudgetExecutionClaims AiBudgetExecutionClaim[]
   tasks                  Task[]
 
-  @@unique([organizationId, slug], map: "workspaces_active_organization_slug_key", where: raw("((status = 'ACTIVE'::\"WorkspaceStatus\") AND (\"deletedAt\" IS NULL))"))
+  @@unique([organizationId, slug], map: "organizations_active_slug_key", where: raw("((status = 'ACTIVE'::\"OrganizationStatus\") AND (\"deletedAt\" IS NULL))"))
   @@index([organizationId, status])
   @@index([deletedAt])
   @@index([createdByUserId])
@@ -1153,7 +1151,7 @@ model AiRunCostEvidence {
   observedAt      DateTime?               @db.Timestamptz(6)
   createdAt       DateTime                @default(now()) @db.Timestamptz(6)
   run             AiRun                   @relation(fields: [runId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: Restrict, map: "ai_run_cost_evidence_run_workspace_fkey")
-  workspace       Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  workspace        Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([source, providerKey, sourceReference], map: "ai_run_cost_evidence_source_provider_reference_key")
   @@index([runId, createdAt])
