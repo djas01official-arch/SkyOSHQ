@@ -1,0 +1,54 @@
+name: Task 6 test repair
+
+on:
+  push:
+    branches:
+      - feat/durable-ai-orchestration
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Task 6 branch
+        uses: actions/checkout@v6
+        with:
+          ref: feat/durable-ai-orchestration
+
+      - name: Patch Task 6 test
+        run: python .github/task6_test_patch.py
+
+      - name: Enable pinned pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Format test
+        run: pnpm exec prettier --write database/tests/durable-ai-orchestration.integration.test.ts
+
+      - name: Commit Task 6 test repair
+        shell: bash
+        run: |
+          rm .github/task6_test_patch.py .github/workflows/task6-test-repair.yml
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            database/tests/durable-ai-orchestration.integration.test.ts \
+            .github/task6_test_patch.py \
+            .github/workflows/task6-test-repair.yml
+          git diff --cached --check
+          git commit -m "test(ai): cover durable client retries"
+          git push origin HEAD:feat/durable-ai-orchestration
