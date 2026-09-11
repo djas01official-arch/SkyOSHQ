@@ -3,9 +3,10 @@ import 'dotenv/config';
 import { PrismaPg } from '@prisma/adapter-pg';
 
 import {
-  createDomainBackgroundJobHandler,
-  recoverDomainJobAfterExpiredLease,
-} from '../background-jobs/domain-handlers';
+  createSkyOsBackgroundJobHandler,
+  recoverSkyOsJobAfterExpiredLease,
+} from '../background-jobs/skyos-handlers';
+import { createAiRuntimeDependencies } from '../ai/ai-runtime-dependencies';
 import { PrismaClient } from '../generated/client/client';
 import { assertPgvectorAvailable } from '../knowledge/vector-health';
 import { createDefaultDocumentParserRegistry } from '../../services/document-processing/document-parser';
@@ -31,15 +32,18 @@ async function main(): Promise<void> {
     runtime: process.env.NODE_ENV ?? 'development',
   });
   const dependencies = {
-    documentProcessing: {
-      parsers: createDefaultDocumentParserRegistry(),
-      storage: knowledgeStorage.storage,
-    },
-    knowledgeChunking: {
-      strategies: createDefaultKnowledgeChunkingStrategyRegistry(),
-    },
-    knowledgeEmbedding: {
-      providers: createDefaultEmbeddingProviderRegistry(),
+    ai: createAiRuntimeDependencies(),
+    domain: {
+      documentProcessing: {
+        parsers: createDefaultDocumentParserRegistry(),
+        storage: knowledgeStorage.storage,
+      },
+      knowledgeChunking: {
+        strategies: createDefaultKnowledgeChunkingStrategyRegistry(),
+      },
+      knowledgeEmbedding: {
+        providers: createDefaultEmbeddingProviderRegistry(),
+      },
     },
   };
 
@@ -47,10 +51,10 @@ async function main(): Promise<void> {
     await assertPgvectorAvailable(prisma);
     console.log(`SkyOS background worker ${config.workerId} started.`);
     await runBackgroundWorker({
-      handler: createDomainBackgroundJobHandler(prisma, dependencies),
+      handler: createSkyOsBackgroundJobHandler(prisma, dependencies),
       pollIntervalMs: config.pollIntervalMs,
       prisma,
-      recoveryHook: recoverDomainJobAfterExpiredLease,
+      recoveryHook: recoverSkyOsJobAfterExpiredLease,
       recoveryIntervalMs: config.recoveryIntervalMs,
       runtime: config.runtime,
       signal: controller.signal,
