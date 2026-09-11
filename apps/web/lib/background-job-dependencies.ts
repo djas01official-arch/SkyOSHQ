@@ -7,7 +7,10 @@ import { getKnowledgeAttachmentDependencies } from '@/lib/knowledge-storage';
 
 export const documentParsers = createDefaultDocumentParserRegistry();
 export const chunkingStrategies = createDefaultKnowledgeChunkingStrategyRegistry();
-export const embeddingProviders = createDefaultEmbeddingProviderRegistry();
+
+export function getEmbeddingProviders() {
+  return createDefaultEmbeddingProviderRegistry();
+}
 
 export function getDomainBackgroundJobDependencies(): DomainBackgroundJobDependencies {
   return {
@@ -19,7 +22,7 @@ export function getDomainBackgroundJobDependencies(): DomainBackgroundJobDepende
       strategies: chunkingStrategies,
     },
     knowledgeEmbedding: {
-      providers: embeddingProviders,
+      providers: getEmbeddingProviders(),
     },
   };
 }

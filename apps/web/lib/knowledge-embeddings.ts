@@ -8,8 +8,8 @@ import {
 } from '../../../services/document-processing/processing-queue';
 
 import {
-  embeddingProviders,
   getDomainBackgroundJobDependencies,
+  getEmbeddingProviders,
 } from '@/lib/background-job-dependencies';
 import { prisma } from '@/lib/prisma';
 
@@ -27,6 +27,8 @@ const queue =
       });
 
 export const knowledgeEmbeddingRequestDependencies: KnowledgeEmbeddingRequestDependencies = {
-  providers: embeddingProviders,
+  get providers() {
+    return getEmbeddingProviders();
+  },
   queue,
 };

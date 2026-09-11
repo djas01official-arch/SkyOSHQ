@@ -42,8 +42,33 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
       }
 
       env {
+        name  = "GOOGLE_CLOUD_PROJECT"
+        value = var.project_id
+      }
+
+      env {
         name  = "EMBEDDING_PROVIDER"
-        value = "local"
+        value = "vertex"
+      }
+
+      env {
+        name  = "EMBEDDING_MODEL"
+        value = "gemini-embedding-001"
+      }
+
+      env {
+        name  = "EMBEDDING_MODEL_VERSION"
+        value = "retrieval-v1"
+      }
+
+      env {
+        name  = "EMBEDDING_DIMENSIONS"
+        value = "768"
+      }
+
+      env {
+        name  = "EMBEDDING_LOCATION"
+        value = local.primary_region
       }
 
       env {
@@ -89,6 +114,7 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
 
   depends_on = [
     google_project_service.cloud_run,
+    google_project_iam_member.worker_vertex_prediction_runtime,
     google_secret_manager_secret_iam_member.worker_database_url_accessor,
   ]
 }

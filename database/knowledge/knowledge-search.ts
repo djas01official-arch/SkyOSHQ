@@ -380,7 +380,7 @@ async function embedQuery(
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     const vectors = await Promise.race([
-      provider.embed([query], { signal: controller.signal }),
+      provider.embed([query], { signal: controller.signal, task: 'retrieval-query' }),
       new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(() => {
           reject(
