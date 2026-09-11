@@ -65,6 +65,33 @@ Production builds do not load it. Server-only values such as `DATABASE_URL`,
 `AUTH_SECRET`, OAuth secrets, and provider keys are read by server modules at
 runtime and are not `NEXT_PUBLIC_*` values or browser-bundle configuration.
 
+### Anthropic authentication on Google Cloud
+
+Cloud Run should authenticate to Anthropic with Workload Identity Federation
+instead of a long-lived API key. The web service obtains a Google-signed OIDC
+identity token from the metadata server with the exact audience
+`https://api.anthropic.com`; the official Anthropic SDK exchanges and refreshes
+it as a short-lived access token.
+
+Configure these non-secret runtime identifiers together:
+
+- `ANTHROPIC_FEDERATION_RULE_ID` (`fdrl_...`)
+- `ANTHROPIC_ORGANIZATION_ID` (organization UUID)
+- `ANTHROPIC_SERVICE_ACCOUNT_ID` (`svac_...`)
+- `ANTHROPIC_WORKSPACE_ID` (`wrkspc_...` or `default`, optional)
+
+The Anthropic federation rule must match both the immutable numeric `sub` and
+email claims of the dedicated Cloud Run service account, and must require the
+Anthropic audience. Keep the rule scoped only to the intended workspace.
+
+`ANTHROPIC_API_KEY` takes precedence over federated credentials. A WIF test
+revision must therefore omit `ANTHROPIC_API_KEY` from `web_secret_versions`;
+otherwise the test continues using the static key. Keep the existing secret and
+key available for rollback until a real request from the WIF revision succeeds,
+then revoke them through a separately reviewed operation. The checked-in
+non-production Terraform continues to select Gemini, so adding WIF identifiers
+alone does not switch the active provider or create Anthropic spend.
+
 ## Cloud Run deployment boundary
 
 When a separate, approved infrastructure task creates resources, the web service
