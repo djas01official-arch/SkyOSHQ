@@ -32,6 +32,17 @@ logs
 *.tmp
 *.tsbuildinfo
 
+# Terraform local configuration, state, plans, and backend metadata must never
+# enter a Docker build context. Committed *.tf and *.tfvars.example files remain
+# available when needed outside image builds.
+**/.terraform
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/*.tfvars
+**/*.tfvars.json
+**/backend.hcl
+
 # Tests are not needed to build or execute any Cloud Run runtime role.
 **/*.test.*
 **/tests
