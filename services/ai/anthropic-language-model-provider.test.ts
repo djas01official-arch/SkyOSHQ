@@ -365,6 +365,22 @@ test('maps a stateless grounded Messages API request through the official SDK', 
   assert.equal(result.modelKey, MODEL);
 });
 
+test('uses federated bearer credentials without sending an API key', async () => {
+  const transport = fakeFetch(() => jsonResponse(messageBody()));
+  const adapter = new AnthropicLanguageModelProvider({
+    credentials: async () => ({ expiresAt: null, token: 'sk-ant-oat01-offline' }),
+    fetch: transport.fetch,
+    model: MODEL,
+    runtime: 'test',
+  });
+
+  await adapter.generate(baseRequest);
+  const sent = transport.calls[0]!;
+  assert.equal(sent.headers.get('x-api-key'), null);
+  assert.equal(sent.headers.get('authorization'), 'Bearer sk-ant-oat01-offline');
+  assert.match(sent.headers.get('anthropic-beta') ?? '', /oauth/u);
+});
+
 test('maps the provider-neutral output-token limit to max_tokens', async () => {
   const transport = fakeFetch(() => jsonResponse(messageBody()));
   await provider(transport.fetch).generate({
@@ -650,6 +666,12 @@ test('automated environments cannot accidentally use the real Anthropic transpor
     { apiKey: TEST_API_KEY, model: 'claude-sonnet-4-5' },
     { apiKey: '   ', model: MODEL },
     { apiKey: '<server-secret>', model: MODEL },
+    { model: MODEL },
+    {
+      apiKey: TEST_API_KEY,
+      credentials: async () => ({ expiresAt: null, token: 'sk-ant-oat01-offline' }),
+      model: MODEL,
+    },
   ]) {
     assert.throws(
       () =>

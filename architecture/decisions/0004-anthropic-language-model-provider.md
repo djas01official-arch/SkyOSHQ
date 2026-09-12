@@ -17,7 +17,7 @@ Anthropic is the second first-class `LanguageModelProvider` implementation. The 
 
 The adapter uses the stateless synchronous Messages API at `POST /v1/messages`. It sends bounded SkyOS history and the exact SkyOS-created grounded context, uses the top-level system prompt, requests stable schema-constrained JSON through `output_config.format`, selects standard-only service tier, and configures no tools, cache control, containers, files, hosted retrieval, provider conversation state, or native citation authority. It does not override `inference_geo`; the Anthropic workspace's server-side default and allowed-geo policy remain authoritative. The adapter retains the sanitized provider-reported geo for pricing eligibility without exposing it to clients.
 
-The browser cannot choose Anthropic. Deployment configuration selects `AI_PROVIDER=anthropic`, `AI_MODEL=claude-sonnet-5`, and a server-only `ANTHROPIC_API_KEY`. Invalid, placeholder, missing, and unapproved configuration fails closed. Automated environments require an injected transport and cannot accidentally use the network. The registry retains both approved pinned model/policy identities, but only the explicitly configured model is current; retention does not implement fallback or orchestration.
+The browser cannot choose Anthropic. Deployment configuration selects `AI_PROVIDER=anthropic` and `AI_MODEL=claude-sonnet-5`, plus exactly one server-side authentication method: an `ANTHROPIC_API_KEY`, or Google Cloud Workload Identity Federation using the official SDK credential provider. WIF requires the federation-rule, organization, and Anthropic service-account identifiers; the workspace identifier is optional. The Cloud Run identity token is minted for the exact `https://api.anthropic.com` audience and exchanged for a short-lived Anthropic access token. Invalid, placeholder, missing, partial, and ambiguous authentication configuration fails closed. Automated environments require injected transports and cannot accidentally use the network. The registry retains both approved pinned model/policy identities, but only the explicitly configured model is current; retention does not implement fallback or orchestration.
 
 Sonnet 5 enables adaptive thinking by default and rejects manual extended-thinking configuration and non-default `temperature`, `top_p`, or `top_k` values. SkyOS sends none of those fields, so it preserves the provider's supported default while avoiding invalid or sampling-dependent requests. The adapter already accepts provider thinking/redacted-thinking blocks but extracts only the final schema-constrained text. Because thinking tokens share the `max_tokens` ceiling with the final response, Sonnet 5 receives a hard 16,000-token ceiling while Sonnet 4.6 retains the existing 1,200-token ceiling; both still pass through the same 2,000-character schema/parser bound. Sonnet 5's tokenizer differs from Sonnet 4.6; SkyOS does not estimate Anthropic usage locally and instead persists the authoritative token counts returned by the Messages API. Apart from the explicit pinned model identifier and model-appropriate token ceiling, SkyOS constructs the same bounded, stateless request for both approved versions.
 
@@ -77,6 +77,7 @@ A future orchestration engine must create one `AiRun` per provider execution, re
 - OpenAI behavior and the normal user experience remain unchanged.
 - Anthropic gains the same grounded chat and Knowledge Action boundary without duplicating domain logic.
 - CI and tests remain credential-free and use mocked SDK transports.
+- Cloud Run can authenticate without a long-lived Anthropic secret; the federation rule remains the authorization boundary and must pin the workload service account claims.
 - There is no automatic fallback, provider picker, live Anthropic evaluator, streaming, prompt caching, or multi-model orchestrator yet.
 - Production enablement still requires contract, privacy, retention, residency, model-lifecycle, capacity, and current pricing review.
 
@@ -94,3 +95,5 @@ All sources were verified on 2026-08-13:
 - [API errors and request IDs](https://platform.claude.com/docs/en/api/errors)
 - [Rate limits](https://platform.claude.com/docs/en/api/rate-limits)
 - [Official TypeScript SDK](https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/typescript)
+- [Workload Identity Federation](https://platform.claude.com/docs/en/manage-claude/workload-identity-federation)
+- [Google Cloud WIF provider](https://platform.claude.com/docs/en/manage-claude/wif-providers/gcp)

@@ -26,6 +26,14 @@ enable_web_service         = false
 web_allow_unauthenticated  = false
 web_google_oauth_client_id = ""
 
+# Optional Anthropic Workload Identity Federation identifiers. These values are
+# not secrets, but configure all three required identifiers together. Restrict
+# the Anthropic federation rule to the Cloud Run web service account.
+anthropic_federation_rule_id = ""
+anthropic_organization_id    = ""
+anthropic_service_account_id = ""
+anthropic_workspace_id       = ""
+
 web_secret_versions = {
   # DATABASE_URL       = "1"
   # AUTH_SECRET        = "1"

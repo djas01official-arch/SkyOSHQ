@@ -1,3 +1,5 @@
+import type { AccessTokenProvider } from '@anthropic-ai/sdk/lib/credentials';
+
 import {
   OPENAI_APPROVED_MODEL,
   OpenAILanguageModelProvider,
@@ -6,6 +8,10 @@ import {
   ANTHROPIC_APPROVED_MODELS,
   AnthropicLanguageModelProvider,
 } from './anthropic-language-model-provider';
+import {
+  createAnthropicGoogleCloudWorkloadIdentityCredentials,
+  isValidAnthropicGoogleCloudWorkloadIdentityConfiguration,
+} from './anthropic-google-cloud-workload-identity';
 import {
   GEMINI_APPROVED_MODELS,
   GeminiLanguageModelProvider,
@@ -276,27 +282,63 @@ export class LanguageModelProviderRegistry {
   }
 }
 
+type DefaultLanguageModelProviderRegistryOptions = Readonly<{
+  configuredProvider?: string;
+  anthropicApiKey?: string;
+  anthropicCredentials?: AccessTokenProvider;
+  anthropicFederationRuleId?: string;
+  anthropicFetch?: typeof globalThis.fetch;
+  anthropicIdentityTokenFetch?: typeof globalThis.fetch;
+  anthropicIdentityTokenProvider?: () => string | Promise<string>;
+  anthropicOrganizationId?: string;
+  anthropicServiceAccountId?: string;
+  anthropicTokenExchangeFetch?: typeof globalThis.fetch;
+  anthropicWorkspaceId?: string;
+  chatMode?: string;
+  deterministicFailureMessage?: string;
+  geminiApiKey?: string;
+  geminiClientFactory?: GeminiInteractionClientFactory;
+  geminiGenerateContentClient?: GeminiGenerateContentClient;
+  geminiGenerateContentClientFactory?: GeminiGenerateContentClientFactory;
+  geminiInteractionClient?: GeminiInteractionClient;
+  geminiTransport?: string;
+  googleCloudLocation?: string;
+  googleCloudProject?: string;
+  model?: string;
+  liveAiDevelopmentOptIn?: string;
+  openAiApiKey?: string;
+  openAiFetch?: typeof globalThis.fetch;
+  runtime?: string;
+}>;
+
+function resolveAnthropicAuthentication(
+  options: DefaultLanguageModelProviderRegistryOptions,
+): Readonly<{ apiKey?: string; credentials?: AccessTokenProvider }> | undefined {
+  const apiKey = (options.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY)?.trim();
+  if (apiKey) return { apiKey };
+  if (options.anthropicCredentials) return { credentials: options.anthropicCredentials };
+
+  const configuration = {
+    federationRuleId:
+      (options.anthropicFederationRuleId ?? process.env.ANTHROPIC_FEDERATION_RULE_ID)?.trim() ?? '',
+    identityTokenFetch: options.anthropicIdentityTokenFetch,
+    identityTokenProvider: options.anthropicIdentityTokenProvider,
+    organizationId:
+      (options.anthropicOrganizationId ?? process.env.ANTHROPIC_ORGANIZATION_ID)?.trim() ?? '',
+    serviceAccountId:
+      (options.anthropicServiceAccountId ?? process.env.ANTHROPIC_SERVICE_ACCOUNT_ID)?.trim() ?? '',
+    tokenExchangeFetch: options.anthropicTokenExchangeFetch,
+    workspaceId:
+      (options.anthropicWorkspaceId ?? process.env.ANTHROPIC_WORKSPACE_ID)?.trim() || undefined,
+  };
+  if (!isValidAnthropicGoogleCloudWorkloadIdentityConfiguration(configuration)) return undefined;
+  return {
+    credentials: createAnthropicGoogleCloudWorkloadIdentityCredentials(configuration),
+  };
+}
+
 export function createDefaultLanguageModelProviderRegistry(
-  options: Readonly<{
-    configuredProvider?: string;
-    anthropicApiKey?: string;
-    anthropicFetch?: typeof globalThis.fetch;
-    chatMode?: string;
-    deterministicFailureMessage?: string;
-    geminiApiKey?: string;
-    geminiClientFactory?: GeminiInteractionClientFactory;
-    geminiGenerateContentClient?: GeminiGenerateContentClient;
-    geminiGenerateContentClientFactory?: GeminiGenerateContentClientFactory;
-    geminiInteractionClient?: GeminiInteractionClient;
-    geminiTransport?: string;
-    googleCloudLocation?: string;
-    googleCloudProject?: string;
-    model?: string;
-    liveAiDevelopmentOptIn?: string;
-    openAiApiKey?: string;
-    openAiFetch?: typeof globalThis.fetch;
-    runtime?: string;
-  }> = {},
+  options: DefaultLanguageModelProviderRegistryOptions = {},
 ): LanguageModelProviderRegistry {
   const configuredProvider = options.configuredProvider ?? process.env.AI_PROVIDER;
   const runtime = options.runtime ?? process.env.NODE_ENV;
@@ -325,9 +367,9 @@ export function createDefaultLanguageModelProviderRegistry(
   ) {
     const model = (options.model ?? process.env.AI_MODEL)?.trim();
     const openAiApiKey = (options.openAiApiKey ?? process.env.OPENAI_API_KEY)?.trim();
-    const anthropicApiKey = (options.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY)?.trim();
+    const anthropicAuthentication = resolveAnthropicAuthentication(options);
     const geminiApiKey = options.geminiApiKey ?? process.env.GEMINI_API_KEY;
-    if (!model || !openAiApiKey || !anthropicApiKey) {
+    if (!model || !openAiApiKey || !anthropicAuthentication) {
       return new LanguageModelProviderRegistry(
         new UnavailableLanguageModelProvider('provider_configuration_invalid'),
       );
@@ -351,7 +393,7 @@ export function createDefaultLanguageModelProviderRegistry(
         ...ANTHROPIC_APPROVED_MODELS.map(
           (approvedModel) =>
             new AnthropicLanguageModelProvider({
-              apiKey: anthropicApiKey,
+              ...anthropicAuthentication,
               fetch: options.anthropicFetch,
               model: approvedModel,
               runtime,
@@ -437,8 +479,8 @@ export function createDefaultLanguageModelProviderRegistry(
 
   if (key === 'anthropic') {
     const model = (options.model ?? process.env.AI_MODEL)?.trim();
-    const apiKey = (options.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY)?.trim();
-    if (!model || !apiKey) {
+    const authentication = resolveAnthropicAuthentication(options);
+    if (!model || !authentication) {
       return new LanguageModelProviderRegistry(
         new UnavailableLanguageModelProvider('provider_configuration_invalid'),
       );
@@ -452,7 +494,7 @@ export function createDefaultLanguageModelProviderRegistry(
       const approvedProviders = ANTHROPIC_APPROVED_MODELS.map(
         (approvedModel) =>
           new AnthropicLanguageModelProvider({
-            apiKey,
+            ...authentication,
             fetch: options.anthropicFetch,
             model: approvedModel,
             runtime,
