@@ -68,7 +68,7 @@ resource "google_cloud_run_v2_service" "web" {
 
       env {
         name  = "AI_CHAT_MODE"
-        value = "FAST"
+        value = local.durable_ai_chat_mode
       }
 
       env {
@@ -112,7 +112,7 @@ resource "google_cloud_run_v2_service" "web" {
       }
 
       dynamic "env" {
-        for_each = local.anthropic_wif_runtime_env
+        for_each = local.anthropic_web_wif_runtime_env
 
         content {
           name  = env.key
@@ -121,7 +121,10 @@ resource "google_cloud_run_v2_service" "web" {
       }
 
       dynamic "env" {
-        for_each = var.web_secret_versions
+        for_each = {
+          for secret_name in local.web_active_secret_env_names :
+          secret_name => var.web_secret_versions[secret_name]
+        }
 
         content {
           name = env.key
@@ -160,17 +163,22 @@ resource "google_cloud_run_v2_service" "web" {
     }
 
     precondition {
+      condition     = local.web_durable_ai_provider_auth_configured
+      error_message = "BALANCED, DEEP, CRITICAL, and AUTO require a pinned OPENAI_API_KEY plus Anthropic API-key or complete web workload-identity authentication."
+    }
+
+    precondition {
       condition     = trimspace(var.web_google_oauth_client_id) != ""
       error_message = "Enabling the web service requires web_google_oauth_client_id."
     }
 
     precondition {
-      condition     = !local.anthropic_wif_any_configured || local.anthropic_wif_required_configured
-      error_message = "Anthropic workload identity requires federation rule, organization, and Anthropic service account identifiers together."
+      condition     = !local.anthropic_web_wif_any_configured || local.anthropic_web_wif_required_configured
+      error_message = "Anthropic web workload identity requires federation rule, organization, and Anthropic service account identifiers together."
     }
 
     precondition {
-      condition     = !local.anthropic_wif_any_configured || !contains(keys(var.web_secret_versions), "ANTHROPIC_API_KEY")
+      condition     = !local.anthropic_web_wif_any_configured || !contains(local.web_active_secret_env_names, "ANTHROPIC_API_KEY")
       error_message = "Anthropic workload identity and ANTHROPIC_API_KEY cannot be injected into the same web revision."
     }
   }

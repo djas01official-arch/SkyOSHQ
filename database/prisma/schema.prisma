@@ -84,6 +84,7 @@ enum BackgroundJobKind {
   DOCUMENT_EXTRACTION
   KNOWLEDGE_CHUNKING
   KNOWLEDGE_EMBEDDING
+  AI_ORCHESTRATION
 }
 
 enum BackgroundJobStatus {

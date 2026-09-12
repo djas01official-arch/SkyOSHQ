@@ -1,0 +1,1 @@
+ALTER TYPE "BackgroundJobKind" ADD VALUE 'AI_ORCHESTRATION';

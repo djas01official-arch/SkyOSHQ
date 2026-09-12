@@ -11,8 +11,9 @@ import {
   createAiConversation,
   retryAiRun,
   setAiConversationArchived,
-  submitAiChatMessage,
 } from '../../../../database/ai/ai-conversations';
+import { submitDurableAiChatMessage } from '../../../../database/ai/durable-ai-chat';
+import { queueApprovedDurableAiBudgetExecution } from '../../../../database/ai/durable-ai-budget-execution';
 import {
   resumeApprovedAiBudgetExecution,
   reserveApprovedAiBudgetConfirmationForExecution,
@@ -69,17 +70,16 @@ export async function submitMessageAction(
     return { error: 'The AI conversation is unavailable. Refresh and try again.' };
   }
   try {
-    const result = await submitAiChatMessage(
+    const requestId = value(formData, 'requestId');
+    await submitDurableAiChatMessage(
       prisma,
       aiConversationDependencies,
       user.id,
       context.activeWorkspace.id,
       conversationId,
       value(formData, 'message'),
+      requestId ? { requestId } : {},
     );
-    if (result.mode !== 'FAST' && !result.responseRun) {
-      return { error: 'The AI response could not be generated.' };
-    }
   } catch (error) {
     if (
       error instanceof AiConversationBudgetError &&
@@ -140,6 +140,22 @@ async function readBudgetConfirmationExecutionState(
   if (confirmation?.executionClaim?.status === 'FINISHED') return 'FINISHED';
   if (confirmation?.executionClaim?.status === 'STARTED') return 'STARTED';
   return null;
+}
+
+async function readBudgetConfirmationMode(
+  confirmationId: string,
+  userId: string,
+  workspaceId: string,
+): Promise<'FAST' | 'BALANCED' | 'DEEP' | 'CRITICAL' | null> {
+  const confirmation = await prisma.aiBudgetConfirmation.findFirst({
+    where: {
+      id: confirmationId,
+      requestedByUserId: userId,
+      workspaceId,
+    },
+    select: { routingDecision: { select: { resolvedMode: true } } },
+  });
+  return confirmation?.routingDecision.resolvedMode ?? null;
 }
 
 async function decideBudgetConfirmationAction(
@@ -228,9 +244,9 @@ function reservationFailureMessage(outcome: string): string {
 }
 
 /**
- * Resumes exactly one already-approved request. The submitted form contains
- * only its confirmation ID; identity, pricing, reservation, and execution
- * inputs are reconstructed on the server from the durable request.
+ * Resumes exactly one already-approved request. FAST keeps the original bounded
+ * synchronous execution path. Longer modes only claim and queue durable work;
+ * the request never performs their provider calls inline.
  */
 export async function continueBudgetConfirmationAction(
   _previousState: AiBudgetConfirmationContinueActionState,
@@ -261,14 +277,6 @@ export async function continueBudgetConfirmationAction(
       user.id,
       context.activeWorkspace.id,
     );
-    if (existingExecutionState === 'STARTED') {
-      revalidatePath('/ai', 'layout');
-      return {
-        error: null,
-        executionState: 'STARTED',
-        notice: 'Execution already started.',
-      };
-    }
     if (existingExecutionState === 'FINISHED') {
       revalidatePath('/ai', 'layout');
       return {
@@ -290,6 +298,47 @@ export async function continueBudgetConfirmationAction(
         executionState:
           reservation.outcome === 'RECONFIRMATION_REQUIRED' ? 'RECONFIRMATION_REQUIRED' : null,
       };
+    }
+
+    const mode = await readBudgetConfirmationMode(
+      confirmationId,
+      user.id,
+      context.activeWorkspace.id,
+    );
+    if (!mode) {
+      return {
+        ...initialContinueState,
+        error: 'This approved request is unavailable. Refresh and try again.',
+      };
+    }
+
+    if (mode !== 'FAST') {
+      const queued = await queueApprovedDurableAiBudgetExecution(
+        prisma,
+        aiConversationDependencies,
+        { ...input, reservation },
+      );
+      revalidatePath('/ai', 'layout');
+      switch (queued.outcome) {
+        case 'EXECUTION_ALREADY_FINISHED':
+          return {
+            error: null,
+            executionState: 'FINISHED',
+            notice: 'Completed.',
+          };
+        case 'EXECUTION_ALREADY_STARTED':
+          return {
+            error: null,
+            executionState: 'STARTED',
+            notice: 'Execution already started.',
+          };
+        case 'EXECUTION_QUEUED':
+          return {
+            error: null,
+            executionState: 'STARTED',
+            notice: 'Execution started.',
+          };
+      }
     }
 
     const result = await resumeApprovedAiBudgetExecution(prisma, aiConversationDependencies, input);

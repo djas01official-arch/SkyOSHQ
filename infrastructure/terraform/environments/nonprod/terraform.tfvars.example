@@ -7,13 +7,18 @@ knowledge_bucket_name = "replace-with-globally-unique-skyos-nonprod-bucket"
 # runtime_image must be an immutable Artifact Registry digest, for example:
 # runtime_image = "europe-west1-docker.pkg.dev/replace-with-gcp-project-id/skyos-np-runtime/skyos@sha256:<64-hex-digest>"
 
+# FAST remains the deployment default. Enabling BALANCED, DEEP, CRITICAL, or AUTO
+# requires a pinned OPENAI_API_KEY plus Anthropic authentication. Anthropic can use
+# either a pinned API-key version or workload-specific Workload Identity Federation.
+ai_chat_mode = "FAST"
+
 # Keep the application login disabled until the migrator role-bootstrap job has
 # created and verified skyos_application_role. The actual password must NEVER be
 # placed in terraform.tfvars; supply it only as the ephemeral
 # TF_VAR_application_database_password value during the controlled apply.
-enable_application_database_user       = false
+enable_application_database_user        = false
 application_database_roles_bootstrapped = false
-application_database_password_version   = 0
+application_database_password_version    = 0
 
 # Keep the service disabled until DATABASE_URL, AUTH_SECRET, and AUTH_GOOGLE_SECRET
 # exist in Secret Manager and their reviewed versions are pinned below.
@@ -22,12 +27,13 @@ web_allow_unauthenticated  = false
 web_google_oauth_client_id = ""
 
 # Optional Anthropic Workload Identity Federation identifiers. These values are
-# not secrets, but configure all three required identifiers together. Restrict
-# the Anthropic federation rule to the Cloud Run web service account.
-anthropic_federation_rule_id = ""
-anthropic_organization_id    = ""
-anthropic_service_account_id = ""
-anthropic_workspace_id       = ""
+# not secrets. Use separate federation rules for the web and durable worker
+# Google service accounts so each rule can be bound to one exact workload identity.
+anthropic_federation_rule_id        = ""
+anthropic_worker_federation_rule_id = ""
+anthropic_organization_id           = ""
+anthropic_service_account_id        = ""
+anthropic_workspace_id              = ""
 
 web_secret_versions = {
   # DATABASE_URL       = "1"
