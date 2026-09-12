@@ -64,7 +64,7 @@ $Region = "europe-west1"
 
 gcloud storage buckets describe "gs://$Bucket" `
   --project="$ProjectId" `
-  --format="json(name,location,storageClass,uniformBucketLevelAccess,publicAccessPrevention,versioning,softDeletePolicy,lifecycle,labels)"
+  --format=yaml
 
 gcloud storage buckets get-iam-policy "gs://$Bucket" `
   --project="$ProjectId" `
@@ -73,17 +73,20 @@ gcloud storage buckets get-iam-policy "gs://$Bucket" `
 gcloud run services describe "skyos-np-web" `
   --project="$ProjectId" `
   --region="$Region" `
-  --format="json(spec.template.spec.serviceAccountName,spec.template.spec.containers.image,spec.template.spec.containers.env,status.url)"
+  --format=yaml |
+  Select-String -Pattern "serviceAccountName:|image:|url:"
 
 gcloud beta run worker-pools describe "skyos-np-worker" `
   --project="$ProjectId" `
   --region="$Region" `
-  --format="json(spec.template.spec.serviceAccountName,spec.template.spec.containers.image,spec.template.spec.containers.env)"
+  --format=yaml |
+  Select-String -Pattern "serviceAccountName:|image:"
 
 gcloud run jobs describe "skyos-np-reconcile" `
   --project="$ProjectId" `
   --region="$Region" `
-  --format="json(spec.template.template.spec.serviceAccountName,spec.template.template.spec.containers.image,spec.template.template.spec.containers.env)"
+  --format=yaml |
+  Select-String -Pattern "serviceAccountName:|image:"
 ```
 
 Confirm the bucket has no `allUsers` or `allAuthenticatedUsers` binding and the four runtime
