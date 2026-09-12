@@ -14,6 +14,7 @@ import { findKnowledgeDocument, requireKnowledgeWorkspaceAccess } from './knowle
 import type { BackgroundJobQueue } from '../../services/document-processing/processing-queue';
 import {
   EmptyChunkSourceError,
+  KnowledgeChunkLimitExceededError,
   UnknownChunkingStrategyError,
   type KnowledgeChunkingStrategyRegistry,
 } from '../../services/knowledge-chunking/chunking-strategy';
@@ -55,6 +56,9 @@ type ClaimedJob = Awaited<ReturnType<typeof claimKnowledgeChunkingJob>>;
 function failureFrom(error: unknown): { code: string; message: string } {
   if (error instanceof EmptyChunkSourceError) {
     return { code: 'empty_source', message: error.message };
+  }
+  if (error instanceof KnowledgeChunkLimitExceededError) {
+    return { code: 'chunk_limit_exceeded', message: error.message };
   }
   if (error instanceof KnowledgeChunkingStateError) {
     return { code: error.code, message: error.message };

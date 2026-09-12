@@ -18,12 +18,15 @@ export interface KnowledgeChunkingStrategy {
 
 export class EmptyChunkSourceError extends Error {}
 
+export class KnowledgeChunkLimitExceededError extends Error {}
+
 export class UnknownChunkingStrategyError extends Error {}
 
 type Boundary = Readonly<{ end: number; kind: string }>;
 
 const MAX_CHUNK_LENGTH = 1_000;
 const MIN_BOUNDARY_LENGTH = 600;
+export const MAX_KNOWLEDGE_CHUNKS_PER_SOURCE = 2_048;
 
 function findBoundary(text: string, start: number): Boundary {
   let maximumEnd = Math.min(start + MAX_CHUNK_LENGTH, text.length);
@@ -88,6 +91,11 @@ export const paragraphWindowStrategyV1: KnowledgeChunkingStrategy = {
     const chunks: KnowledgeChunkDraft[] = [];
     let cursor = 0;
     while (cursor < sourceText.length) {
+      if (chunks.length >= MAX_KNOWLEDGE_CHUNKS_PER_SOURCE) {
+        throw new KnowledgeChunkLimitExceededError(
+          `The source exceeds the ${MAX_KNOWLEDGE_CHUNKS_PER_SOURCE}-chunk processing limit.`,
+        );
+      }
       const boundary = findBoundary(sourceText, cursor);
       const range = trimRange(sourceText, cursor, boundary.end);
       if (range.start < range.end) {

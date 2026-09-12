@@ -51,6 +51,36 @@ resource "google_cloud_run_v2_job" "reconciliation" {
         }
 
         env {
+          name  = "GOOGLE_CLOUD_PROJECT"
+          value = var.project_id
+        }
+
+        env {
+          name  = "EMBEDDING_PROVIDER"
+          value = "vertex"
+        }
+
+        env {
+          name  = "EMBEDDING_MODEL"
+          value = "gemini-embedding-001"
+        }
+
+        env {
+          name  = "EMBEDDING_MODEL_VERSION"
+          value = "retrieval-v1"
+        }
+
+        env {
+          name  = "EMBEDDING_DIMENSIONS"
+          value = "768"
+        }
+
+        env {
+          name  = "EMBEDDING_LOCATION"
+          value = local.primary_region
+        }
+
+        env {
           name = "DATABASE_URL"
 
           value_source {
@@ -89,6 +119,7 @@ resource "google_cloud_run_v2_job" "reconciliation" {
 
   depends_on = [
     google_project_service.cloud_run,
+    google_storage_bucket_iam_member.knowledge_object_reconciliation,
     google_secret_manager_secret_iam_member.reconciliation_database_url_accessor,
   ]
 }

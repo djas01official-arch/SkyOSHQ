@@ -115,11 +115,32 @@ export async function uploadKnowledgeAttachmentAction(
   const { userId, workspaceId } = await getWriteScope();
 
   try {
-    await uploadKnowledgeAttachment(prisma, dependencies, userId, workspaceId, slug, {
-      bytes: new Uint8Array(await file.arrayBuffer()),
-      mimeType: file.type,
-      originalFilename: file.name,
-    });
+    const attachment = await uploadKnowledgeAttachment(
+      prisma,
+      dependencies,
+      userId,
+      workspaceId,
+      slug,
+      {
+        bytes: new Uint8Array(await file.arrayBuffer()),
+        mimeType: file.type,
+        originalFilename: file.name,
+      },
+    );
+    if (
+      attachment.mimeType === 'application/pdf' ||
+      attachment.mimeType ===
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ) {
+      await requestKnowledgeAttachmentProcessing(
+        prisma,
+        documentProcessingRequestDependencies,
+        userId,
+        workspaceId,
+        slug,
+        attachment.id,
+      );
+    }
   } catch (error) {
     return getErrorState(error);
   }

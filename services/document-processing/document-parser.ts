@@ -1,5 +1,4 @@
 import mammoth from 'mammoth';
-import { PDFParse } from 'pdf-parse';
 
 export const PDF_MIME_TYPE = 'application/pdf';
 export const DOCX_MIME_TYPE =
@@ -35,6 +34,11 @@ export class PdfDocumentTextParser implements DocumentTextParser {
   readonly version = '2.4.5-skyos.1';
 
   async extractText(bytes: Uint8Array): Promise<string> {
+    // Keep the PDF runtime out of web-page module initialization. pdf-parse
+    // loads pdfjs (and its optional native canvas integration) as soon as the
+    // package is imported, even though page rendering only needs the parser
+    // registry metadata. The worker loads it on demand when extraction starts.
+    const { PDFParse } = await import('pdf-parse');
     const parser = new PDFParse({ data: bytes });
 
     try {

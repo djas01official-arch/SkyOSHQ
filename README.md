@@ -282,6 +282,7 @@ Audit events are append-only. SkyOS application services do not expose update or
 - Upload validation matches the original extension, declared MIME type, and binary signature; filenames never form storage paths. Active duplicate content is rejected within the same document by SHA-256 checksum.
 - Knowledge binaries use one key-based `ObjectStorage` factory across web, workers, and reconciliation. Development and test default to `KNOWLEDGE_STORAGE_PROVIDER=local`, with `KNOWLEDGE_STORAGE_ROOT` defaulting to `.skyos/knowledge` (ignored by Git). Production fails closed unless `KNOWLEDGE_STORAGE_PROVIDER=gcs` and a non-blank `KNOWLEDGE_GCS_BUCKET` are supplied; local disk is never selected there. The GCS adapter uses attached-workload Application Default Credentials, atomic create-only writes, and server-mediated downloads—no public objects, ACLs, or URLs are created.
 - `KNOWLEDGE_MAX_FILE_SIZE_BYTES` defaults to 10 MiB and is capped at 100 MiB. The current bounded in-memory `Uint8Array` upload contract is deliberate; future larger objects require a separately reviewed streaming/resumable design.
+- Parseable Knowledge uploads automatically enter the durable extraction → chunking → production-embedding pipeline and become searchable only after `READY`. The canonical object, archive, retention, IAM, reconciliation, and live evidence contract is documented in [ADR 0011](architecture/decisions/0011-knowledge-object-lifecycle.md) and the [Knowledge / GCS lifecycle runbook](docs/operations/knowledge-gcs-lifecycle.md).
 - Downloads require current `knowledge.read`, are returned with `Content-Disposition: attachment`, `nosniff`, private/no-store caching, and a restrictive sandbox policy. Files are not parsed, rendered as HTML, or made public.
 - PDF and DOCX attachments can be processed into immutable plain-text extraction records. The original binary is retained unchanged, and PNG/JPEG attachments remain downloadable but are not text-processable.
 
@@ -383,9 +384,12 @@ The report identifies old available jobs that never started, expired leases, att
 
 ```sh
 pnpm jobs:reconcile -- --repair-expired-leases
+
+# Explicit, non-destructive repair of missing Knowledge pipeline work
+pnpm jobs:reconcile -- --repair-knowledge-pipeline
 ```
 
-That option safely requeues eligible jobs or records a bounded terminal failure. It does not delete metadata, local objects, immutable extraction history, chunk sets, chunks, attempts, or audit events. Review report output before using repair mode.
+The lease option safely requeues eligible jobs or records a bounded terminal failure. The Knowledge option idempotently creates only missing pipeline requests. Neither deletes metadata, objects, immutable extraction history, chunk sets, chunks, attempts, or audit events. Review report output before using either repair mode.
 
 ## pgvector and Knowledge embeddings
 

@@ -9,8 +9,18 @@ output "knowledge_bucket_name" {
 }
 
 output "knowledge_object_runtime_role" {
-  description = "Project custom role granted at the Knowledge bucket scope."
+  description = "Web upload custom role granted at the Knowledge bucket scope."
   value       = google_project_iam_custom_role.knowledge_object_runtime.name
+}
+
+output "knowledge_object_worker_role" {
+  description = "Read-only worker custom role granted at the Knowledge bucket scope."
+  value       = google_project_iam_custom_role.knowledge_object_worker.name
+}
+
+output "knowledge_object_reconciliation_role" {
+  description = "Read/list reconciliation custom role granted at the Knowledge bucket scope."
+  value       = google_project_iam_custom_role.knowledge_object_reconciliation.name
 }
 
 output "web_service_account_email" {
@@ -19,7 +29,7 @@ output "web_service_account_email" {
 }
 
 output "worker_service_account_email" {
-  description = "Future Cloud Run worker workload identity."
+  description = "Cloud Run worker workload identity."
   value       = google_service_account.workload["worker"].email
 }
 
@@ -29,7 +39,7 @@ output "migrator_service_account_email" {
 }
 
 output "reconciliation_service_account_email" {
-  description = "Future Cloud Run reconciliation workload identity."
+  description = "Cloud Run reconciliation workload identity."
   value       = google_service_account.workload["reconciliation"].email
 }
 

@@ -4,6 +4,8 @@ import { extname } from 'node:path';
 import {
   DocumentProcessingJobStatus,
   KnowledgeAttachmentStatus,
+  KnowledgeChunkingJobStatus,
+  KnowledgeEmbeddingJobStatus,
   type Prisma,
   type PrismaClient,
 } from '../generated/client/client';
@@ -229,7 +231,19 @@ export async function uploadKnowledgeAttachment(
   const attachmentId = randomUUID();
   const storageKey = `${workspaceId}/${document.id}/${attachmentId}${value.extension}`;
 
-  await dependencies.storage.putObject({ data: value.bytes, key: storageKey });
+  const storageMetadata = await dependencies.storage.putObject({
+    contentType: value.mimeType,
+    data: value.bytes,
+    key: storageKey,
+  });
+  if (storageMetadata && storageMetadata.sizeBytes !== BigInt(value.bytes.byteLength)) {
+    await dependencies.storage.deleteObject(storageKey, {
+      generation: storageMetadata.generation,
+    });
+    throw new KnowledgeAttachmentStorageError(
+      'The persisted attachment size does not match the accepted upload.',
+    );
+  }
 
   try {
     return await prisma.$transaction(async (transaction) => {
@@ -268,6 +282,9 @@ export async function uploadKnowledgeAttachment(
           originalFilename: value.originalFilename,
           sha256Checksum: value.sha256Checksum,
           sizeBytes: BigInt(value.bytes.byteLength),
+          storageCrc32c: storageMetadata?.crc32c ?? null,
+          storageEtag: storageMetadata?.etag ?? null,
+          storageGeneration: storageMetadata?.generation ?? null,
           storageKey,
           uploaderUserId: actorUserId,
           workspaceId,
@@ -282,6 +299,7 @@ export async function uploadKnowledgeAttachment(
           mimeType: attachment.mimeType,
           sha256Checksum: attachment.sha256Checksum,
           sizeBytes: attachment.sizeBytes.toString(),
+          storageGeneration: attachment.storageGeneration,
           version: attachment.version,
         },
         organizationId: access.organizationId,
@@ -294,7 +312,9 @@ export async function uploadKnowledgeAttachment(
     });
   } catch (error) {
     try {
-      await dependencies.storage.deleteObject(storageKey);
+      await dependencies.storage.deleteObject(storageKey, {
+        generation: storageMetadata?.generation,
+      });
     } catch (cleanupError) {
       throw new KnowledgeAttachmentStorageError(
         'Attachment metadata failed and the staged binary could not be removed.',
@@ -345,18 +365,40 @@ async function transitionKnowledgeAttachment(
     }
 
     if (status === KnowledgeAttachmentStatus.ARCHIVED) {
-      const activeProcessingJob = await transaction.documentProcessingJob.findFirst({
-        where: {
-          attachmentId: attachment.id,
-          status: {
-            in: [DocumentProcessingJobStatus.QUEUED, DocumentProcessingJobStatus.PROCESSING],
+      const [activeProcessingJob, activeChunkingJob, activeEmbeddingJob] = await Promise.all([
+        transaction.documentProcessingJob.findFirst({
+          where: {
+            attachmentId: attachment.id,
+            status: {
+              in: [DocumentProcessingJobStatus.QUEUED, DocumentProcessingJobStatus.PROCESSING],
+            },
           },
-        },
-        select: { id: true },
-      });
-      if (activeProcessingJob) {
+          select: { id: true },
+        }),
+        transaction.knowledgeChunkingJob.findFirst({
+          where: {
+            sourceId: attachment.id,
+            status: {
+              in: [KnowledgeChunkingJobStatus.QUEUED, KnowledgeChunkingJobStatus.PROCESSING],
+            },
+            workspaceId,
+          },
+          select: { id: true },
+        }),
+        transaction.knowledgeEmbeddingJob.findFirst({
+          where: {
+            chunkSet: { attachmentExtraction: { attachmentId: attachment.id } },
+            status: {
+              in: [KnowledgeEmbeddingJobStatus.QUEUED, KnowledgeEmbeddingJobStatus.PROCESSING],
+            },
+            workspaceId,
+          },
+          select: { id: true },
+        }),
+      ]);
+      if (activeProcessingJob || activeChunkingJob || activeEmbeddingJob) {
         throw new KnowledgeAttachmentStateError(
-          'This attachment cannot be archived while processing is pending.',
+          'This attachment cannot be archived while its ingestion pipeline is pending.',
         );
       }
     }
@@ -477,7 +519,9 @@ export async function downloadKnowledgeAttachment(
 
   let bytes: Uint8Array;
   try {
-    bytes = await dependencies.storage.getObject(attachment.storageKey);
+    bytes = await dependencies.storage.getObject(attachment.storageKey, {
+      generation: attachment.storageGeneration,
+    });
   } catch (error) {
     if (error instanceof StorageObjectNotFoundError) {
       throw new KnowledgeAttachmentBinaryMissingError(
