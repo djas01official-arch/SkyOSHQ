@@ -37,6 +37,8 @@ export class DocumentProcessingStateError extends DocumentProcessingError {
   }
 }
 
+export const KNOWLEDGE_MAX_EXTRACTED_CHARACTERS = 2_000_000;
+
 type Transaction = Prisma.TransactionClient;
 
 export type DocumentProcessingRequestDependencies = Readonly<{
@@ -170,6 +172,14 @@ export async function requestKnowledgeAttachmentProcessing(
         parserVersion: parser.version,
         requestedByUserId: actorUserId,
         workspaceId,
+      },
+    });
+
+    await transaction.knowledgeAttachment.update({
+      where: { id: attachmentId },
+      data: {
+        processingStatus: KnowledgeAttachmentProcessingStatus.QUEUED,
+        updatedAt: new Date(),
       },
     });
 
@@ -392,7 +402,9 @@ export async function executeDocumentProcessingJob(
       );
     }
 
-    const bytes = await dependencies.storage.getObject(claimed.attachment.storageKey);
+    const bytes = await dependencies.storage.getObject(claimed.attachment.storageKey, {
+      generation: claimed.attachment.storageGeneration,
+    });
     const checksum = createHash('sha256').update(bytes).digest('hex');
     if (
       checksum !== claimed.attachment.sha256Checksum ||
@@ -410,6 +422,12 @@ export async function executeDocumentProcessingJob(
       claimed.job.parserVersion,
     );
     const extractedText = await parser.extractText(bytes);
+    if (extractedText.length > KNOWLEDGE_MAX_EXTRACTED_CHARACTERS) {
+      throw new DocumentProcessingStateError(
+        `Extracted text exceeds the ${KNOWLEDGE_MAX_EXTRACTED_CHARACTERS}-character processing limit.`,
+        'extracted_text_limit_exceeded',
+      );
+    }
     await completeDocumentProcessingJob(prisma, claimed, extractedText);
   } catch (error) {
     await failDocumentProcessingJob(prisma, claimed, getFailure(error));

@@ -12,7 +12,7 @@ import {
   StorageObjectNotFoundError,
 } from './object-storage';
 
-type Operation = 'delete' | 'download' | 'save';
+type Operation = 'delete' | 'download' | 'getMetadata' | 'list' | 'save';
 
 function gcsError(code: number): Error & { code: number } {
   return Object.assign(new Error(`synthetic ${code}`), { code });
@@ -30,22 +30,49 @@ function createClient(behavior: Partial<Record<Operation, () => Promise<unknown>
       bucket(bucketName) {
         assert.equal(bucketName, 'skyos-private');
         return {
-          file(key) {
+          file(key, fileOptions) {
             return {
+              name: key,
+              metadata: {
+                contentType: 'application/pdf',
+                crc32c: 'AAAAAA==',
+                etag: 'etag-1',
+                generation: '123',
+                size: '12',
+              },
               async delete() {
-                calls.push({ key, operation: 'delete' });
+                calls.push({ key, operation: 'delete', options: fileOptions });
                 await behavior.delete?.();
               },
               async download() {
-                calls.push({ key, operation: 'download' });
+                calls.push({ key, operation: 'download', options: fileOptions });
                 const result = await behavior.download?.();
                 return [Buffer.from((result as Uint8Array | undefined) ?? 'stored bytes')];
+              },
+              async getMetadata() {
+                calls.push({ key, operation: 'getMetadata', options: fileOptions });
+                const result = await behavior.getMetadata?.();
+                return [
+                  (result as object | undefined) ?? {
+                    contentType: 'application/pdf',
+                    crc32c: 'AAAAAA==',
+                    etag: 'etag-1',
+                    generation: '123',
+                    size: '4',
+                  },
+                  {},
+                ];
               },
               async save(data, options) {
                 calls.push({ data, key, operation: 'save', options });
                 await behavior.save?.();
               },
             };
+          },
+          async getFiles(options) {
+            calls.push({ key: '', operation: 'list', options });
+            const result = await behavior.list?.();
+            return [(result as never[]) ?? [], null, {}];
           },
         };
       },
@@ -58,7 +85,20 @@ test('GCS put writes exact bytes with an atomic create-only generation precondit
   const storage = new GcsObjectStorage({ bucketName: 'skyos-private', client });
   const bytes = Uint8Array.from([0, 1, 2, 255]);
 
-  await storage.putObject({ data: bytes, key: 'workspace/document/attachment.pdf' });
+  assert.deepEqual(
+    await storage.putObject({
+      contentType: 'application/pdf',
+      data: bytes,
+      key: 'workspace/document/attachment.pdf',
+    }),
+    {
+      contentType: 'application/pdf',
+      crc32c: 'AAAAAA==',
+      etag: 'etag-1',
+      generation: '123',
+      sizeBytes: 4n,
+    },
+  );
 
   assert.deepEqual(calls, [
     {
@@ -66,11 +106,17 @@ test('GCS put writes exact bytes with an atomic create-only generation precondit
       key: 'workspace/document/attachment.pdf',
       operation: 'save',
       options: {
+        metadata: { contentType: 'application/pdf' },
         preconditionOpts: { ifGenerationMatch: 0 },
         resumable: false,
         timeout: GCS_OBJECT_STORAGE_TIMEOUT_MS,
         validation: 'crc32c',
       },
+    },
+    {
+      key: 'workspace/document/attachment.pdf',
+      operation: 'getMetadata',
+      options: undefined,
     },
   ]);
 });
@@ -120,6 +166,41 @@ test('GCS get returns exact bytes and maps only missing objects to not found', a
     ),
     (error: unknown) => error === unexpectedError,
   );
+});
+
+test('GCS reads metadata and targets the recorded generation for reads and deletes', async () => {
+  const { calls, client } = createClient();
+  const storage = new GcsObjectStorage({ bucketName: 'skyos-private', client });
+
+  assert.equal(
+    (await storage.getObjectMetadata('workspace/document/attachment.pdf')).generation,
+    '123',
+  );
+  await storage.getObject('workspace/document/attachment.pdf', { generation: '123' });
+  await storage.deleteObject('workspace/document/attachment.pdf', { generation: '123' });
+
+  assert.deepEqual(
+    calls.map(({ operation, options }) => ({ operation, options })),
+    [
+      { operation: 'getMetadata', options: { generation: undefined } },
+      { operation: 'download', options: { generation: '123' } },
+      { operation: 'delete', options: { generation: '123' } },
+    ],
+  );
+});
+
+test('GCS object listing is explicitly paginated and bounded', async () => {
+  const { calls, client } = createClient();
+  const storage = new GcsObjectStorage({ bucketName: 'skyos-private', client });
+  assert.deepEqual(await storage.listObjects({ pageSize: 200, pageToken: 'next' }), {
+    items: [],
+    nextPageToken: null,
+  });
+  assert.deepEqual(calls[0], {
+    key: '',
+    operation: 'list',
+    options: { autoPaginate: false, maxResults: 200, pageToken: 'next', prefix: undefined },
+  });
 });
 
 test('GCS delete is idempotent only for missing objects', async () => {

@@ -42,6 +42,11 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
       }
 
       env {
+        name  = "KNOWLEDGE_MAX_FILE_SIZE_BYTES"
+        value = "10485760"
+      }
+
+      env {
         name  = "GOOGLE_CLOUD_PROJECT"
         value = var.project_id
       }
@@ -191,6 +196,7 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
   depends_on = [
     google_project_service.cloud_run,
     google_project_iam_member.worker_vertex_prediction_runtime,
+    google_storage_bucket_iam_member.knowledge_object_worker,
     google_secret_manager_secret_iam_member.worker_database_url_accessor,
     google_secret_manager_secret_iam_member.worker_ai_runtime_accessor,
   ]
