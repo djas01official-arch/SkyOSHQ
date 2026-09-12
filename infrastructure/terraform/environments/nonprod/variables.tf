@@ -120,8 +120,20 @@ variable "anthropic_federation_rule_id" {
   }
 }
 
+variable "anthropic_worker_federation_rule_id" {
+  description = "Anthropic federation rule identifier exposed only to the durable worker runtime. This is an identifier, not a secret."
+  type        = string
+  default     = ""
+  nullable    = false
+
+  validation {
+    condition     = trimspace(var.anthropic_worker_federation_rule_id) == "" || can(regex("^fdrl_[A-Za-z0-9_-]+$", trimspace(var.anthropic_worker_federation_rule_id)))
+    error_message = "anthropic_worker_federation_rule_id must be empty or a valid fdrl_ identifier."
+  }
+}
+
 variable "anthropic_organization_id" {
-  description = "Anthropic organization UUID exposed to the web runtime. This is an identifier, not a secret."
+  description = "Anthropic organization UUID exposed to configured Anthropic runtimes. This is an identifier, not a secret."
   type        = string
   default     = ""
   nullable    = false

@@ -81,6 +81,15 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
       }
 
       dynamic "env" {
+        for_each = local.anthropic_worker_wif_runtime_env
+
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+
+      dynamic "env" {
         for_each = {
           for secret_name, version in var.web_secret_versions : secret_name => version
           if contains(local.worker_ai_secret_env_names, secret_name)
@@ -164,8 +173,18 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
     }
 
     precondition {
-      condition     = local.durable_ai_provider_secrets_configured
-      error_message = "BALANCED, DEEP, CRITICAL, and AUTO require pinned OPENAI_API_KEY and ANTHROPIC_API_KEY Secret Manager versions for the durable worker."
+      condition     = local.worker_durable_ai_provider_auth_configured
+      error_message = "BALANCED, DEEP, CRITICAL, and AUTO require a pinned OPENAI_API_KEY plus Anthropic API-key or complete worker workload-identity authentication."
+    }
+
+    precondition {
+      condition     = !local.anthropic_worker_wif_any_configured || local.anthropic_worker_wif_required_configured
+      error_message = "Anthropic worker workload identity requires federation rule, organization, and Anthropic service account identifiers together."
+    }
+
+    precondition {
+      condition     = !local.anthropic_worker_wif_any_configured || !contains(local.worker_ai_secret_env_names, "ANTHROPIC_API_KEY")
+      error_message = "Anthropic workload identity and ANTHROPIC_API_KEY cannot be injected into the same worker revision."
     }
   }
 

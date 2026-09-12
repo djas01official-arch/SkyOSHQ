@@ -11,14 +11,41 @@ variable "ai_chat_mode" {
 
 locals {
   durable_ai_chat_mode = upper(trimspace(var.ai_chat_mode))
-  worker_ai_secret_env_names = toset([
-    for secret_name in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"] : secret_name
-    if contains(keys(var.web_secret_versions), secret_name)
-  ])
-  durable_ai_provider_secrets_configured = local.durable_ai_chat_mode == "FAST" || alltrue([
-    for secret_name in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"] :
-    contains(keys(var.web_secret_versions), secret_name)
-  ])
+
+  openai_api_key_configured    = contains(keys(var.web_secret_versions), "OPENAI_API_KEY")
+  anthropic_api_key_configured = contains(keys(var.web_secret_versions), "ANTHROPIC_API_KEY")
+
+  web_anthropic_auth_configured = (
+    local.anthropic_api_key_configured ||
+    local.anthropic_web_wif_required_configured
+  )
+
+  worker_anthropic_auth_configured = (
+    local.anthropic_api_key_configured ||
+    local.anthropic_worker_wif_required_configured
+  )
+
+  web_durable_ai_provider_auth_configured = (
+    local.durable_ai_chat_mode == "FAST" ||
+    (
+      local.openai_api_key_configured &&
+      local.web_anthropic_auth_configured
+    )
+  )
+
+  worker_durable_ai_provider_auth_configured = (
+    local.durable_ai_chat_mode == "FAST" ||
+    (
+      local.openai_api_key_configured &&
+      local.worker_anthropic_auth_configured
+    )
+  )
+
+  worker_ai_secret_env_names = toset(compact([
+    local.openai_api_key_configured ? "OPENAI_API_KEY" : "",
+    local.anthropic_api_key_configured && !local.anthropic_worker_wif_any_configured ? "ANTHROPIC_API_KEY" : "",
+  ]))
+
   durable_ai_role_env = {
     AI_BALANCED_CANDIDATE_A_PROVIDER      = "openai"
     AI_BALANCED_CANDIDATE_A_MODEL         = "gpt-5.6-terra"
