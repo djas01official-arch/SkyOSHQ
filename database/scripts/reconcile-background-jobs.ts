@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 
 import { recoverDomainJobAfterExpiredLease } from '../background-jobs/domain-handlers';
 import { createBackgroundJobReconciliationReport } from '../background-jobs/reconciliation';
+import { summarizeBackgroundJobReconciliation } from '../background-jobs/reconciliation-observability';
 import { repairKnowledgeLifecycleDrift } from '../background-jobs/knowledge-reconciliation';
 import { recoverExpiredBackgroundJobs } from '../background-jobs/runtime';
 import { PrismaClient } from '../generated/client/client';
@@ -11,6 +12,10 @@ import { createKnowledgeObjectStorage } from '../../services/storage/knowledge-o
 import { createDefaultDocumentParserRegistry } from '../../services/document-processing/document-parser';
 import { createDefaultEmbeddingProviderRegistry } from '../../services/embeddings/embedding-provider';
 import { createDefaultKnowledgeChunkingStrategyRegistry } from '../../services/knowledge-chunking/chunking-strategy';
+import { createSkyOsLogger, safeErrorTelemetry } from '../../services/observability/logger';
+
+const observabilityLogger = createSkyOsLogger('reconciliation');
+const startedAt = Date.now();
 
 async function main(): Promise<void> {
   const connectionString = process.env.DATABASE_URL;
@@ -27,14 +32,18 @@ async function main(): Promise<void> {
     runtime: process.env.NODE_ENV ?? 'development',
   });
   const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
+  let repairAttemptedCount = 0;
+  let repairSucceededCount = 0;
+  let repairFailedCount = 0;
+
+  observabilityLogger.notice({ operation: 'reconciliation.run_started', status: 'RUNNING' });
 
   try {
-    const report = await createBackgroundJobReconciliationReport(
+    let report = await createBackgroundJobReconciliationReport(
       prisma,
       knowledgeStorage.storage,
       knowledgeStorage.configuration.localRoot ?? undefined,
     );
-    console.log(JSON.stringify({ mode: 'report-only', ...report }, null, 2));
     if (repairKnowledgePipeline) {
       const result = await repairKnowledgeLifecycleDrift(
         prisma,
@@ -45,13 +54,15 @@ async function main(): Promise<void> {
         },
         report,
       );
-      console.log(JSON.stringify({ mode: 'repair-knowledge-pipeline', ...result }, null, 2));
-      const postRepairReport = await createBackgroundJobReconciliationReport(
+      repairSucceededCount +=
+        result.processingRequested + result.chunkingRequested + result.embeddingRequested;
+      repairFailedCount += result.failures.length;
+      repairAttemptedCount += repairSucceededCount + repairFailedCount;
+      report = await createBackgroundJobReconciliationReport(
         prisma,
         knowledgeStorage.storage,
         knowledgeStorage.configuration.localRoot ?? undefined,
       );
-      console.log(JSON.stringify({ mode: 'post-repair-report', ...postRepairReport }, null, 2));
     }
     if (repairExpiredLeases) {
       const result = await recoverExpiredBackgroundJobs(
@@ -59,14 +70,34 @@ async function main(): Promise<void> {
         100,
         recoverDomainJobAfterExpiredLease,
       );
-      console.log(JSON.stringify({ mode: 'repair-expired-leases', ...result }, null, 2));
+      repairAttemptedCount += result.recovered + result.failed;
+      repairSucceededCount += result.recovered;
+      repairFailedCount += result.failed;
     }
+    const summary = summarizeBackgroundJobReconciliation(report);
+    const fields = {
+      operation: 'reconciliation.run_terminal',
+      status: 'SUCCEEDED',
+      duration_ms: Date.now() - startedAt,
+      drift_count: summary.driftCount,
+      failed_count: summary.failedBackgroundJobCount,
+      repair_attempted_count: repairAttemptedCount,
+      repair_succeeded_count: repairSucceededCount,
+      repair_failed_count: repairFailedCount,
+    } as const;
+    if (summary.driftCount > 0 || repairFailedCount > 0) observabilityLogger.warning(fields);
+    else observabilityLogger.info(fields);
   } finally {
     await prisma.$disconnect();
   }
 }
 
 main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : 'Background-job reconciliation failed.');
+  observabilityLogger.critical({
+    operation: 'reconciliation.run_terminal',
+    status: 'FAILED',
+    duration_ms: Date.now() - startedAt,
+    ...safeErrorTelemetry(error),
+  });
   process.exitCode = 1;
 });

@@ -140,3 +140,26 @@ output "web_service_uri" {
   description = "Cloud Run web service URI when enable_web_service is true."
   value       = try(google_cloud_run_v2_service.web[0].uri, null)
 }
+
+output "operations_dashboard_id" {
+  description = "Cloud Monitoring dashboard resource ID for SkyOS operations."
+  value       = google_monitoring_dashboard.operations.id
+}
+
+output "observability_alert_policy_names" {
+  description = "Task 8 alert policy display names."
+  value = compact(concat(
+    [for policy in google_monitoring_alert_policy.application : policy.display_name],
+    [
+      google_monitoring_alert_policy.web_5xx_rate.display_name,
+      google_monitoring_alert_policy.web_latency.display_name,
+      google_monitoring_alert_policy.runtime_probe_failures.display_name,
+      try(google_monitoring_alert_policy.web_uptime[0].display_name, ""),
+      google_monitoring_alert_policy.reconciliation_failure.display_name,
+      google_monitoring_alert_policy.reconciliation_execution_failure.display_name,
+      google_monitoring_alert_policy.reconciliation_absent.display_name,
+      google_monitoring_alert_policy.cloud_sql_saturation.display_name,
+      google_monitoring_alert_policy.controlled_alert.display_name,
+    ],
+  ))
+}

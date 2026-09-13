@@ -31,6 +31,21 @@ resource "google_cloud_run_v2_job" "reconciliation" {
         args    = ["jobs:reconcile"]
 
         env {
+          name  = "SKYOS_ENVIRONMENT"
+          value = "nonprod"
+        }
+
+        env {
+          name  = "SKYOS_SERVICE"
+          value = "reconciliation"
+        }
+
+        env {
+          name  = "SKYOS_IMAGE_DIGEST"
+          value = split("@", var.runtime_image)[1]
+        }
+
+        env {
           name  = "NODE_ENV"
           value = "production"
         }

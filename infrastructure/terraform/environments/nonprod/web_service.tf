@@ -32,6 +32,21 @@ resource "google_cloud_run_v2_service" "web" {
       image = var.runtime_image
 
       env {
+        name  = "SKYOS_ENVIRONMENT"
+        value = "nonprod"
+      }
+
+      env {
+        name  = "SKYOS_SERVICE"
+        value = "web"
+      }
+
+      env {
+        name  = "SKYOS_IMAGE_DIGEST"
+        value = split("@", var.runtime_image)[1]
+      }
+
+      env {
         name  = "AUTH_URL"
         value = local.web_auth_url
       }
@@ -74,6 +89,15 @@ resource "google_cloud_run_v2_service" "web" {
       env {
         name  = "AI_CHAT_MODE"
         value = local.durable_ai_chat_mode
+      }
+
+      dynamic "env" {
+        for_each = local.durable_ai_role_env
+
+        content {
+          name  = env.key
+          value = env.value
+        }
       }
 
       env {

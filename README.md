@@ -544,6 +544,16 @@ AI_PROVIDER=openai AI_MODEL=gpt-5.6-terra SKYOS_ALLOW_LIVE_AI_EVAL=1 pnpm ai:eva
 
 This command assumes `OPENAI_API_KEY` was already injected into the shell by the staging secret manager. PowerShell operators should set the same four server-side environment variables for the current process, run `pnpm ai:eval:openai`, and remove them afterward. The command displays a conservative pre-run planning estimate and current pricing verification date. It writes a sanitized, ignored local report under `artifacts/ai-eval/`; reports contain full synthetic-case answers for manual review, so operators must still treat them as provider output and apply local retention policy. Passing hard checks means only that the candidate may proceed to broader staging after the documented human review—it never enables production automatically.
 
+## Observability and incident readiness
+
+The Task 8 operational contract is documented in [Observability, SLOs, and error budgets](./docs/operations/observability-slo.md). Incident triage, containment, recovery, and rollback guidance is in the [incident response runbook](./docs/operations/incident-response.md), and the exact local, Terraform, live-GCP, alert, convergence, and Git checks are in [Task 8 verification](./docs/operations/task8-verification.md).
+
+Run the safe local observability suite with:
+
+```sh
+pnpm test:observability
+```
+
 ## Repository structure
 
 - `apps/` — user-facing applications

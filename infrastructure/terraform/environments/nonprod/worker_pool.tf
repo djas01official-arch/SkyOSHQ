@@ -17,6 +17,21 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
       args    = ["worker"]
 
       env {
+        name  = "SKYOS_ENVIRONMENT"
+        value = "nonprod"
+      }
+
+      env {
+        name  = "SKYOS_SERVICE"
+        value = "worker"
+      }
+
+      env {
+        name  = "SKYOS_IMAGE_DIGEST"
+        value = split("@", var.runtime_image)[1]
+      }
+
+      env {
         name  = "NODE_ENV"
         value = "production"
       }

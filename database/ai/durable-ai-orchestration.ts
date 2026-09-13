@@ -60,10 +60,12 @@ import type {
   LanguageModelProvider,
   LanguageModelProviderRegistry,
 } from '../../services/ai/language-model-provider';
+import { createSkyOsLogger } from '../../services/observability/logger';
 
 export const DURABLE_AI_ORCHESTRATION_PAYLOAD_VERSION = 'durable-ai-orchestration-v1';
 export const DURABLE_AI_ORCHESTRATION_JOB_KIND = 'AI_ORCHESTRATION' as BackgroundJobKind;
 const DURABLE_AI_MAX_ATTEMPTS = 3;
+const observabilityLogger = createSkyOsLogger('worker');
 
 type MultiMode = 'BALANCED' | 'DEEP' | 'CRITICAL';
 type ProviderAssignment =
@@ -356,7 +358,7 @@ export async function queueDurableAiOrchestration(
   }) as DurableAiOrchestrationPayload;
   const idempotencyKey = `ai-orchestration:${routingDecision.id}`;
 
-  return prisma.$transaction(async (transaction) => {
+  const queued = await prisma.$transaction(async (transaction) => {
     await transaction.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${idempotencyKey}, 0))`;
     let orchestration = await transaction.aiOrchestration.findFirst({
       where: {
@@ -404,6 +406,16 @@ export async function queueDurableAiOrchestration(
     });
     return Object.freeze({ job, orchestration });
   });
+  observabilityLogger.info({
+    operation: 'ai.orchestration_queued',
+    orchestration_id: queued.orchestration.id,
+    background_job_id: queued.job.id,
+    workspace_id: queued.orchestration.workspaceId,
+    requested_mode: input.mode,
+    resolved_mode: queued.orchestration.mode,
+    status: queued.orchestration.status,
+  });
+  return queued;
 }
 
 async function ensureRunning(
@@ -1344,6 +1356,7 @@ export function createDurableAiOrchestrationHandler(
   dependencies: AiConversationDependencies,
 ) {
   return async (job: BackgroundJob): Promise<void> => {
+    const startedAt = Date.now();
     if (job.kind !== DURABLE_AI_ORCHESTRATION_JOB_KIND) {
       throw new BackgroundJobExecutionError(
         'The background job is not a durable AI orchestration.',
@@ -1372,6 +1385,16 @@ export function createDurableAiOrchestrationHandler(
       job.workspaceId,
       job.domainJobId,
     );
+    observabilityLogger.info({
+      operation: 'ai.orchestration_started',
+      orchestration_id: orchestration.id,
+      background_job_id: job.id,
+      workspace_id: job.workspaceId,
+      mode: payload.mode,
+      attempt: job.attemptCount,
+      max_attempts: job.maxAttempts,
+      status: orchestration.status,
+    });
     if (
       orchestration.workspaceId !== job.workspaceId ||
       orchestration.createdByUserId !== job.requestedByUserId ||
@@ -1428,7 +1451,7 @@ export function createDurableAiOrchestrationHandler(
     }
     const completed = await prisma.aiOrchestration.findFirst({
       where: { id: orchestration.id, workspaceId: job.workspaceId },
-      select: { status: true },
+      select: { failureCode: true, status: true },
     });
     if (completed?.status === AiOrchestrationStatus.RUNNING) {
       throw new BackgroundJobExecutionError(
@@ -1438,6 +1461,18 @@ export function createDurableAiOrchestrationHandler(
       );
     }
     await finalizeBudget(prisma, dependencies, job, payload);
+    observabilityLogger.info({
+      operation: 'ai.orchestration_terminal',
+      orchestration_id: orchestration.id,
+      background_job_id: job.id,
+      workspace_id: job.workspaceId,
+      mode: payload.mode,
+      attempt: job.attemptCount,
+      max_attempts: job.maxAttempts,
+      duration_ms: Date.now() - startedAt,
+      status: completed?.status ?? 'UNKNOWN',
+      error_code: completed?.failureCode ?? undefined,
+    });
   };
 }
 
@@ -1448,7 +1483,7 @@ export async function cancelDurableAiOrchestration(
   orchestrationId: string,
 ) {
   await requireAiAccess(prisma, actorUserId, workspaceId);
-  return prisma.$transaction(async (transaction) => {
+  const cancelled = await prisma.$transaction(async (transaction) => {
     const current = await transaction.aiOrchestration.findFirst({
       where: { createdByUserId: actorUserId, id: orchestrationId, workspaceId },
     });
@@ -1478,6 +1513,16 @@ export async function cancelDurableAiOrchestration(
     });
     return transaction.aiOrchestration.findUniqueOrThrow({ where: { id: current.id } });
   });
+  if (cancelled.status === AiOrchestrationStatus.CANCELLED) {
+    observabilityLogger.notice({
+      operation: 'ai.orchestration_cancelled',
+      orchestration_id: cancelled.id,
+      workspace_id: cancelled.workspaceId,
+      mode: cancelled.mode,
+      status: cancelled.status,
+    });
+  }
+  return cancelled;
 }
 
 export const recoverDurableAiOrchestrationAfterExpiredLease: ExpiredLeaseRecoveryHook = async (
