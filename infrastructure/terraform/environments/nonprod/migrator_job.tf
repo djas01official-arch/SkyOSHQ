@@ -33,6 +33,11 @@ resource "google_cloud_run_v2_job" "migrator_role_bootstrap" {
         ]
 
         env {
+          name  = "DATABASE_CONNECTION_TIMEOUT_MS"
+          value = "3000"
+        }
+
+        env {
           name  = "DB_USER"
           value = "skyos_migrator"
         }
