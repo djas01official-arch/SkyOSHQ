@@ -16,7 +16,7 @@
     "auth:google:bind": "tsx database/scripts/bind-google-identity.ts",
     "gcp:auth:google:bind-bootstrap": "tsx scripts/run-google-identity-binding-job.ts",
     "gcp:database-url:publish": "tsx scripts/publish-database-url-secret.ts",
-    "format": "prettier --write database/operations/database-pool.ts database/tests/database-pool.test.ts docs/operations/database-disaster-recovery.md docs/operations/database-load-qualification.md && git diff --exit-code",
+    "format": "prettier --check .",
     "format:write": "prettier --write .",
     "hygiene": "tsx scripts/check-repository-hygiene.ts",
     "lint": "eslint .",
