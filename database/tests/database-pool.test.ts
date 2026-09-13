@@ -33,9 +33,7 @@ test('database pool configuration rejects unbounded or malformed values', () => 
   assert.throws(() => getDatabasePoolConfiguration({ DATABASE_POOL_MAX: '0' }));
   assert.throws(() => getDatabasePoolConfiguration({ DATABASE_POOL_MAX: '21' }));
   assert.throws(() => getDatabasePoolConfiguration({ DATABASE_POOL_MAX: '3.5' }));
-  assert.throws(() =>
-    getDatabasePoolConfiguration({ DATABASE_CONNECTION_TIMEOUT_MS: '0' }),
-  );
+  assert.throws(() => getDatabasePoolConfiguration({ DATABASE_CONNECTION_TIMEOUT_MS: '0' }));
   assert.throws(() => getDatabasePoolConfiguration({ DATABASE_IDLE_TIMEOUT_MS: '-1' }));
 });
 

@@ -34,9 +34,7 @@ function integerEnvironmentValue(
   return value;
 }
 
-export function getDatabaseConnectionTimeoutMillis(
-  environment: Environment = process.env,
-): number {
+export function getDatabaseConnectionTimeoutMillis(environment: Environment = process.env): number {
   return integerEnvironmentValue(
     environment,
     'DATABASE_CONNECTION_TIMEOUT_MS',

@@ -16,13 +16,13 @@ and recorded in `database-dr-load-qualification-report.md`.
 
 The reviewed Task 9 configuration is intentionally small and explicit:
 
-| Consumer | Configured steady-state instances/tasks | Connections per runtime | Nominal connections |
-| --- | ---: | ---: | ---: |
-| Cloud Run web | service-level max 2 | 3 | 6 |
-| Background worker pool | 1 | 3 | 3 |
-| Reconciliation job | 1 | 3 | 3 |
-| Migrator/bootstrap job | 1 | 1 | 1 |
-| **Known nominal application budget** |  |  | **13** |
+| Consumer                             | Configured steady-state instances/tasks | Connections per runtime | Nominal connections |
+| ------------------------------------ | --------------------------------------: | ----------------------: | ------------------: |
+| Cloud Run web                        |                     service-level max 2 |                       3 |                   6 |
+| Background worker pool               |                                       1 |                       3 |                   3 |
+| Reconciliation job                   |                                       1 |                       3 |                   3 |
+| Migrator/bootstrap job               |                                       1 |                       1 |                   1 |
+| **Known nominal application budget** |                                         |                         |              **13** |
 
 Persistent Prisma runtimes use these values:
 
