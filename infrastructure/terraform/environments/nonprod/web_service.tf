@@ -28,8 +28,28 @@ resource "google_cloud_run_v2_service" "web" {
     execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
     timeout               = "300s"
 
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 2
+    }
+
     containers {
       image = var.runtime_image
+
+      env {
+        name  = "DATABASE_POOL_MAX"
+        value = "3"
+      }
+
+      env {
+        name  = "DATABASE_CONNECTION_TIMEOUT_MS"
+        value = "3000"
+      }
+
+      env {
+        name  = "DATABASE_IDLE_TIMEOUT_MS"
+        value = "30000"
+      }
 
       env {
         name  = "AUTH_URL"
