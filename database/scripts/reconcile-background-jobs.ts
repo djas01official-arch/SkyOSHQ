@@ -1,11 +1,10 @@
 import 'dotenv/config';
 
-import { PrismaPg } from '@prisma/adapter-pg';
-
 import { recoverDomainJobAfterExpiredLease } from '../background-jobs/domain-handlers';
 import { createBackgroundJobReconciliationReport } from '../background-jobs/reconciliation';
 import { recoverExpiredBackgroundJobs } from '../background-jobs/runtime';
 import { PrismaClient } from '../generated/client/client';
+import { createPrismaPgAdapter } from '../operations/database-pool';
 import { createKnowledgeObjectStorage } from '../../services/storage/knowledge-object-storage';
 
 async function main(): Promise<void> {
@@ -19,7 +18,7 @@ async function main(): Promise<void> {
   const knowledgeStorage = createKnowledgeObjectStorage({
     runtime: process.env.NODE_ENV ?? 'development',
   });
-  const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
+  const prisma = new PrismaClient({ adapter: createPrismaPgAdapter(connectionString) });
 
   try {
     const report = await createBackgroundJobReconciliationReport(
