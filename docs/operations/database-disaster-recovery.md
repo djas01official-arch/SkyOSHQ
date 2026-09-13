@@ -165,10 +165,10 @@ SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';
 SELECT migration_name, finished_at
 FROM "_prisma_migrations"
 ORDER BY finished_at NULLS LAST, migration_name;
-SELECT count(*) AS organization_count FROM "Organization";
-SELECT count(*) AS workspace_count FROM "Workspace";
-SELECT count(*) AS background_job_count FROM "BackgroundJob";
-SELECT count(*) AS knowledge_chunk_count FROM "KnowledgeChunk";
+SELECT count(*) AS organization_count FROM organizations;
+SELECT count(*) AS workspace_count FROM workspaces;
+SELECT count(*) AS background_job_count FROM background_jobs;
+SELECT count(*) AS knowledge_chunk_count FROM knowledge_chunks;
 ```
 
 Use the source-side read-only snapshot recorded for the selected recovery point
