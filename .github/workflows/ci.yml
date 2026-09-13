@@ -77,6 +77,19 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Emit exact Task 9 Prettier diff
+        run: |
+          pnpm exec prettier --write \
+            database/operations/database-pool.ts \
+            database/tests/database-pool.test.ts \
+            docs/operations/database-dr-load-qualification-report.md \
+            docs/operations/database-load-qualification.md
+          git diff --no-ext-diff -- \
+            database/operations/database-pool.ts \
+            database/tests/database-pool.test.ts \
+            docs/operations/database-dr-load-qualification-report.md \
+            docs/operations/database-load-qualification.md
+
       - name: Run operator tooling tests
         run: |
           pnpm test:ops
