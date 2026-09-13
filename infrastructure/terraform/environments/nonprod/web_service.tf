@@ -23,15 +23,14 @@ resource "google_cloud_run_v2_service" "web" {
     component = "web"
   })
 
+  scaling {
+    max_instance_count = 2
+  }
+
   template {
     service_account       = google_service_account.workload["web"].email
     execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
     timeout               = "300s"
-
-    scaling {
-      min_instance_count = 0
-      max_instance_count = 2
-    }
 
     containers {
       image = var.runtime_image
