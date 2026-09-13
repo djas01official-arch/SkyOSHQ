@@ -1,7 +1,5 @@
 import 'dotenv/config';
 
-import { PrismaPg } from '@prisma/adapter-pg';
-
 import {
   createSkyOsBackgroundJobHandler,
   recoverSkyOsJobAfterExpiredLease,
@@ -9,6 +7,7 @@ import {
 import { createAiRuntimeDependencies } from '../ai/ai-runtime-dependencies';
 import { PrismaClient } from '../generated/client/client';
 import { assertPgvectorAvailable } from '../knowledge/vector-health';
+import { createPrismaPgAdapter } from '../operations/database-pool';
 import { createDefaultDocumentParserRegistry } from '../../services/document-processing/document-parser';
 import { getBackgroundWorkerConfig } from '../../services/background-jobs/config';
 import { runBackgroundWorker } from '../../services/background-jobs/worker';
@@ -20,7 +19,7 @@ async function main(): Promise<void> {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString)
     throw new Error('DATABASE_URL is required to start the background worker.');
-  const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
+  const prisma = new PrismaClient({ adapter: createPrismaPgAdapter(connectionString) });
   const controller = new AbortController();
   const requestShutdown = () => controller.abort();
   process.once('SIGINT', requestShutdown);
