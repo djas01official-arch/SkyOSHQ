@@ -38,6 +38,7 @@ jobs:
           pnpm exec prettier --write
           database/operations/database-pool.ts
           database/tests/database-pool.test.ts
+          docs/operations/database-disaster-recovery.md
           docs/operations/database-dr-load-qualification-report.md
           docs/operations/database-load-qualification.md
 
@@ -53,6 +54,7 @@ jobs:
           git add \
             database/operations/database-pool.ts \
             database/tests/database-pool.test.ts \
+            docs/operations/database-disaster-recovery.md \
             docs/operations/database-dr-load-qualification-report.md \
             docs/operations/database-load-qualification.md
           git commit -m "Format Task 9 qualification files"
