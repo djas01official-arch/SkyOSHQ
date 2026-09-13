@@ -19,6 +19,9 @@ import { createSkyosAuthProviders } from '@/lib/auth/auth-providers';
 import { isDevelopmentCredentialsEnabled } from '@/lib/auth/development-credentials';
 import { getGoogleOidcConfiguration } from '@/lib/auth/google-oidc';
 import { prisma } from '@/lib/prisma';
+import { createSkyOsLogger } from '../../services/observability/logger';
+
+const observabilityLogger = createSkyOsLogger('web');
 
 function getSessionSelection(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
@@ -36,17 +39,46 @@ function getAuthResult(): AuthResult {
     adapter: PrismaAdapter(prisma),
     callbacks: {
       authorized({ auth: session }) {
-        return hasAuthenticatedUser(session);
+        const authorized = hasAuthenticatedUser(session);
+        if (!authorized) {
+          observabilityLogger.warning({
+            operation: 'security.authorization_failure',
+            status: 'DENIED',
+            error_category: 'authorization',
+            error_code: 'protected_route_denied',
+          });
+        }
+        return authorized;
       },
       async signIn({ account, profile }) {
         if (account?.provider === 'google') {
-          return (await admitPreProvisionedGoogleIdentity(prisma, { account, profile })).allowed;
+          const allowed = (await admitPreProvisionedGoogleIdentity(prisma, { account, profile }))
+            .allowed;
+          if (!allowed) {
+            observabilityLogger.warning({
+              operation: 'security.authentication_failure',
+              provider: 'google',
+              status: 'DENIED',
+              error_category: 'authentication',
+              error_code: 'identity_not_admitted',
+            });
+          }
+          return allowed;
         }
 
-        return (
+        const allowed =
           account?.provider === 'credentials' &&
-          isDevelopmentCredentialsEnabled(process.env.NODE_ENV)
-        );
+          isDevelopmentCredentialsEnabled(process.env.NODE_ENV);
+        if (!allowed) {
+          observabilityLogger.warning({
+            operation: 'security.authentication_failure',
+            provider: account?.provider ?? 'unknown',
+            status: 'DENIED',
+            error_category: 'authentication',
+            error_code: 'provider_not_allowed',
+          });
+        }
+        return allowed;
       },
       async jwt({ session, token, trigger, user }) {
         const userId = user?.id ?? token.sub;

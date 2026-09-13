@@ -65,10 +65,18 @@ function formatProcessingStatus(status: KnowledgeAttachmentProcessingStatus): st
   switch (status) {
     case KnowledgeAttachmentProcessingStatus.UPLOADED:
       return 'Uploaded';
+    case KnowledgeAttachmentProcessingStatus.QUEUED:
+      return 'Queued';
     case KnowledgeAttachmentProcessingStatus.PROCESSING:
       return 'Processing';
     case KnowledgeAttachmentProcessingStatus.PROCESSED:
-      return 'Processed';
+      return 'Extracted';
+    case KnowledgeAttachmentProcessingStatus.CHUNKING:
+      return 'Chunking';
+    case KnowledgeAttachmentProcessingStatus.EMBEDDING:
+      return 'Embedding';
+    case KnowledgeAttachmentProcessingStatus.READY:
+      return 'Ready';
     case KnowledgeAttachmentProcessingStatus.FAILED:
       return 'Failed';
   }
@@ -79,6 +87,18 @@ function isProcessableAttachment(mimeType: string): boolean {
     mimeType === 'application/pdf' ||
     mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   );
+}
+
+function isAttachmentPipelineActive(status: KnowledgeAttachmentProcessingStatus): boolean {
+  switch (status) {
+    case KnowledgeAttachmentProcessingStatus.QUEUED:
+    case KnowledgeAttachmentProcessingStatus.PROCESSING:
+    case KnowledgeAttachmentProcessingStatus.CHUNKING:
+    case KnowledgeAttachmentProcessingStatus.EMBEDDING:
+      return true;
+    default:
+      return false;
+  }
 }
 
 type ChunkingSummary = Readonly<{
@@ -370,8 +390,7 @@ export default async function KnowledgeDocumentPage({ params }: KnowledgeDocumen
                     {canWrite &&
                     !isArchived &&
                     isProcessable &&
-                    attachment.processingStatus !==
-                      KnowledgeAttachmentProcessingStatus.PROCESSING ? (
+                    !isAttachmentPipelineActive(attachment.processingStatus) ? (
                       <KnowledgeAttachmentProcessing
                         action={processKnowledgeAttachmentAction}
                         attachmentId={attachment.id}

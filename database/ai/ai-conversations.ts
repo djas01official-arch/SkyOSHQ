@@ -98,6 +98,7 @@ import {
   recordAiRunProviderExecutionReference,
   AiRunProviderExecutionReferenceConflictError,
 } from './ai-provider-execution-reference';
+import { classifyErrorCategory, createSkyOsLogger } from '../../services/observability/logger';
 
 const MAX_MESSAGE_CHARACTERS = 4_000;
 const MAX_HISTORY_CHARACTERS = 8_000;
@@ -105,6 +106,9 @@ const MAX_HISTORY_MESSAGES = 12;
 const MAX_REQUESTS_PER_MINUTE = 10;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const KNOWLEDGE_ACTION_RESULT_LIMIT = 8;
+const observabilityLogger = createSkyOsLogger(
+  process.env.SKYOS_SERVICE === 'web' ? 'web' : 'worker',
+);
 
 type KnowledgeActionDefinition = Readonly<{
   label: string;
@@ -670,6 +674,7 @@ export async function executeGroundedRun(
 ) {
   const startedAt = input.startedAt ?? Date.now();
   let failureAccounting: FailedRunAccounting | undefined;
+  let providerAttemptCount: number | undefined;
   await requireAiAccess(prisma, input.actorUserId, input.workspaceId);
   const run = await prisma.aiRun.findFirst({
     where: {
@@ -777,6 +782,7 @@ export async function executeGroundedRun(
       provider,
       Object.freeze({ ...request, aiRunId: run.id }),
     );
+    providerAttemptCount = response.attemptCount;
     const usage = normalizeLanguageModelUsage(response);
     const estimatedCostUsd = estimateLanguageModelCostUsd(
       provider.providerKey,
@@ -841,9 +847,35 @@ export async function executeGroundedRun(
       });
     });
   } catch (error) {
+    if (error instanceof LanguageModelProviderError) {
+      providerAttemptCount = error.attempts;
+    }
     await failRun(prisma, input.runId, startedAt, error, failureAccounting);
   }
-  return prisma.aiRun.findUniqueOrThrow({ where: { id: input.runId } });
+  const terminalRun = await prisma.aiRun.findUniqueOrThrow({ where: { id: input.runId } });
+  const fields = {
+    operation: 'ai.run_terminal',
+    run_id: terminalRun.id,
+    orchestration_id: terminalRun.orchestrationId ?? undefined,
+    workspace_id: terminalRun.workspaceId,
+    provider: terminalRun.providerKey,
+    model: terminalRun.modelKey,
+    attempt: providerAttemptCount,
+    status: terminalRun.status,
+    duration_ms: terminalRun.durationMs ?? Date.now() - startedAt,
+    input_tokens: terminalRun.inputTokens ?? undefined,
+    output_tokens: terminalRun.outputTokens ?? undefined,
+    total_tokens: terminalRun.totalTokens ?? undefined,
+    ...(terminalRun.failureCode
+      ? {
+          error_category: classifyErrorCategory(terminalRun.failureCode),
+          error_code: terminalRun.failureCode,
+        }
+      : {}),
+  } as const;
+  if (terminalRun.status === AiRunStatus.SUCCEEDED) observabilityLogger.info(fields);
+  else observabilityLogger.error(fields);
+  return terminalRun;
 }
 
 async function executeRun(

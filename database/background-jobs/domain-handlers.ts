@@ -2,6 +2,8 @@ import {
   BackgroundJobKind,
   DocumentProcessingJobStatus,
   KnowledgeAttachmentProcessingStatus,
+  KnowledgeAttachmentStatus,
+  KnowledgeChunkSourceType,
   KnowledgeChunkingJobStatus,
   KnowledgeEmbeddingJobStatus,
   type BackgroundJob,
@@ -14,13 +16,18 @@ import {
   type DocumentProcessingWorkerDependencies,
 } from '../knowledge/document-processing';
 import {
+  KnowledgeChunkingConflictError,
   executeKnowledgeChunkingJob,
+  requestKnowledgeAttachmentChunking,
   type KnowledgeChunkingWorkerDependencies,
 } from '../knowledge/knowledge-chunking';
 import {
+  KnowledgeEmbeddingConflictError,
   executeKnowledgeEmbeddingJob,
+  requestKnowledgeChunkSetEmbedding,
   type KnowledgeEmbeddingWorkerDependencies,
 } from '../knowledge/knowledge-embeddings';
+import { PostgresBackgroundJobQueue } from '../../services/document-processing/processing-queue';
 import {
   BackgroundJobExecutionError,
   claimBackgroundJobById,
@@ -32,6 +39,7 @@ import {
 } from './runtime';
 
 type Transaction = Prisma.TransactionClient;
+const durableQueue = new PostgresBackgroundJobQueue();
 
 export type DomainBackgroundJobDependencies = Readonly<{
   documentProcessing: DocumentProcessingWorkerDependencies;
@@ -39,9 +47,202 @@ export type DomainBackgroundJobDependencies = Readonly<{
   knowledgeEmbedding?: KnowledgeEmbeddingWorkerDependencies;
 }>;
 
+async function updateAttachmentLifecycleForChunkSet(
+  prisma: PrismaClient,
+  chunkSetId: string,
+  processingStatus: KnowledgeAttachmentProcessingStatus,
+): Promise<void> {
+  const chunkSet = await prisma.knowledgeChunkSet.findUnique({
+    where: { id: chunkSetId },
+    select: {
+      attachmentExtraction: {
+        select: { attachmentId: true },
+      },
+    },
+  });
+  const attachmentId = chunkSet?.attachmentExtraction?.attachmentId;
+  if (!attachmentId) return;
+  if (processingStatus === KnowledgeAttachmentProcessingStatus.READY) {
+    await prisma.knowledgeAttachment.updateMany({
+      where: {
+        id: attachmentId,
+        processingStatus: {
+          in: [
+            KnowledgeAttachmentProcessingStatus.CHUNKING,
+            KnowledgeAttachmentProcessingStatus.FAILED,
+          ],
+        },
+        status: KnowledgeAttachmentStatus.ACTIVE,
+      },
+      data: {
+        processingStatus: KnowledgeAttachmentProcessingStatus.EMBEDDING,
+        updatedAt: new Date(),
+      },
+    });
+    await prisma.knowledgeAttachment.updateMany({
+      where: {
+        id: attachmentId,
+        processingStatus: KnowledgeAttachmentProcessingStatus.EMBEDDING,
+        status: KnowledgeAttachmentStatus.ACTIVE,
+      },
+      data: { processingStatus, updatedAt: new Date() },
+    });
+    return;
+  }
+  if (processingStatus === KnowledgeAttachmentProcessingStatus.EMBEDDING) {
+    await prisma.knowledgeAttachment.updateMany({
+      where: {
+        id: attachmentId,
+        processingStatus: {
+          in: [
+            KnowledgeAttachmentProcessingStatus.CHUNKING,
+            KnowledgeAttachmentProcessingStatus.FAILED,
+            KnowledgeAttachmentProcessingStatus.READY,
+          ],
+        },
+        status: KnowledgeAttachmentStatus.ACTIVE,
+      },
+      data: { processingStatus, updatedAt: new Date() },
+    });
+    return;
+  }
+  if (processingStatus === KnowledgeAttachmentProcessingStatus.FAILED) {
+    await prisma.knowledgeAttachment.updateMany({
+      where: {
+        id: attachmentId,
+        processingStatus: {
+          in: [
+            KnowledgeAttachmentProcessingStatus.CHUNKING,
+            KnowledgeAttachmentProcessingStatus.EMBEDDING,
+          ],
+        },
+        status: KnowledgeAttachmentStatus.ACTIVE,
+      },
+      data: { processingStatus, updatedAt: new Date() },
+    });
+    return;
+  }
+  throw new BackgroundJobExecutionError(
+    'The requested attachment lifecycle transition is unsupported.',
+    'attachment_state_transition_invalid',
+    false,
+  );
+}
+
+async function ensureEmbeddingRequested(
+  prisma: PrismaClient,
+  dependencies: KnowledgeEmbeddingWorkerDependencies,
+  actorUserId: string,
+  workspaceId: string,
+  chunkSetId: string,
+): Promise<void> {
+  const provider = dependencies.providers.getCurrent();
+  const existing = await prisma.knowledgeEmbeddingJob.findFirst({
+    where: {
+      chunkSetId,
+      modelKey: provider.modelKey,
+      modelVersion: provider.modelVersion,
+      providerKey: provider.providerKey,
+      status: {
+        in: [
+          KnowledgeEmbeddingJobStatus.QUEUED,
+          KnowledgeEmbeddingJobStatus.PROCESSING,
+          KnowledgeEmbeddingJobStatus.SUCCEEDED,
+        ],
+      },
+      workspaceId,
+    },
+    orderBy: { createdAt: 'desc' },
+    select: { status: true },
+  });
+  if (existing?.status === KnowledgeEmbeddingJobStatus.SUCCEEDED) {
+    await updateAttachmentLifecycleForChunkSet(
+      prisma,
+      chunkSetId,
+      KnowledgeAttachmentProcessingStatus.READY,
+    );
+    return;
+  }
+  if (!existing) {
+    try {
+      await requestKnowledgeChunkSetEmbedding(
+        prisma,
+        { providers: dependencies.providers, queue: durableQueue },
+        actorUserId,
+        workspaceId,
+        chunkSetId,
+      );
+    } catch (error) {
+      if (!(error instanceof KnowledgeEmbeddingConflictError)) throw error;
+    }
+  }
+  await updateAttachmentLifecycleForChunkSet(
+    prisma,
+    chunkSetId,
+    KnowledgeAttachmentProcessingStatus.EMBEDDING,
+  );
+}
+
+async function ensureAttachmentChunkingRequested(
+  prisma: PrismaClient,
+  dependencies: DomainBackgroundJobDependencies,
+  processingJobId: string,
+): Promise<void> {
+  const processingJob = await prisma.documentProcessingJob.findUnique({
+    where: { id: processingJobId },
+    include: {
+      attachment: { include: { document: true } },
+      extraction: true,
+    },
+  });
+  if (!processingJob?.extraction) {
+    throw new BackgroundJobExecutionError(
+      'The successful extraction is missing its immutable result.',
+      'extraction_result_missing',
+      true,
+    );
+  }
+  const existingSet = await prisma.knowledgeChunkSet.findFirst({
+    where: {
+      attachmentExtractionId: processingJob.extraction.id,
+      workspaceId: processingJob.workspaceId,
+    },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true },
+  });
+  if (existingSet) {
+    if (dependencies.knowledgeEmbedding) {
+      await ensureEmbeddingRequested(
+        prisma,
+        dependencies.knowledgeEmbedding,
+        processingJob.requestedByUserId,
+        processingJob.workspaceId,
+        existingSet.id,
+      );
+    }
+    return;
+  }
+  await prisma.knowledgeAttachment.updateMany({
+    where: { id: processingJob.attachmentId, status: KnowledgeAttachmentStatus.ACTIVE },
+    data: { processingStatus: KnowledgeAttachmentProcessingStatus.CHUNKING, updatedAt: new Date() },
+  });
+  try {
+    await requestKnowledgeAttachmentChunking(
+      prisma,
+      { queue: durableQueue, strategies: dependencies.knowledgeChunking.strategies },
+      processingJob.requestedByUserId,
+      processingJob.workspaceId,
+      processingJob.attachment.document.slug,
+      processingJob.attachmentId,
+    );
+  } catch (error) {
+    if (!(error instanceof KnowledgeChunkingConflictError)) throw error;
+  }
+}
+
 async function runDocumentExtraction(
   prisma: PrismaClient,
-  dependencies: DocumentProcessingWorkerDependencies,
+  dependencies: DomainBackgroundJobDependencies,
   job: BackgroundJob,
 ): Promise<void> {
   const current = await prisma.documentProcessingJob.findUnique({ where: { id: job.domainJobId } });
@@ -52,7 +253,10 @@ async function runDocumentExtraction(
       false,
     );
   }
-  if (current.status === DocumentProcessingJobStatus.SUCCEEDED) return;
+  if (current.status === DocumentProcessingJobStatus.SUCCEEDED) {
+    await ensureAttachmentChunkingRequested(prisma, dependencies, current.id);
+    return;
+  }
   if (current.status === DocumentProcessingJobStatus.FAILED) {
     throw new BackgroundJobExecutionError(
       'Document processing reached a failed state.',
@@ -60,7 +264,7 @@ async function runDocumentExtraction(
       false,
     );
   }
-  await executeDocumentProcessingJob(prisma, dependencies, current.id);
+  await executeDocumentProcessingJob(prisma, dependencies.documentProcessing, current.id);
   const completed = await prisma.documentProcessingJob.findUnique({ where: { id: current.id } });
   if (completed?.status !== DocumentProcessingJobStatus.SUCCEEDED) {
     throw new BackgroundJobExecutionError(
@@ -69,11 +273,12 @@ async function runDocumentExtraction(
       false,
     );
   }
+  await ensureAttachmentChunkingRequested(prisma, dependencies, current.id);
 }
 
 async function runKnowledgeChunking(
   prisma: PrismaClient,
-  dependencies: KnowledgeChunkingWorkerDependencies,
+  dependencies: DomainBackgroundJobDependencies,
   job: BackgroundJob,
 ): Promise<void> {
   const current = await prisma.knowledgeChunkingJob.findUnique({ where: { id: job.domainJobId } });
@@ -84,7 +289,22 @@ async function runKnowledgeChunking(
       false,
     );
   }
-  if (current.status === KnowledgeChunkingJobStatus.SUCCEEDED) return;
+  if (current.status === KnowledgeChunkingJobStatus.SUCCEEDED) {
+    const existingSet = await prisma.knowledgeChunkSet.findUnique({
+      where: { createdByJobId: current.id },
+      select: { id: true },
+    });
+    if (existingSet && dependencies.knowledgeEmbedding) {
+      await ensureEmbeddingRequested(
+        prisma,
+        dependencies.knowledgeEmbedding,
+        current.requestedByUserId,
+        current.workspaceId,
+        existingSet.id,
+      );
+    }
+    return;
+  }
   if (current.status === KnowledgeChunkingJobStatus.FAILED) {
     throw new BackgroundJobExecutionError(
       'Knowledge chunking reached a failed state.',
@@ -92,13 +312,38 @@ async function runKnowledgeChunking(
       false,
     );
   }
-  await executeKnowledgeChunkingJob(prisma, dependencies, current.id);
+  await executeKnowledgeChunkingJob(prisma, dependencies.knowledgeChunking, current.id);
   const completed = await prisma.knowledgeChunkingJob.findUnique({ where: { id: current.id } });
   if (completed?.status !== KnowledgeChunkingJobStatus.SUCCEEDED) {
+    if (
+      completed?.status === KnowledgeChunkingJobStatus.FAILED &&
+      current.sourceType === KnowledgeChunkSourceType.ATTACHMENT_EXTRACTION
+    ) {
+      await prisma.knowledgeAttachment.updateMany({
+        where: { id: current.sourceId, status: KnowledgeAttachmentStatus.ACTIVE },
+        data: {
+          processingStatus: KnowledgeAttachmentProcessingStatus.FAILED,
+          updatedAt: new Date(),
+        },
+      });
+    }
     throw new BackgroundJobExecutionError(
       'Knowledge chunking reached a failed state.',
       'domain_job_failed',
       false,
+    );
+  }
+  const chunkSet = await prisma.knowledgeChunkSet.findUniqueOrThrow({
+    where: { createdByJobId: current.id },
+    select: { id: true },
+  });
+  if (dependencies.knowledgeEmbedding) {
+    await ensureEmbeddingRequested(
+      prisma,
+      dependencies.knowledgeEmbedding,
+      current.requestedByUserId,
+      current.workspaceId,
+      chunkSet.id,
     );
   }
 }
@@ -125,8 +370,20 @@ async function runKnowledgeEmbedding(
       false,
     );
   }
-  if (current.status === KnowledgeEmbeddingJobStatus.SUCCEEDED) return;
+  if (current.status === KnowledgeEmbeddingJobStatus.SUCCEEDED) {
+    await updateAttachmentLifecycleForChunkSet(
+      prisma,
+      current.chunkSetId,
+      KnowledgeAttachmentProcessingStatus.READY,
+    );
+    return;
+  }
   if (current.status === KnowledgeEmbeddingJobStatus.FAILED) {
+    await updateAttachmentLifecycleForChunkSet(
+      prisma,
+      current.chunkSetId,
+      KnowledgeAttachmentProcessingStatus.FAILED,
+    );
     throw new BackgroundJobExecutionError(
       'Knowledge embedding reached a failed state.',
       'domain_job_failed',
@@ -143,12 +400,24 @@ async function runKnowledgeEmbedding(
     where: { id: current.id },
   });
   if (completed?.status !== KnowledgeEmbeddingJobStatus.SUCCEEDED) {
+    if (completed?.status === KnowledgeEmbeddingJobStatus.FAILED) {
+      await updateAttachmentLifecycleForChunkSet(
+        prisma,
+        current.chunkSetId,
+        KnowledgeAttachmentProcessingStatus.FAILED,
+      );
+    }
     throw new BackgroundJobExecutionError(
       'Knowledge embedding reached a failed state.',
       'domain_job_failed',
       false,
     );
   }
+  await updateAttachmentLifecycleForChunkSet(
+    prisma,
+    current.chunkSetId,
+    KnowledgeAttachmentProcessingStatus.READY,
+  );
 }
 
 export function createDomainBackgroundJobHandler(
@@ -158,10 +427,10 @@ export function createDomainBackgroundJobHandler(
   return async (job) => {
     switch (job.kind) {
       case BackgroundJobKind.DOCUMENT_EXTRACTION:
-        await runDocumentExtraction(prisma, dependencies.documentProcessing, job);
+        await runDocumentExtraction(prisma, dependencies, job);
         return;
       case BackgroundJobKind.KNOWLEDGE_CHUNKING:
-        await runKnowledgeChunking(prisma, dependencies.knowledgeChunking, job);
+        await runKnowledgeChunking(prisma, dependencies, job);
         return;
       case BackgroundJobKind.KNOWLEDGE_EMBEDDING:
         await runKnowledgeEmbedding(prisma, dependencies.knowledgeEmbedding, job);
@@ -246,6 +515,19 @@ async function recoverKnowledgeChunkingDomainJob(
     return;
   }
   const completedAt = new Date();
+  if (domainJob.sourceType === KnowledgeChunkSourceType.ATTACHMENT_EXTRACTION) {
+    await transaction.knowledgeAttachment.updateMany({
+      where: {
+        id: domainJob.sourceId,
+        processingStatus: KnowledgeAttachmentProcessingStatus.CHUNKING,
+        status: KnowledgeAttachmentStatus.ACTIVE,
+      },
+      data: {
+        processingStatus: KnowledgeAttachmentProcessingStatus.FAILED,
+        updatedAt: completedAt,
+      },
+    });
+  }
   await transaction.knowledgeChunkingJob.update({
     where: { id: domainJob.id },
     data: {
@@ -295,6 +577,23 @@ async function recoverKnowledgeEmbeddingDomainJob(
     return;
   }
   const completedAt = new Date();
+  const attachment = await transaction.knowledgeChunkSet.findUnique({
+    where: { id: domainJob.chunkSetId },
+    select: { attachmentExtraction: { select: { attachmentId: true } } },
+  });
+  if (attachment?.attachmentExtraction) {
+    await transaction.knowledgeAttachment.updateMany({
+      where: {
+        id: attachment.attachmentExtraction.attachmentId,
+        processingStatus: KnowledgeAttachmentProcessingStatus.EMBEDDING,
+        status: KnowledgeAttachmentStatus.ACTIVE,
+      },
+      data: {
+        processingStatus: KnowledgeAttachmentProcessingStatus.FAILED,
+        updatedAt: completedAt,
+      },
+    });
+  }
   await transaction.knowledgeEmbeddingJob.update({
     where: { id: domainJob.id },
     data: {

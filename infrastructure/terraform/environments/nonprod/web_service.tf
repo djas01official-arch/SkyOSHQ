@@ -51,6 +51,21 @@ resource "google_cloud_run_v2_service" "web" {
       }
 
       env {
+        name  = "SKYOS_ENVIRONMENT"
+        value = "nonprod"
+      }
+
+      env {
+        name  = "SKYOS_SERVICE"
+        value = "web"
+      }
+
+      env {
+        name  = "SKYOS_IMAGE_DIGEST"
+        value = split("@", var.runtime_image)[1]
+      }
+
+      env {
         name  = "AUTH_URL"
         value = local.web_auth_url
       }
@@ -71,8 +86,13 @@ resource "google_cloud_run_v2_service" "web" {
       }
 
       env {
+        name  = "KNOWLEDGE_MAX_FILE_SIZE_BYTES"
+        value = "10485760"
+      }
+
+      env {
         name  = "BACKGROUND_JOB_MODE"
-        value = "synchronous"
+        value = "durable"
       }
 
       env {
@@ -88,6 +108,15 @@ resource "google_cloud_run_v2_service" "web" {
       env {
         name  = "AI_CHAT_MODE"
         value = local.durable_ai_chat_mode
+      }
+
+      dynamic "env" {
+        for_each = local.durable_ai_role_env
+
+        content {
+          name  = env.key
+          value = env.value
+        }
       }
 
       env {
@@ -205,6 +234,7 @@ resource "google_cloud_run_v2_service" "web" {
   depends_on = [
     google_project_service.cloud_run,
     google_project_iam_member.web_vertex_prediction_runtime,
+    google_storage_bucket_iam_member.knowledge_object_runtime["web"],
     google_secret_manager_secret_iam_member.web_runtime_accessor,
   ]
 }
