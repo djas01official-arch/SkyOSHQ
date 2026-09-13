@@ -19,23 +19,28 @@ field is complete.
 | Persistent Prisma pool explicitly bounded | YES | Shared pool max is 3 connections per runtime. |
 | Connection acquisition timeout finite | YES | 3,000 ms for Prisma/pg consumers and migrator client. |
 | Idle pool timeout finite | YES | 30,000 ms for persistent Prisma pools. |
-| Web scale-out capped | YES | Maximum two Cloud Run web instances. |
+| Web service-level scale target capped | YES | Service-level maximum is two Cloud Run web instances; transient platform overshoot still requires live evidence. |
 | Worker scale capped | YES | One manual worker-pool instance. |
 | Reconciliation concurrency capped | YES | One task, parallelism one. |
-| Known application connection ceiling calculated | YES | 6 web + 3 worker + 3 reconciliation + 1 migrator = 13. |
+| Known nominal application connection budget calculated | YES | 6 web + 3 worker + 3 reconciliation + 1 migrator = 13 nominal connections. |
 | Recent successful live backup verified | PENDING | Requires live Cloud SQL backup history. |
 | Live DB `max_connections` verified | PENDING | Requires live database query. |
 | Isolated PITR executed | PENDING | Requires controlled disposable restore. |
 | RPO measured | PENDING | Requires PITR evidence. |
 | RTO measured | PENDING | Requires PITR plus application validation evidence. |
 | Low/moderate/spike load qualification | PENDING | Requires live load execution. |
+| Cloud Run transient overshoot/revision transition qualified | PENDING | Requires measured instance and DB connection evidence. |
 | Worker concurrency qualification | PENDING | Requires live load execution. |
 | Retrieval/vector load qualification | PENDING | Requires live load execution. |
 | Post-load recovery qualified | PENDING | Requires live load execution. |
 
 ## Connection-budget evidence
 
-Configured known application maximum: **13 connections**.
+Configured known **nominal** application budget: **13 connections**.
+
+Cloud Run can temporarily exceed an instance maximum during rapid scaling. The
+per-runtime pool remains bounded, but the aggregate platform connection count
+must therefore be measured during spike and revision-transition gates.
 
 Record live values:
 
@@ -46,16 +51,22 @@ Record live values:
 | Minimum absolute reserve | 10 |
 | Required reserve = max(10, 30%) | PENDING |
 | Maximum application allowance | PENDING |
-| Configured application maximum | 13 |
-| Headroom gate | PENDING |
+| Configured nominal application budget | 13 |
+| Nominal headroom arithmetic | PENDING |
 | Baseline total DB connections | PENDING |
 | Baseline SkyOS DB connections | PENDING |
+| Measured peak DB connections across all scenarios | PENDING |
+| Measured peak remains below application allowance | PENDING |
 
-Headroom passes only when:
+Nominal arithmetic passes only when:
 
 ```text
 13 <= max_connections - max(10, ceil(max_connections * 0.30))
 ```
+
+The operational headroom gate additionally requires the measured peak during
+moderate load, spike load, and controlled revision overlap to remain below the
+same application allowance.
 
 ## Backup/PITR evidence
 
@@ -121,7 +132,7 @@ Do not convert `NOT MEASURED` to `PASS`.
 | Measurement | Value |
 | --- | --- |
 | Observation duration | PENDING |
-| Web instances | PENDING |
+| Web instances by revision | PENDING |
 | DB active/idle/total connections | PENDING |
 | Cloud SQL CPU | PENDING |
 | Cloud SQL memory | PENDING |
@@ -150,7 +161,8 @@ Do not convert `NOT MEASURED` to `PASS`.
 | Generated request/operation rate | PENDING |
 | Successes / failures | PENDING |
 | p50 / p95 / p99 | PENDING |
-| Peak web instances | PENDING |
+| Peak web instances by revision | PENDING |
+| Transient service-max overshoot observed | PENDING |
 | Peak DB connections | PENDING |
 | Remaining connection reserve | PENDING |
 | Cloud SQL peak/sustained CPU | PENDING |
@@ -163,6 +175,7 @@ Do not convert `NOT MEASURED` to `PASS`.
 | Duration | PENDING |
 | Generated request/operation rate | PENDING |
 | Successes / failures | PENDING |
+| Peak web instances by revision | PENDING |
 | Peak DB connections | PENDING |
 | Acquisition timeout behavior | PENDING |
 | Reserve preserved | PENDING |
@@ -204,6 +217,20 @@ Do not convert `NOT MEASURED` to `PASS`.
 | Connection count after job exit | PENDING |
 | Result | PENDING |
 
+### Scenario 7 — controlled revision transition
+
+| Measurement | Value |
+| --- | --- |
+| Old revision | PENDING |
+| New revision | PENDING |
+| Active traffic/load during transition | PENDING |
+| Peak instances by revision | PENDING |
+| Peak DB connections | PENDING |
+| Remaining connection reserve | PENDING |
+| Old revision drained successfully | PENDING |
+| Post-transition connection recovery | PENDING |
+| Result | PENDING |
+
 ## Post-load recovery
 
 | Check | Result |
@@ -235,8 +262,9 @@ A final `PASS` requires all of the following:
 2. controlled isolated PITR with source unchanged;
 3. measured RPO and RTO meeting the engineering objectives;
 4. recovered schema/data/vector and reconciliation validation;
-5. live connection-headroom gate;
+5. live nominal and measured-peak connection-headroom gates;
 6. successful low/moderate/spike load qualification;
-7. successful worker and retrieval/vector concurrency qualification; and
-8. bounded post-load recovery with no connection storm, correctness failure, or
+7. successful worker and retrieval/vector concurrency qualification;
+8. controlled revision-transition qualification; and
+9. bounded post-load recovery with no connection storm, correctness failure, or
    tenant-isolation failure.
