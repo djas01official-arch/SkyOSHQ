@@ -36,6 +36,21 @@ resource "google_cloud_run_v2_job" "reconciliation" {
         }
 
         env {
+          name  = "DATABASE_POOL_MAX"
+          value = "3"
+        }
+
+        env {
+          name  = "DATABASE_CONNECTION_TIMEOUT_MS"
+          value = "3000"
+        }
+
+        env {
+          name  = "DATABASE_IDLE_TIMEOUT_MS"
+          value = "30000"
+        }
+
+        env {
           name  = "pnpm_config_verify_deps_before_run"
           value = "false"
         }
