@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 
 import { Client } from 'pg';
 
+import { getDatabaseConnectionTimeoutMillis } from '../operations/database-pool';
+
 const EXPECTED_DATABASE = 'skyos';
 const EXPECTED_MIGRATOR = 'skyos_migrator';
 const EXPECTED_ROLE_NAMES = ['skyos_application_role', 'skyos_reconciliation_role'] as const;
@@ -96,7 +98,10 @@ async function readBootstrapSql(): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  const client = new Client({ connectionString: requireMigrationDatabaseUrl() });
+  const client = new Client({
+    connectionString: requireMigrationDatabaseUrl(),
+    connectionTimeoutMillis: getDatabaseConnectionTimeoutMillis(),
+  });
   let transactionOpen = false;
 
   try {
