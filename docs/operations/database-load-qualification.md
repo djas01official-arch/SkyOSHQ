@@ -16,13 +16,13 @@ and recorded in `database-dr-load-qualification-report.md`.
 
 The reviewed Task 9 configuration is intentionally small and explicit:
 
-| Consumer | Maximum runtime instances/tasks | Connections per runtime | Maximum connections |
+| Consumer | Configured steady-state instances/tasks | Connections per runtime | Nominal connections |
 | --- | ---: | ---: | ---: |
-| Cloud Run web | 2 | 3 | 6 |
+| Cloud Run web | service-level max 2 | 3 | 6 |
 | Background worker pool | 1 | 3 | 3 |
 | Reconciliation job | 1 | 3 | 3 |
 | Migrator/bootstrap job | 1 | 1 | 1 |
-| **Known application maximum** |  |  | **13** |
+| **Known nominal application budget** |  |  | **13** |
 
 Persistent Prisma runtimes use these values:
 
@@ -33,8 +33,13 @@ Persistent Prisma runtimes use these values:
 The migrator uses one `pg.Client` and the same finite 3-second connection
 acquisition timeout.
 
-The 13-connection total is a configured ceiling for known application consumers,
-not a claim about live database capacity.
+The web limit is configured at Cloud Run service level rather than revision level
+so traffic splits and revision transitions share the same service cap. Cloud Run
+can still temporarily exceed a configured maximum during rapid scaling. For that
+reason, **13 is the nominal configured application budget, not an absolute
+platform-level ceiling**. Each runtime is hard-bounded to three pooled database
+connections, while the live spike and deployment gates must prove that transient
+instance overshoot still preserves database headroom.
 
 ## Gate A: establish live capacity and headroom
 
@@ -66,18 +71,24 @@ For Task 9 qualification, reserve the larger of:
 - 10 database connections; or
 - 30% of live `max_connections`, rounded up.
 
-The application budget passes only when:
+The nominal budget is acceptable only when:
 
 ```text
 13 <= max_connections - max(10, ceil(max_connections * 0.30))
 ```
 
+The operational gate is stricter: the **measured peak total application/database
+connection count during moderate load, spike load, and a controlled revision
+transition must remain below the same application allowance**. Static arithmetic
+alone cannot qualify Cloud Run's transient overshoot behavior.
+
 This reserve is intentionally not allocated to normal application traffic. It
 protects operator access, Cloud SQL maintenance/recovery activity, and temporary
-connection overlap during revision transitions.
+runtime overlap.
 
-If this equation fails, do not raise pool sizes or web scaling. Reduce the
-application budget or resize the database only after reviewing observed load.
+If either the nominal equation or the measured-peak gate fails, do not raise
+pool sizes or web scaling. Reduce the application budget or resize the database
+only after reviewing observed load.
 
 ## Gate B: baseline
 
@@ -115,7 +126,7 @@ Record one-minute or finer samples where available:
 - generated request/operation rate;
 - successful and failed operations;
 - p50, p95, and p99 latency;
-- web instance count;
+- web instance count by revision;
 - database total, active, idle, and waiting connections;
 - Cloud SQL CPU and memory utilization;
 - disk latency/utilization where exposed;
@@ -148,9 +159,10 @@ Prisma pool use without intentionally exhausting the database.
 
 Pass conditions:
 
-- web scale never exceeds the configured maximum of two instances;
-- known application connections stay within the 13-connection budget;
-- the headroom reserve remains available;
+- steady-state web scaling respects the service-level target of two instances;
+- any transient platform overshoot is captured rather than ignored;
+- measured peak database connections remain below the calculated application
+  allowance and preserve the headroom reserve;
 - database errors do not appear under normal sustained pressure;
 - p95 latency stabilizes rather than increasing continuously; and
 - Cloud SQL CPU is not sustained above 80% for more than five consecutive
@@ -167,10 +179,11 @@ The purpose is to prove bounded degradation, not to find a destructive maximum.
 Pass conditions:
 
 - database connection count does not grow without bound;
+- any Cloud Run max-instance overshoot is transient and the measured connection
+  peak still preserves the database reserve;
 - pool acquisition fails within the configured finite timeout rather than
   waiting indefinitely when capacity is unavailable;
-- any overload errors are explicit and stop when pressure is removed;
-- the headroom reserve is not consumed by normal application pools; and
+- any overload errors are explicit and stop when pressure is removed; and
 - the service returns to its pre-spike connection/latency range within 60
   seconds after the spike ends, excluding intentionally queued domain work.
 
@@ -188,7 +201,7 @@ Pass conditions:
 
 - the worker remains at one configured instance;
 - leases complete or retry through existing bounded recovery behavior;
-- web and worker together stay inside the connection budget;
+- measured web and worker connections preserve the database headroom reserve;
 - no duplicate domain completion or impossible job state is observed; and
 - reconciliation report-only after the scenario finds no unexpected stranded or
   corrupt state.
@@ -203,7 +216,7 @@ Pass conditions:
 
 - pgvector remains available;
 - retrieval remains tenant-scoped and returns only permitted workspace data;
-- vector/retrieval operations do not force connection use above the budget;
+- vector/retrieval operations preserve the database headroom reserve;
 - no database acquisition timeout occurs during low or moderate retrieval load;
 - query latency stabilizes under the selected moderate rate; and
 - correctness checks are performed on returned citations/results, not latency
@@ -222,8 +235,26 @@ Pass conditions:
 
 - reconciliation exits successfully;
 - its three-connection pool remains bounded;
-- web traffic remains within the same headroom rule; and
+- measured total connections preserve the same headroom rule; and
 - no unexplained connection leak remains after the job exits.
+
+## Scenario 7: controlled revision transition
+
+While low representative traffic is active, deploy only the already-reviewed
+Task 9 runtime/configuration revision using the normal deployment procedure.
+Do not combine this gate with unrelated application changes.
+
+Pass conditions:
+
+- old and new revision instance counts are captured;
+- measured peak database connections preserve the headroom reserve even during
+  overlap;
+- no connection storm or unbounded acquisition wait occurs;
+- the old revision drains normally; and
+- connection count returns toward baseline after the transition.
+
+This gate exists because a service-level maximum reduces revision-overlap risk
+but does not make Cloud Run's instance limit a mathematically absolute cap.
 
 ## Gate C: post-load recovery
 
@@ -272,6 +303,7 @@ The qualification report must include:
 - calculated reserve and resulting application allowance;
 - baseline connection count;
 - actual maximum connection count per scenario;
+- Cloud Run instance count by revision, including any transient overshoot;
 - load duration and generated operation/request rate;
 - p50/p95/p99 latency where the harness exposes it;
 - error counts and classifications;
