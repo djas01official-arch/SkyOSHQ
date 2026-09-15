@@ -1,4 +1,5 @@
-import { redirect } from 'next/navigation';
+﻿import { redirect } from 'next/navigation';
+import { cache } from 'react';
 
 import {
   findActiveSessionUser,
@@ -10,9 +11,15 @@ import { prisma } from '@/lib/prisma';
 
 export type CurrentUser = ActiveSessionUser;
 
+/**
+ * Request-scoped session resolution for React Server Components.
+ * React invalidates this cache across server requests.
+ */
+export const getCurrentSession = cache(async () => auth());
+
 /** Returns only an active, non-deleted user. A valid session alone is not sufficient. */
 export async function getCurrentUser(): Promise<CurrentUser | null> {
-  const session = await auth();
+  const session = await getCurrentSession();
   const userId = session?.user?.id;
 
   if (!userId) {

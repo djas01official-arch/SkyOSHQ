@@ -1,4 +1,4 @@
-import {
+﻿import {
   getOrganizationContext,
   type OrganizationContext,
 } from '../../../database/context/organization-context';
@@ -6,13 +6,12 @@ import { WorkspaceRole } from '../../../database/generated/client/client';
 import { hasWorkspacePermission, type WorkspacePermissionKey } from '@skyos/domain';
 import { redirect } from 'next/navigation';
 
-import { auth } from '@/auth';
-import { getCurrentUser } from '@/lib/auth/current-user';
+import { getCurrentSession, getCurrentUser } from '@/lib/auth/current-user';
 import { prisma } from '@/lib/prisma';
 
 /** Resolves signed session preferences against the current membership state. */
 export async function getCurrentOrganizationContext(): Promise<OrganizationContext | null> {
-  const [session, user] = await Promise.all([auth(), getCurrentUser()]);
+  const [session, user] = await Promise.all([getCurrentSession(), getCurrentUser()]);
 
   if (!user) {
     return null;
