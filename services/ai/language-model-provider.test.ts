@@ -2,13 +2,45 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  createDefaultLanguageModelProviderRegistry,
+  createDefaultLanguageModelProviderRegistry as createRuntimeLanguageModelProviderRegistry,
   DeterministicFakeLanguageModelProvider,
   LanguageModelProviderError,
   LanguageModelProviderRegistry,
   type LanguageModelRequest,
 } from './language-model-provider';
 import type { GeminiGenerateContentClientFactory } from './gemini-language-model-provider';
+
+type RegistryOptions = NonNullable<
+  Parameters<typeof createRuntimeLanguageModelProviderRegistry>[0]
+>;
+
+function createDefaultLanguageModelProviderRegistry(
+  options: RegistryOptions = {},
+): ReturnType<typeof createRuntimeLanguageModelProviderRegistry> {
+  const explicitOptions = Object.fromEntries(
+    Object.entries(options).filter(([, value]) => value !== undefined),
+  ) as RegistryOptions;
+
+  return createRuntimeLanguageModelProviderRegistry({
+    anthropicApiKey: ' ',
+    anthropicFederationRuleId: ' ',
+    anthropicOrganizationId: ' ',
+    anthropicServiceAccountId: ' ',
+    anthropicWorkspaceId: ' ',
+    chatMode: 'FAST',
+    configuredProvider: '',
+    deterministicFailureMessage: '',
+    geminiApiKey: ' ',
+    geminiTransport: 'developer',
+    googleCloudLocation: ' ',
+    googleCloudProject: ' ',
+    liveAiDevelopmentOptIn: '0',
+    model: ' ',
+    openAiApiKey: ' ',
+    runtime: 'test',
+    ...explicitOptions,
+  });
+}
 
 const request: LanguageModelRequest = {
   citations: [],

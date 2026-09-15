@@ -2,10 +2,18 @@ import {
   BackgroundJobAttemptOutcome,
   BackgroundJobKind,
   BackgroundJobStatus,
+  AiOrchestrationStatus,
+  KnowledgeAttachmentProcessingStatus,
+  KnowledgeAttachmentStatus,
   Prisma,
   type BackgroundJob,
   type PrismaClient,
 } from '../generated/client/client';
+import {
+  classifyErrorCategory,
+  createSkyOsLogger,
+  safeErrorTelemetry,
+} from '../../services/observability/logger';
 
 type Transaction = Prisma.TransactionClient;
 
@@ -15,6 +23,7 @@ const DEFAULT_LEASE_MS = 60_000;
 const DEFAULT_BACKOFF_BASE_MS = 1_000;
 const DEFAULT_BACKOFF_MAX_MS = 60_000;
 const MAX_ERROR_MESSAGE_LENGTH = 500;
+const logger = createSkyOsLogger('worker');
 
 export type StructuredJobError = Readonly<{
   code: string;
@@ -413,6 +422,17 @@ export async function executeClaimedBackgroundJob(
     throw new BackgroundJobClaimLostError('The claimed job has no worker id.');
   }
   const workerId = job.workerId;
+  const attemptStartedAt = Date.now();
+  logger.info({
+    operation: 'background_job.claimed',
+    background_job_id: job.id,
+    domain_job_id: job.domainJobId,
+    workspace_id: job.workspaceId,
+    attempt: job.attemptCount,
+    max_attempts: job.maxAttempts,
+    job_kind: job.kind,
+    status: job.status,
+  });
   const { leaseMs } = runtimeOptions(options);
   const heartbeatMs = Math.max(250, Math.floor(leaseMs / 3));
   let heartbeatLost = false;
@@ -433,10 +453,42 @@ export async function executeClaimedBackgroundJob(
       throw new BackgroundJobClaimLostError('The background job lease was lost during execution.');
     }
     await completeBackgroundJob(prisma, job.id, workerId);
+    logger.info({
+      operation: 'background_job.completed',
+      background_job_id: job.id,
+      domain_job_id: job.domainJobId,
+      workspace_id: job.workspaceId,
+      attempt: job.attemptCount,
+      max_attempts: job.maxAttempts,
+      duration_ms: Date.now() - attemptStartedAt,
+      job_kind: job.kind,
+      status: BackgroundJobStatus.SUCCEEDED,
+    });
     return BackgroundJobStatus.SUCCEEDED;
   } catch (error) {
     if (error instanceof BackgroundJobClaimLostError) throw error;
-    return failBackgroundJobAttempt(prisma, job.id, workerId, toStructuredJobError(error), options);
+    const structured = toStructuredJobError(error);
+    const status = await failBackgroundJobAttempt(prisma, job.id, workerId, structured, options);
+    const fields = {
+      operation:
+        status === BackgroundJobStatus.QUEUED
+          ? 'background_job.retry_scheduled'
+          : 'background_job.failed',
+      background_job_id: job.id,
+      domain_job_id: job.domainJobId,
+      workspace_id: job.workspaceId,
+      attempt: job.attemptCount,
+      max_attempts: job.maxAttempts,
+      duration_ms: Date.now() - attemptStartedAt,
+      error_category: classifyErrorCategory(structured.code, structured.retryable),
+      error_code: structured.code,
+      job_kind: job.kind,
+      retry: status === BackgroundJobStatus.QUEUED,
+      status,
+    } as const;
+    if (status === BackgroundJobStatus.FAILED) logger.error(fields);
+    else logger.warning(fields);
+    return status;
   } finally {
     clearInterval(heartbeat);
   }
@@ -449,7 +501,7 @@ export async function recoverExpiredBackgroundJobs(
   options: BackgroundJobRuntimeOptions = {},
 ): Promise<{ failed: number; recovered: number }> {
   requirePositiveInteger(limit, 'limit', 1_000);
-  return prisma.$transaction(async (transaction) => {
+  const result = await prisma.$transaction(async (transaction) => {
     const expired = await transaction.$queryRaw<BackgroundJob[]>(Prisma.sql`
       SELECT *
       FROM "background_jobs"
@@ -461,6 +513,15 @@ export async function recoverExpiredBackgroundJobs(
     `);
     let failed = 0;
     let recovered = 0;
+    const recoveredJobs: Array<{
+      id: string;
+      domainJobId: string;
+      kind: BackgroundJobKind;
+      status: BackgroundJobStatus;
+      workspaceId: string;
+      attemptCount: number;
+      maxAttempts: number;
+    }> = [];
     for (const job of expired) {
       if (!job.lockedAt || !job.firstStartedAt) continue;
       const finishedAt = new Date();
@@ -499,6 +560,15 @@ export async function recoverExpiredBackgroundJobs(
           },
         });
         failed += 1;
+        recoveredJobs.push({
+          id: job.id,
+          domainJobId: job.domainJobId,
+          kind: job.kind,
+          status: BackgroundJobStatus.FAILED,
+          workspaceId: job.workspaceId,
+          attemptCount: job.attemptCount,
+          maxAttempts: job.maxAttempts,
+        });
       } else {
         await transaction.backgroundJob.update({
           where: { id: job.id },
@@ -514,10 +584,103 @@ export async function recoverExpiredBackgroundJobs(
           },
         });
         recovered += 1;
+        recoveredJobs.push({
+          id: job.id,
+          domainJobId: job.domainJobId,
+          kind: job.kind,
+          status: BackgroundJobStatus.QUEUED,
+          workspaceId: job.workspaceId,
+          attemptCount: job.attemptCount,
+          maxAttempts: job.maxAttempts,
+        });
       }
     }
-    return { failed, recovered };
+    return { failed, recovered, recoveredJobs };
   });
+  for (const job of result.recoveredJobs) {
+    logger.warning({
+      operation: 'background_job.lease_expired',
+      background_job_id: job.id,
+      domain_job_id: job.domainJobId,
+      workspace_id: job.workspaceId,
+      attempt: job.attemptCount,
+      max_attempts: job.maxAttempts,
+      error_category: 'dependency',
+      error_code: 'lease_expired',
+      job_kind: job.kind,
+      recovered_count: job.status === BackgroundJobStatus.QUEUED ? 1 : 0,
+      failed_count: job.status === BackgroundJobStatus.FAILED ? 1 : 0,
+      retry: job.status === BackgroundJobStatus.QUEUED,
+      status: job.status,
+    });
+  }
+  return { failed: result.failed, recovered: result.recovered };
+}
+
+export async function inspectBackgroundJobQueue(prisma: PrismaClient): Promise<
+  Readonly<{
+    activeCount: number;
+    oldestQueuedAgeMs: number;
+    queuedCount: number;
+    stuckAiCount: number;
+    stuckKnowledgeCount: number;
+  }>
+> {
+  try {
+    const now = Date.now();
+    const availableBefore = new Date(now);
+    const [queuedCount, activeCount, oldestQueued, stuckAiCount, stuckKnowledgeCount] =
+      await Promise.all([
+        prisma.backgroundJob.count({
+          where: {
+            availableAt: { lte: availableBefore },
+            status: BackgroundJobStatus.QUEUED,
+          },
+        }),
+        prisma.backgroundJob.count({ where: { status: BackgroundJobStatus.PROCESSING } }),
+        prisma.backgroundJob.findFirst({
+          where: {
+            availableAt: { lte: availableBefore },
+            status: BackgroundJobStatus.QUEUED,
+          },
+          orderBy: [{ availableAt: 'asc' }, { createdAt: 'asc' }],
+          select: { availableAt: true },
+        }),
+        prisma.aiOrchestration.count({
+          where: {
+            startedAt: { lte: new Date(now - 30 * 60_000) },
+            status: AiOrchestrationStatus.RUNNING,
+          },
+        }),
+        prisma.knowledgeAttachment.count({
+          where: {
+            processingStatus: {
+              in: [
+                KnowledgeAttachmentProcessingStatus.PROCESSING,
+                KnowledgeAttachmentProcessingStatus.CHUNKING,
+                KnowledgeAttachmentProcessingStatus.EMBEDDING,
+              ],
+            },
+            status: KnowledgeAttachmentStatus.ACTIVE,
+            updatedAt: { lte: new Date(now - 15 * 60_000) },
+          },
+        }),
+      ]);
+    return {
+      activeCount,
+      oldestQueuedAgeMs: oldestQueued ? Math.max(0, now - oldestQueued.availableAt.getTime()) : 0,
+      queuedCount,
+      stuckAiCount,
+      stuckKnowledgeCount,
+    };
+  } catch (error) {
+    logger.error({
+      operation: 'background_job.backlog_inspection',
+      status: 'FAILED',
+      ...safeErrorTelemetry(error),
+    });
+    throw error;
+  }
 }
 
 export async function findDurableJobByDomainReference(

@@ -17,8 +17,38 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
       args    = ["worker"]
 
       env {
+        name  = "SKYOS_ENVIRONMENT"
+        value = "nonprod"
+      }
+
+      env {
+        name  = "SKYOS_SERVICE"
+        value = "worker"
+      }
+
+      env {
+        name  = "SKYOS_IMAGE_DIGEST"
+        value = split("@", var.runtime_image)[1]
+      }
+
+      env {
         name  = "NODE_ENV"
         value = "production"
+      }
+
+      env {
+        name  = "DATABASE_POOL_MAX"
+        value = "3"
+      }
+
+      env {
+        name  = "DATABASE_CONNECTION_TIMEOUT_MS"
+        value = "3000"
+      }
+
+      env {
+        name  = "DATABASE_IDLE_TIMEOUT_MS"
+        value = "30000"
       }
 
       env {
@@ -39,6 +69,11 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
       env {
         name  = "KNOWLEDGE_GCS_BUCKET"
         value = google_storage_bucket.knowledge.name
+      }
+
+      env {
+        name  = "KNOWLEDGE_MAX_FILE_SIZE_BYTES"
+        value = "10485760"
       }
 
       env {
@@ -191,6 +226,7 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
   depends_on = [
     google_project_service.cloud_run,
     google_project_iam_member.worker_vertex_prediction_runtime,
+    google_storage_bucket_iam_member.knowledge_object_worker,
     google_secret_manager_secret_iam_member.worker_database_url_accessor,
     google_secret_manager_secret_iam_member.worker_ai_runtime_accessor,
   ]

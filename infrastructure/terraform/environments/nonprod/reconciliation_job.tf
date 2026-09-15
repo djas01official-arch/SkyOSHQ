@@ -31,8 +31,38 @@ resource "google_cloud_run_v2_job" "reconciliation" {
         args    = ["jobs:reconcile"]
 
         env {
+          name  = "SKYOS_ENVIRONMENT"
+          value = "nonprod"
+        }
+
+        env {
+          name  = "SKYOS_SERVICE"
+          value = "reconciliation"
+        }
+
+        env {
+          name  = "SKYOS_IMAGE_DIGEST"
+          value = split("@", var.runtime_image)[1]
+        }
+
+        env {
           name  = "NODE_ENV"
           value = "production"
+        }
+
+        env {
+          name  = "DATABASE_POOL_MAX"
+          value = "3"
+        }
+
+        env {
+          name  = "DATABASE_CONNECTION_TIMEOUT_MS"
+          value = "3000"
+        }
+
+        env {
+          name  = "DATABASE_IDLE_TIMEOUT_MS"
+          value = "30000"
         }
 
         env {
@@ -48,6 +78,36 @@ resource "google_cloud_run_v2_job" "reconciliation" {
         env {
           name  = "KNOWLEDGE_GCS_BUCKET"
           value = google_storage_bucket.knowledge.name
+        }
+
+        env {
+          name  = "GOOGLE_CLOUD_PROJECT"
+          value = var.project_id
+        }
+
+        env {
+          name  = "EMBEDDING_PROVIDER"
+          value = "vertex"
+        }
+
+        env {
+          name  = "EMBEDDING_MODEL"
+          value = "gemini-embedding-001"
+        }
+
+        env {
+          name  = "EMBEDDING_MODEL_VERSION"
+          value = "retrieval-v1"
+        }
+
+        env {
+          name  = "EMBEDDING_DIMENSIONS"
+          value = "768"
+        }
+
+        env {
+          name  = "EMBEDDING_LOCATION"
+          value = local.primary_region
         }
 
         env {
@@ -89,6 +149,7 @@ resource "google_cloud_run_v2_job" "reconciliation" {
 
   depends_on = [
     google_project_service.cloud_run,
+    google_storage_bucket_iam_member.knowledge_object_reconciliation,
     google_secret_manager_secret_iam_member.reconciliation_database_url_accessor,
   ]
 }

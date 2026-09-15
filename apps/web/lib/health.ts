@@ -2,8 +2,13 @@ export const DEFAULT_DATABASE_READINESS_TIMEOUT_MS = 1_000;
 
 export type DatabaseReadinessCheck = () => Promise<void>;
 
+const HEALTH_RESPONSE_HEADERS = Object.freeze({
+  'cache-control': 'no-store, max-age=0',
+  'content-type': 'application/json; charset=utf-8',
+});
+
 export function liveHealthResponse(): Response {
-  return Response.json({ status: 'ok' });
+  return Response.json({ status: 'ok' }, { headers: HEALTH_RESPONSE_HEADERS });
 }
 
 async function runWithTimeout(
@@ -39,6 +44,6 @@ export async function readinessHealthResponse(
 ): Promise<Response> {
   const ready = await runWithTimeout(check, timeoutMs);
   return ready
-    ? Response.json({ status: 'ok' })
-    : Response.json({ status: 'unavailable' }, { status: 503 });
+    ? Response.json({ status: 'ok' }, { headers: HEALTH_RESPONSE_HEADERS })
+    : Response.json({ status: 'unavailable' }, { headers: HEALTH_RESPONSE_HEADERS, status: 503 });
 }

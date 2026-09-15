@@ -82,6 +82,21 @@ variable "runtime_image" {
   }
 }
 
+variable "observability_notification_channels" {
+  description = "Existing Cloud Monitoring notification channel resource names. Empty keeps policies incident-visible without guessing a recipient."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    condition = alltrue([
+      for channel in var.observability_notification_channels :
+      can(regex("^projects/[^/]+/notificationChannels/[0-9]+$", channel))
+    ])
+    error_message = "Each observability notification channel must be a full Cloud Monitoring resource name."
+  }
+}
+
 variable "enable_web_service" {
   description = "Create the SkyOS Cloud Run web service after its pinned runtime secret versions are ready."
   type        = bool

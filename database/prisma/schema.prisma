@@ -56,8 +56,12 @@ enum KnowledgeAttachmentStatus {
 
 enum KnowledgeAttachmentProcessingStatus {
   UPLOADED
+  QUEUED
   PROCESSING
   PROCESSED
+  CHUNKING
+  EMBEDDING
+  READY
   FAILED
 }
 
@@ -557,6 +561,9 @@ model KnowledgeAttachment {
   uploaderUserId   String                              @db.Uuid
   originalFilename String
   storageKey       String                              @unique
+  storageGeneration String?                             @db.VarChar(32)
+  storageEtag       String?                             @db.VarChar(256)
+  storageCrc32c     String?                             @db.VarChar(64)
   mimeType         String
   sizeBytes        BigInt
   sha256Checksum   String                              @db.Char(64)
