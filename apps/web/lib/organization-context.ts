@@ -3,14 +3,11 @@
   type OrganizationContext,
 } from '../../../database/context/organization-context';
 import { WorkspaceRole } from '../../../database/generated/client/client';
-import { createSkyOsLogger } from '../../../services/observability/logger';
 import { hasWorkspacePermission, type WorkspacePermissionKey } from '@skyos/domain';
 import { redirect } from 'next/navigation';
 
 import { getCurrentSession, getCurrentUser } from '@/lib/auth/current-user';
 import { prisma } from '@/lib/prisma';
-
-const observabilityLogger = createSkyOsLogger('web');
 
 /** Resolves signed session preferences against the current membership state. */
 export async function getCurrentOrganizationContext(): Promise<OrganizationContext | null> {
@@ -20,22 +17,10 @@ export async function getCurrentOrganizationContext(): Promise<OrganizationConte
     return null;
   }
 
-  const contextStartedAt = Date.now();
-  const context = await getOrganizationContext(prisma, user.id, {
+  return getOrganizationContext(prisma, user.id, {
     activeOrganizationId: session?.activeOrganizationId,
     activeWorkspaceId: session?.activeWorkspaceId,
   });
-  const contextDurationMs = Date.now() - contextStartedAt;
-
-  if (contextDurationMs >= 50) {
-    observabilityLogger.info({
-      operation: 'task9.organization_context_slow',
-      status: 'SLOW',
-      duration_ms: contextDurationMs,
-    });
-  }
-
-  return context;
 }
 
 export type WorkspaceCapability = WorkspacePermissionKey;
