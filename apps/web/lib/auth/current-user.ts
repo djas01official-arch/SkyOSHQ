@@ -5,11 +5,14 @@ import {
   findActiveSessionUser,
   type ActiveSessionUser,
 } from '../../../../database/auth/session-user';
+import { createSkyOsLogger } from '../../../../services/observability/logger';
 
 import { auth } from '@/auth';
 import { prisma } from '@/lib/prisma';
 
 export type CurrentUser = ActiveSessionUser;
+
+const observabilityLogger = createSkyOsLogger('web');
 
 /**
  * Request-scoped session resolution for React Server Components.
@@ -32,7 +35,19 @@ export const getCurrentUser = cache(async (): Promise<CurrentUser | null> => {
     return null;
   }
 
-  return findActiveSessionUser(prisma, userId);
+  const activeUserStartedAt = Date.now();
+  const user = await findActiveSessionUser(prisma, userId);
+  const activeUserDurationMs = Date.now() - activeUserStartedAt;
+
+  if (activeUserDurationMs >= 50) {
+    observabilityLogger.info({
+      operation: 'task9.current_user_lookup_slow',
+      status: 'SLOW',
+      duration_ms: activeUserDurationMs,
+    });
+  }
+
+  return user;
 });
 
 export async function requireCurrentUser(): Promise<CurrentUser> {

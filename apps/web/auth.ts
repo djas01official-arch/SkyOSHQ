@@ -82,8 +82,19 @@ function getAuthResult(): AuthResult {
       },
       async jwt({ session, token, trigger, user }) {
         const userId = user?.id ?? token.sub;
+        const activeUserStartedAt = Date.now();
+        const activeUser = userId ? await findActiveSessionUser(prisma, userId) : null;
+        const activeUserDurationMs = Date.now() - activeUserStartedAt;
 
-        if (!userId || !(await findActiveSessionUser(prisma, userId))) {
+        if (activeUserDurationMs >= 50) {
+          observabilityLogger.info({
+            operation: 'task9.auth_active_user_slow',
+            status: 'SLOW',
+            duration_ms: activeUserDurationMs,
+          });
+        }
+
+        if (!userId || !activeUser) {
           return null;
         }
 
