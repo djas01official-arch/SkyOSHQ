@@ -5,6 +5,7 @@ import {
   findActiveSessionUser,
   type ActiveSessionUser,
 } from '../../../../database/auth/session-user';
+import { task9Timed } from '../../../../database/operations/task9-runtime-diagnostics';
 
 import { auth } from '@/auth';
 import { prisma } from '@/lib/prisma';
@@ -15,7 +16,9 @@ export type CurrentUser = ActiveSessionUser;
  * Request-scoped session resolution for React Server Components.
  * React invalidates this cache across server requests.
  */
-export const getCurrentSession = cache(async () => auth());
+export const getCurrentSession = cache(async () =>
+  task9Timed('task9.auth_resolution', () => auth()),
+);
 
 /**
  * Returns only an active, non-deleted user.

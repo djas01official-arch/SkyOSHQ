@@ -3,6 +3,7 @@
   type OrganizationContext,
 } from '../../../database/context/organization-context';
 import { WorkspaceRole } from '../../../database/generated/client/client';
+import { task9Timed } from '../../../database/operations/task9-runtime-diagnostics';
 import { hasWorkspacePermission, type WorkspacePermissionKey } from '@skyos/domain';
 import { redirect } from 'next/navigation';
 import { cache } from 'react';
@@ -19,10 +20,12 @@ export const getCurrentOrganizationContext = cache(
       return null;
     }
 
-    return getOrganizationContext(prisma, user.id, {
-      activeOrganizationId: session?.activeOrganizationId,
-      activeWorkspaceId: session?.activeWorkspaceId,
-    });
+    return task9Timed('task9.organization_context', () =>
+      getOrganizationContext(prisma, user.id, {
+        activeOrganizationId: session?.activeOrganizationId,
+        activeWorkspaceId: session?.activeWorkspaceId,
+      }),
+    );
   },
 );
 

@@ -1,4 +1,7 @@
 import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
+
+import { attachTask9PoolDiagnostics } from './task9-runtime-diagnostics';
 
 const DEFAULT_DATABASE_POOL_MAX = 3;
 const DEFAULT_DATABASE_CONNECTION_TIMEOUT_MS = 3_000;
@@ -74,8 +77,14 @@ export function createPrismaPgAdapter(
     throw new Error('DATABASE_URL is required to create a database adapter.');
   }
 
-  return new PrismaPg({
+  const configuration = getDatabasePoolConfiguration(environment);
+
+  const pool = new Pool({
     connectionString,
-    ...getDatabasePoolConfiguration(environment),
+    ...configuration,
   });
+
+  attachTask9PoolDiagnostics(pool);
+
+  return new PrismaPg(pool);
 }
