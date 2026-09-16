@@ -1,4 +1,4 @@
-﻿import { redirect } from 'next/navigation';
+import { redirect } from 'next/navigation';
 import { cache } from 'react';
 
 import {
@@ -17,8 +17,14 @@ export type CurrentUser = ActiveSessionUser;
  */
 export const getCurrentSession = cache(async () => auth());
 
-/** Returns only an active, non-deleted user. A valid session alone is not sufficient. */
-export async function getCurrentUser(): Promise<CurrentUser | null> {
+/**
+ * Returns only an active, non-deleted user.
+ *
+ * The lookup is request-scoped so pages that compose authentication and
+ * organization/workspace context do not repeat the same active-user query
+ * during a single server render.
+ */
+export const getCurrentUser = cache(async (): Promise<CurrentUser | null> => {
   const session = await getCurrentSession();
   const userId = session?.user?.id;
 
@@ -27,7 +33,7 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
   }
 
   return findActiveSessionUser(prisma, userId);
-}
+});
 
 export async function requireCurrentUser(): Promise<CurrentUser> {
   const user = await getCurrentUser();
