@@ -177,6 +177,14 @@ function tokenAssumption(
   }
 }
 
+function pricingContextForProvider(
+  provider: AiOrchestrationProviderIdentity,
+): Pick<AiCostEstimateRun, 'pricingContext'> {
+  return provider.providerKey === 'anthropic'
+    ? { pricingContext: Object.freeze({ inferenceGeo: 'global' }) }
+    : {};
+}
+
 /**
  * Builds an immutable, estimator-ready execution shape without I/O, routing,
  * provider calls, pricing lookup, or implicit time/configuration access.
@@ -208,6 +216,7 @@ export function buildAiExecutionCostPlan(input: AiExecutionCostPlanInput): AiExe
       modelVersion: provider.modelVersion,
       outputTokens: assumedTokens.outputTokens,
       providerKey: provider.providerKey,
+      ...pricingContextForProvider(provider),
       role: step.role,
     });
   });

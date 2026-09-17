@@ -17,6 +17,44 @@ const workspaceRoot = fileURLToPath(new URL('../..', import.meta.url));
 const HOSTNAME_PATTERN =
   /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/u;
 
+const PRODUCTION_CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "base-uri 'self'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "frame-src 'none'",
+  "form-action 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: https://lh3.googleusercontent.com",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "media-src 'none'",
+  "worker-src 'self' blob:",
+  'upgrade-insecure-requests',
+].join('; ');
+
+export function getSkyosProductionSecurityHeaders(
+  environment: string | undefined,
+): Array<{ key: string; value: string }> | undefined {
+  if (environment !== 'production') return undefined;
+  return [
+    { key: 'Content-Security-Policy', value: PRODUCTION_CONTENT_SECURITY_POLICY },
+    {
+      key: 'Strict-Transport-Security',
+      value: 'max-age=31536000; includeSubDomains',
+    },
+    { key: 'X-Content-Type-Options', value: 'nosniff' },
+    { key: 'X-Frame-Options', value: 'DENY' },
+    { key: 'Referrer-Policy', value: 'no-referrer' },
+    {
+      key: 'Permissions-Policy',
+      value: 'camera=(), geolocation=(), microphone=(), payment=(), usb=()',
+    },
+    { key: 'X-Permitted-Cross-Domain-Policies', value: 'none' },
+  ];
+}
+
 function isAllowedDevOriginHostname(value: string): boolean {
   if (/^[0-9.]+$/u.test(value) || value.length > 253) return false;
   return HOSTNAME_PATTERN.test(value);
@@ -100,8 +138,19 @@ export function createSkyosNextConfig(
   allowedOrigins = process.env.SKYOS_DEV_ALLOWED_ORIGINS,
 ): NextConfig {
   const allowedDevOrigins = getSkyosDevAllowedOrigins(environment, allowedOrigins);
+  const productionSecurityHeaders = getSkyosProductionSecurityHeaders(environment);
   return {
     ...(allowedDevOrigins ? { allowedDevOrigins } : {}),
+    ...(productionSecurityHeaders
+      ? {
+          headers: async () => [
+            {
+              headers: productionSecurityHeaders,
+              source: '/:path*',
+            },
+          ],
+        }
+      : {}),
     distDir: getTestBuildDirectory(),
     output: 'standalone',
     outputFileTracingRoot: workspaceRoot,
