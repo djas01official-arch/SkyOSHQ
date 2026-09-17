@@ -1,14 +1,10 @@
 import { redirect } from 'next/navigation';
 import { cache } from 'react';
 
-import {
-  findActiveSessionUser,
-  type ActiveSessionUser,
-} from '../../../../database/auth/session-user';
+import type { ActiveSessionUser } from '../../../../database/auth/session-user';
 import { task9Timed } from '../../../../database/operations/task9-runtime-diagnostics';
 
 import { auth } from '@/auth';
-import { prisma } from '@/lib/prisma';
 
 export type CurrentUser = ActiveSessionUser;
 
@@ -31,11 +27,16 @@ export const getCurrentUser = cache(async (): Promise<CurrentUser | null> => {
   const session = await getCurrentSession();
   const userId = session?.user?.id;
 
-  if (!userId) {
+  if (!session || !userId) {
     return null;
   }
 
-  return findActiveSessionUser(prisma, userId);
+  return {
+    displayName: session.activeUserDisplayName,
+    email: session.activeUserEmail,
+    id: userId,
+    image: session.activeUserImage,
+  };
 });
 
 export async function requireCurrentUser(): Promise<CurrentUser> {

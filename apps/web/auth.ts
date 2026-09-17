@@ -1,4 +1,4 @@
-﻿import { PrismaAdapter } from '@auth/prisma-adapter';
+import { PrismaAdapter } from '@auth/prisma-adapter';
 import NextAuth from 'next-auth';
 
 import { authenticateCredentials } from '../../database/auth/credentials';
@@ -83,9 +83,19 @@ function getAuthResult(): AuthResult {
       async jwt({ session, token, trigger, user }) {
         const userId = user?.id ?? token.sub;
 
-        if (!userId || !(await findActiveSessionUser(prisma, userId))) {
+        if (!userId) {
           return null;
         }
+
+        const activeUser = await findActiveSessionUser(prisma, userId);
+
+        if (!activeUser) {
+          return null;
+        }
+
+        token.activeUserDisplayName = activeUser.displayName;
+        token.activeUserEmail = activeUser.email;
+        token.activeUserImage = activeUser.image;
 
         if (trigger !== 'signIn' && trigger !== 'update') {
           return token;
@@ -108,6 +118,9 @@ function getAuthResult(): AuthResult {
           session.user.id = token.sub;
         }
 
+        session.activeUserDisplayName = getSessionSelection(token.activeUserDisplayName);
+        session.activeUserEmail = getSessionSelection(token.activeUserEmail);
+        session.activeUserImage = getSessionSelection(token.activeUserImage);
         session.activeOrganizationId = getSessionSelection(token.activeOrganizationId);
         session.activeWorkspaceId = getSessionSelection(token.activeWorkspaceId);
 
