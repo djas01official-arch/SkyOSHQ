@@ -27,6 +27,11 @@ resource "google_cloud_run_v2_service" "web" {
     max_instance_count = 2
   }
 
+  traffic {
+    percent = 100
+    type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
+  }
+
   template {
     service_account       = google_service_account.workload["web"].email
     execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
