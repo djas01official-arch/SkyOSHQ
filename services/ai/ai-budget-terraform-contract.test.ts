@@ -102,6 +102,19 @@ test('Terraform enables the complete AI budget runtime contract in both executio
   }
 });
 
+test('Terraform routes public web traffic only to the latest revision', () => {
+  const web = terraformFile('web_service.tf');
+  const trafficBlocks = web.match(/^\s*traffic\s*\{/gmu) ?? [];
+  assert.equal(trafficBlocks.length, 1, 'Web service must declare exactly one traffic target.');
+
+  const trafficBody = /traffic\s*\{([^}]*)\}/u.exec(web)?.[1];
+  assert.ok(trafficBody, 'Web service must declare an explicit traffic block.');
+  assert.match(trafficBody, /percent\s*=\s*100/u);
+  assert.match(trafficBody, /type\s*=\s*"TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"/u);
+  assert.doesNotMatch(trafficBody, /\brevision\s*=/u);
+  assert.doesNotMatch(trafficBody, /\btag\s*=/u);
+});
+
 test('Task 10 nonprod budget thresholds bound the current orchestration assignments', () => {
   const orchestration = terraformFile('ai_orchestration.tf');
   const environment = Object.fromEntries(
