@@ -101,6 +101,15 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
         value = local.durable_ai_chat_mode
       }
 
+      dynamic "env" {
+        for_each = local.ai_budget_runtime_env
+
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+
       env {
         name  = "GEMINI_TRANSPORT"
         value = "vertex"
