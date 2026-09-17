@@ -111,6 +111,15 @@ resource "google_cloud_run_v2_service" "web" {
       }
 
       dynamic "env" {
+        for_each = local.ai_budget_runtime_env
+
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+
+      dynamic "env" {
         for_each = local.durable_ai_role_env
 
         content {
