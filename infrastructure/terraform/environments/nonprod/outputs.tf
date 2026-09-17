@@ -9,8 +9,18 @@ output "knowledge_bucket_name" {
 }
 
 output "knowledge_object_runtime_role" {
-  description = "Project custom role granted at the Knowledge bucket scope."
+  description = "Web upload custom role granted at the Knowledge bucket scope."
   value       = google_project_iam_custom_role.knowledge_object_runtime.name
+}
+
+output "knowledge_object_worker_role" {
+  description = "Read-only worker custom role granted at the Knowledge bucket scope."
+  value       = google_project_iam_custom_role.knowledge_object_worker.name
+}
+
+output "knowledge_object_reconciliation_role" {
+  description = "Read/list reconciliation custom role granted at the Knowledge bucket scope."
+  value       = google_project_iam_custom_role.knowledge_object_reconciliation.name
 }
 
 output "web_service_account_email" {
@@ -19,7 +29,7 @@ output "web_service_account_email" {
 }
 
 output "worker_service_account_email" {
-  description = "Future Cloud Run worker workload identity."
+  description = "Cloud Run worker workload identity."
   value       = google_service_account.workload["worker"].email
 }
 
@@ -29,7 +39,7 @@ output "migrator_service_account_email" {
 }
 
 output "reconciliation_service_account_email" {
-  description = "Future Cloud Run reconciliation workload identity."
+  description = "Cloud Run reconciliation workload identity."
   value       = google_service_account.workload["reconciliation"].email
 }
 
@@ -129,4 +139,27 @@ output "web_service_name" {
 output "web_service_uri" {
   description = "Cloud Run web service URI when enable_web_service is true."
   value       = try(google_cloud_run_v2_service.web[0].uri, null)
+}
+
+output "operations_dashboard_id" {
+  description = "Cloud Monitoring dashboard resource ID for SkyOS operations."
+  value       = google_monitoring_dashboard.operations.id
+}
+
+output "observability_alert_policy_names" {
+  description = "Task 8 alert policy display names."
+  value = compact(concat(
+    [for policy in google_monitoring_alert_policy.application : policy.display_name],
+    [
+      google_monitoring_alert_policy.web_5xx_rate.display_name,
+      google_monitoring_alert_policy.web_latency.display_name,
+      google_monitoring_alert_policy.runtime_probe_failures.display_name,
+      try(google_monitoring_alert_policy.web_uptime[0].display_name, ""),
+      google_monitoring_alert_policy.reconciliation_failure.display_name,
+      google_monitoring_alert_policy.reconciliation_execution_failure.display_name,
+      google_monitoring_alert_policy.reconciliation_absent.display_name,
+      google_monitoring_alert_policy.cloud_sql_saturation.display_name,
+      google_monitoring_alert_policy.controlled_alert.display_name,
+    ],
+  ))
 }

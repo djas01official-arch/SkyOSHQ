@@ -47,9 +47,9 @@ The reviewed root defines:
 - one private, regional, Standard Knowledge bucket in `europe-west1`;
 - four separate user-managed service-account identities: web, worker, migrator,
   and reconciliation;
-- one exact project custom role containing only `storage.objects.create`,
-  `storage.objects.get`, and `storage.objects.delete`;
-- bucket-scoped grants of that role to web, worker, and reconciliation only;
+- separate minimal project custom roles for the web upload boundary, read-only
+  ingestion worker, and bounded-list reconciliation job;
+- bucket-scoped grants of those roles to web, worker, and reconciliation only;
 - a dedicated VPC, runtime subnet, and Private Services Access path for Cloud SQL;
 - a PostgreSQL Cloud SQL instance and the reviewed migration identity foundation;
 - one immutable-tag Artifact Registry repository for the shared SkyOS runtime image;

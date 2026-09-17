@@ -11,6 +11,7 @@ test('liveness is deterministic and has no dependency check boundary', async () 
   const response = liveHealthResponse();
 
   assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store, max-age=0');
   assert.deepEqual(await body(response), { status: 'ok' });
 });
 
@@ -22,6 +23,7 @@ test('readiness returns success after one successful database check', async () =
 
   assert.equal(calls, 1);
   assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store, max-age=0');
   assert.deepEqual(await body(response), { status: 'ok' });
 });
 

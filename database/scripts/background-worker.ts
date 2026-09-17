@@ -1,7 +1,5 @@
 import 'dotenv/config';
 
-import { PrismaPg } from '@prisma/adapter-pg';
-
 import {
   createSkyOsBackgroundJobHandler,
   recoverSkyOsJobAfterExpiredLease,
@@ -9,18 +7,22 @@ import {
 import { createAiRuntimeDependencies } from '../ai/ai-runtime-dependencies';
 import { PrismaClient } from '../generated/client/client';
 import { assertPgvectorAvailable } from '../knowledge/vector-health';
+import { createPrismaPgAdapter } from '../operations/database-pool';
 import { createDefaultDocumentParserRegistry } from '../../services/document-processing/document-parser';
 import { getBackgroundWorkerConfig } from '../../services/background-jobs/config';
 import { runBackgroundWorker } from '../../services/background-jobs/worker';
 import { createDefaultKnowledgeChunkingStrategyRegistry } from '../../services/knowledge-chunking/chunking-strategy';
 import { createDefaultEmbeddingProviderRegistry } from '../../services/embeddings/embedding-provider';
 import { createKnowledgeObjectStorage } from '../../services/storage/knowledge-object-storage';
+import { createSkyOsLogger, safeErrorTelemetry } from '../../services/observability/logger';
+
+const logger = createSkyOsLogger('worker');
 
 async function main(): Promise<void> {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString)
     throw new Error('DATABASE_URL is required to start the background worker.');
-  const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
+  const prisma = new PrismaClient({ adapter: createPrismaPgAdapter(connectionString) });
   const controller = new AbortController();
   const requestShutdown = () => controller.abort();
   process.once('SIGINT', requestShutdown);
@@ -49,9 +51,10 @@ async function main(): Promise<void> {
 
   try {
     await assertPgvectorAvailable(prisma);
-    console.log(`SkyOS background worker ${config.workerId} started.`);
+    logger.notice({ operation: 'worker.lifecycle', status: 'STARTED' });
     await runBackgroundWorker({
       handler: createSkyOsBackgroundJobHandler(prisma, dependencies),
+      observabilityIntervalMs: config.observabilityIntervalMs,
       pollIntervalMs: config.pollIntervalMs,
       prisma,
       recoveryHook: recoverSkyOsJobAfterExpiredLease,
@@ -60,7 +63,7 @@ async function main(): Promise<void> {
       signal: controller.signal,
       workerId: config.workerId,
     });
-    console.log(`SkyOS background worker ${config.workerId} stopped safely.`);
+    logger.notice({ operation: 'worker.lifecycle', status: 'STOPPED' });
   } finally {
     process.off('SIGINT', requestShutdown);
     process.off('SIGTERM', requestShutdown);
@@ -69,6 +72,10 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : 'The background worker failed.');
+  logger.critical({
+    operation: 'worker.lifecycle',
+    status: 'FAILED',
+    ...safeErrorTelemetry(error),
+  });
   process.exitCode = 1;
 });

@@ -82,6 +82,13 @@ jobs:
           pnpm test:ops
           pnpm exec tsx --test scripts/runtime-image-contract.test.ts
 
+      - name: Run Task 10 deployment contract tests
+        run: >-
+          pnpm exec tsx --test
+          services/ai/ai-budget-runtime-config.test.ts
+          services/ai/ai-budget-terraform-contract.test.ts
+          apps/web/next.config.test.ts
+
       - name: Generate Prisma Client
         run: pnpm db:generate
 

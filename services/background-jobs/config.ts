@@ -23,6 +23,12 @@ export function getBackgroundWorkerConfig() {
     throw new Error('BACKGROUND_WORKER_ID contains unsupported characters or is too long.');
   }
   return {
+    observabilityIntervalMs: integerEnvironmentValue(
+      'BACKGROUND_JOB_OBSERVABILITY_MS',
+      60_000,
+      10_000,
+      3_600_000,
+    ),
     pollIntervalMs: integerEnvironmentValue('BACKGROUND_JOB_POLL_MS', 1_000, 10, 3_600_000),
     recoveryIntervalMs: integerEnvironmentValue(
       'BACKGROUND_JOB_RECOVERY_MS',
