@@ -83,12 +83,16 @@ function getAuthResult(): AuthResult {
       async jwt({ session, token, trigger, user }) {
         const userId = user?.id ?? token.sub;
 
-        if (!userId || !(await findActiveSessionUser(prisma, userId))) {
+        if (!userId) {
           return null;
         }
 
         if (trigger !== 'signIn' && trigger !== 'update') {
           return token;
+        }
+
+        if (!(await findActiveSessionUser(prisma, userId))) {
+          return null;
         }
 
         const context = await getOrganizationContext(prisma, userId, {
