@@ -2,9 +2,15 @@ import { IdempotencyStrategy, Storage } from '@google-cloud/storage';
 
 import {
   getStorageKeySegments,
+  getStorageGeneration,
+  type ListObjectsInput,
+  type ObjectGenerationOptions,
   type ObjectStorage,
+  type ObjectStorageListPage,
+  type ObjectStorageMetadata,
   type PutObjectInput,
   StorageObjectAlreadyExistsError,
+  StorageObjectGenerationMismatchError,
   StorageObjectNotFoundError,
 } from './object-storage';
 
@@ -22,9 +28,30 @@ export const GCS_OBJECT_STORAGE_RETRY_OPTIONS = Object.freeze({
 export type GcsFile = Readonly<{
   delete(): Promise<unknown>;
   download(): Promise<[Buffer]>;
+  getMetadata(): Promise<
+    [
+      Readonly<{
+        contentType?: string;
+        crc32c?: string;
+        etag?: string;
+        generation?: string | number;
+        size?: string | number;
+      }>,
+      unknown,
+    ]
+  >;
+  name?: string;
+  metadata?: Readonly<{
+    contentType?: string;
+    crc32c?: string;
+    etag?: string;
+    generation?: string | number;
+    size?: string | number;
+  }>;
   save(
     data: Uint8Array,
     options: Readonly<{
+      metadata?: Readonly<{ contentType: string }>;
       preconditionOpts: Readonly<{ ifGenerationMatch: 0 }>;
       resumable: false;
       timeout: number;
@@ -34,7 +61,15 @@ export type GcsFile = Readonly<{
 }>;
 
 export type GcsBucket = Readonly<{
-  file(key: string): GcsFile;
+  file(key: string, options?: Readonly<{ generation?: string }>): GcsFile;
+  getFiles(
+    options: Readonly<{
+      autoPaginate: false;
+      maxResults: number;
+      pageToken?: string;
+      prefix?: string;
+    }>,
+  ): Promise<[readonly GcsFile[], Readonly<{ pageToken?: string }> | null, unknown]>;
 }>;
 
 export type GcsStorageClient = Readonly<{
@@ -62,6 +97,30 @@ function isGenerationPreconditionFailure(error: unknown): boolean {
   return getStatusCode(error) === 412;
 }
 
+function toMetadata(
+  metadata: Readonly<{
+    contentType?: string;
+    crc32c?: string;
+    etag?: string;
+    generation?: string | number;
+    size?: string | number;
+  }>,
+): ObjectStorageMetadata {
+  const size = String(metadata.size ?? '');
+  if (!/^\d+$/u.test(size)) throw new Error('GCS returned invalid object size metadata.');
+  const generation = String(metadata.generation ?? '');
+  if (!/^[1-9]\d*$/u.test(generation)) {
+    throw new Error('GCS returned invalid object generation metadata.');
+  }
+  return {
+    contentType: metadata.contentType ?? null,
+    crc32c: metadata.crc32c ?? null,
+    etag: metadata.etag ?? null,
+    generation,
+    sizeBytes: BigInt(size),
+  };
+}
+
 function createDefaultGcsStorageClient(): GcsStorageClient {
   // Storage resolves Application Default Credentials at request time. Do not
   // configure key files, inline credentials, or a service-account identity.
@@ -69,9 +128,9 @@ function createDefaultGcsStorageClient(): GcsStorageClient {
 }
 
 /**
- * Private Google Cloud Storage adapter. It deliberately exposes no public ACL,
- * URL, bucket-management, or list operations; SkyOS remains the download
- * authorization boundary.
+ * Private Google Cloud Storage adapter. It exposes no public ACL, URL, or
+ * bucket-management operations. Listing is bounded and paginated for trusted
+ * reconciliation; SkyOS remains the download authorization boundary.
  */
 export class GcsObjectStorage implements ObjectStorage {
   readonly #bucket: GcsBucket;
@@ -84,16 +143,20 @@ export class GcsObjectStorage implements ObjectStorage {
     this.#bucket = client.bucket(normalizedBucketName);
   }
 
-  async putObject({ data, key }: PutObjectInput): Promise<void> {
+  async putObject({ contentType, data, key }: PutObjectInput): Promise<ObjectStorageMetadata> {
     getStorageKeySegments(key);
+    const file = this.#bucket.file(key);
 
     try {
-      await this.#bucket.file(key).save(data, {
+      await file.save(data, {
+        ...(contentType ? { metadata: { contentType } } : {}),
         preconditionOpts: { ifGenerationMatch: 0 },
         resumable: false,
         timeout: GCS_OBJECT_STORAGE_TIMEOUT_MS,
         validation: 'crc32c',
       });
+      const [metadata] = await file.getMetadata();
+      return toMetadata(metadata);
     } catch (error) {
       if (isGenerationPreconditionFailure(error)) {
         throw new StorageObjectAlreadyExistsError('The generated storage key already exists.', {
@@ -104,11 +167,12 @@ export class GcsObjectStorage implements ObjectStorage {
     }
   }
 
-  async getObject(key: string): Promise<Uint8Array> {
+  async getObject(key: string, options: ObjectGenerationOptions = {}): Promise<Uint8Array> {
     getStorageKeySegments(key);
+    const generation = getStorageGeneration(options.generation);
 
     try {
-      const [data] = await this.#bucket.file(key).download();
+      const [data] = await this.#bucket.file(key, { generation }).download();
       return new Uint8Array(data);
     } catch (error) {
       if (isNotFoundError(error)) {
@@ -118,14 +182,58 @@ export class GcsObjectStorage implements ObjectStorage {
     }
   }
 
-  async deleteObject(key: string): Promise<void> {
+  async getObjectMetadata(
+    key: string,
+    options: ObjectGenerationOptions = {},
+  ): Promise<ObjectStorageMetadata> {
     getStorageKeySegments(key);
-
+    const generation = getStorageGeneration(options.generation);
     try {
-      await this.#bucket.file(key).delete();
+      const [metadata] = await this.#bucket.file(key, { generation }).getMetadata();
+      return toMetadata(metadata);
     } catch (error) {
-      if (isNotFoundError(error)) return;
+      if (isNotFoundError(error)) {
+        throw new StorageObjectNotFoundError('The stored object does not exist.', { cause: error });
+      }
       throw error;
     }
+  }
+
+  async deleteObject(key: string, options: ObjectGenerationOptions = {}): Promise<void> {
+    getStorageKeySegments(key);
+    const generation = getStorageGeneration(options.generation);
+
+    try {
+      await this.#bucket.file(key, { generation }).delete();
+    } catch (error) {
+      if (isNotFoundError(error)) return;
+      if (isGenerationPreconditionFailure(error)) {
+        throw new StorageObjectGenerationMismatchError(
+          'The stored object generation changed before deletion.',
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+
+  async listObjects(input: ListObjectsInput): Promise<ObjectStorageListPage> {
+    if (!Number.isSafeInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 1_000) {
+      throw new Error('Object list page size must be between 1 and 1000.');
+    }
+    if (input.prefix) getStorageKeySegments(input.prefix.replace(/\/$/u, ''));
+    const [files, nextQuery] = await this.#bucket.getFiles({
+      autoPaginate: false,
+      maxResults: input.pageSize,
+      pageToken: input.pageToken,
+      prefix: input.prefix,
+    });
+    return {
+      items: files.map((file) => ({
+        key: file.name ?? '',
+        metadata: toMetadata(file.metadata ?? {}),
+      })),
+      nextPageToken: nextQuery?.pageToken ?? null,
+    };
   }
 }

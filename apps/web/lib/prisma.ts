@@ -1,6 +1,5 @@
-import { PrismaPg } from '@prisma/adapter-pg';
-
 import { PrismaClient } from '../../../database/generated/client/client';
+import { createPrismaPgAdapter } from '../../../database/operations/database-pool';
 
 const globalForPrisma = globalThis as typeof globalThis & {
   prisma?: PrismaClient;
@@ -16,7 +15,7 @@ function createPrismaClient(): PrismaClient {
   }
 
   return new PrismaClient({
-    adapter: new PrismaPg({ connectionString }),
+    adapter: createPrismaPgAdapter(connectionString),
   });
 }
 

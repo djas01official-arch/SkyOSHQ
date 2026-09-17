@@ -26,7 +26,7 @@ locals {
     }
   }
 
-  storage_runtime_workloads = toset(["web", "worker", "reconciliation"])
+  storage_runtime_workloads = toset(["web"])
 
   anthropic_web_wif_runtime_env = {
     for name, value in {

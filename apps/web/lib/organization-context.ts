@@ -1,28 +1,33 @@
-import {
+﻿import {
   getOrganizationContext,
   type OrganizationContext,
 } from '../../../database/context/organization-context';
 import { WorkspaceRole } from '../../../database/generated/client/client';
+import { task9Timed } from '../../../database/operations/task9-runtime-diagnostics';
 import { hasWorkspacePermission, type WorkspacePermissionKey } from '@skyos/domain';
 import { redirect } from 'next/navigation';
+import { cache } from 'react';
 
-import { auth } from '@/auth';
-import { getCurrentUser } from '@/lib/auth/current-user';
+import { getCurrentSession, getCurrentUser } from '@/lib/auth/current-user';
 import { prisma } from '@/lib/prisma';
 
 /** Resolves signed session preferences against the current membership state. */
-export async function getCurrentOrganizationContext(): Promise<OrganizationContext | null> {
-  const [session, user] = await Promise.all([auth(), getCurrentUser()]);
+export const getCurrentOrganizationContext = cache(
+  async (): Promise<OrganizationContext | null> => {
+    const [session, user] = await Promise.all([getCurrentSession(), getCurrentUser()]);
 
-  if (!user) {
-    return null;
-  }
+    if (!user) {
+      return null;
+    }
 
-  return getOrganizationContext(prisma, user.id, {
-    activeOrganizationId: session?.activeOrganizationId,
-    activeWorkspaceId: session?.activeWorkspaceId,
-  });
-}
+    return task9Timed('task9.organization_context', () =>
+      getOrganizationContext(prisma, user.id, {
+        activeOrganizationId: session?.activeOrganizationId,
+        activeWorkspaceId: session?.activeWorkspaceId,
+      }),
+    );
+  },
+);
 
 export type WorkspaceCapability = WorkspacePermissionKey;
 

@@ -23,8 +23,10 @@ import {
   type EmbeddingProvider,
   type EmbeddingProviderRegistry,
 } from '../../services/embeddings/embedding-provider';
+import { classifyErrorCategory, createSkyOsLogger } from '../../services/observability/logger';
 
 type Transaction = Prisma.TransactionClient;
+const observabilityLogger = createSkyOsLogger('worker');
 
 export class KnowledgeEmbeddingError extends Error {}
 export class KnowledgeEmbeddingConflictError extends KnowledgeEmbeddingError {}
@@ -402,6 +404,7 @@ export async function executeKnowledgeEmbeddingJob(
   jobId: string,
   retryAllowed = true,
 ): Promise<void> {
+  const startedAt = Date.now();
   const job = await claimKnowledgeEmbeddingJob(prisma, jobId);
   try {
     await requireKnowledgeWorkspaceAccess(prisma, job.requestedByUserId, job.workspaceId, false);
@@ -434,8 +437,40 @@ export async function executeKnowledgeEmbeddingJob(
     }
     const vectors = await embedChunks(provider, chunkSet.chunks);
     await completeKnowledgeEmbeddingJob(prisma, job, provider, chunkSet, vectors);
+    observabilityLogger.info({
+      operation: 'knowledge.embedding_terminal',
+      domain_job_id: job.id,
+      document_id:
+        chunkSet.documentVersion?.documentId ??
+        chunkSet.attachmentExtraction?.attachment.documentId,
+      workspace_id: job.workspaceId,
+      provider: provider.providerKey,
+      model: provider.modelKey,
+      status: KnowledgeEmbeddingJobStatus.SUCCEEDED,
+      duration_ms: Date.now() - startedAt,
+      batch_size: provider.maxBatchSize,
+      dimensions: provider.dimensions,
+      processed_chunks: chunkSet.chunks.length,
+    });
   } catch (error) {
-    await transitionFailedEmbeddingJob(prisma, job, failureFrom(error), retryAllowed);
+    const failure = failureFrom(error);
+    const retry = failure.retryable && retryAllowed;
+    const fields = {
+      operation: 'knowledge.embedding_terminal',
+      domain_job_id: job.id,
+      workspace_id: job.workspaceId,
+      provider: job.providerKey,
+      model: job.modelKey,
+      status: retry ? KnowledgeEmbeddingJobStatus.QUEUED : KnowledgeEmbeddingJobStatus.FAILED,
+      duration_ms: Date.now() - startedAt,
+      dimensions: job.dimensions,
+      error_category: classifyErrorCategory(failure.code, failure.retryable),
+      error_code: failure.code,
+      retry,
+    } as const;
+    if (retry) observabilityLogger.warning(fields);
+    else observabilityLogger.error(fields);
+    await transitionFailedEmbeddingJob(prisma, job, failure, retryAllowed);
   }
 }
 
