@@ -12,6 +12,29 @@ variable "ai_chat_mode" {
 locals {
   durable_ai_chat_mode = upper(trimspace(var.ai_chat_mode))
 
+  # Task 10 nonprod launch policy. The profile is deliberately conservative at
+  # the repository's verified pricing: FAST remains below the $0.10 confirmation
+  # threshold, while the current BALANCED/DEEP/CRITICAL plans require explicit
+  # confirmation and remain below the $1.00 task hard maximum. Provider request
+  # character limits remain authoritative and exact input measurement is used
+  # when the provider/accounting contract can supply it safely.
+  ai_budget_runtime_env = {
+    AI_BUDGET_ENFORCEMENT               = "ENABLED"
+    AI_BUDGET_CONFIRMATION_THRESHOLD_USD = "0.100000000000"
+    AI_BUDGET_TASK_HARD_MAX_USD          = "1.000000000000"
+    AI_INPUT_TOKEN_MEASUREMENT            = "WHEN_AVAILABLE"
+    AI_COST_FAST_INPUT_TOKENS             = "32000"
+    AI_COST_FAST_OUTPUT_TOKENS            = "4096"
+    AI_COST_CANDIDATE_INPUT_TOKENS        = "32000"
+    AI_COST_CANDIDATE_OUTPUT_TOKENS       = "1200"
+    AI_COST_CRITIC_INPUT_TOKENS           = "32000"
+    AI_COST_CRITIC_OUTPUT_TOKENS          = "1200"
+    AI_COST_VERIFIER_INPUT_TOKENS         = "32000"
+    AI_COST_VERIFIER_OUTPUT_TOKENS        = "1200"
+    AI_COST_SYNTHESIZER_INPUT_TOKENS      = "32000"
+    AI_COST_SYNTHESIZER_OUTPUT_TOKENS     = "4096"
+  }
+
   openai_api_key_configured    = contains(keys(var.web_secret_versions), "OPENAI_API_KEY")
   anthropic_api_key_configured = contains(keys(var.web_secret_versions), "ANTHROPIC_API_KEY")
 
