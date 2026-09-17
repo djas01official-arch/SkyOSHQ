@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   createSkyosNextConfig,
   getSkyosDevAllowedOrigins,
+  getSkyosProductionSecurityHeaders,
   parseSkyosDevAllowedOrigins,
 } from './next.config';
 
@@ -55,6 +56,48 @@ test('allows additional origins only in development', () => {
   ]);
   assert.equal(getSkyosDevAllowedOrigins('production', 'my-dev-host.local'), undefined);
   assert.equal(getSkyosDevAllowedOrigins(undefined, 'my-dev-host.local'), undefined);
+});
+
+test('adds the production security-header baseline only in production', async () => {
+  assert.equal(getSkyosProductionSecurityHeaders('development'), undefined);
+  assert.equal(getSkyosProductionSecurityHeaders('test'), undefined);
+  assert.equal(getSkyosProductionSecurityHeaders(undefined), undefined);
+
+  const headers = getSkyosProductionSecurityHeaders('production');
+  assert.ok(headers);
+  const values = new Map(headers.map(({ key, value }) => [key, value]));
+  assert.equal(values.get('Strict-Transport-Security'), 'max-age=31536000; includeSubDomains');
+  assert.equal(values.get('X-Content-Type-Options'), 'nosniff');
+  assert.equal(values.get('X-Frame-Options'), 'DENY');
+  assert.equal(values.get('Referrer-Policy'), 'no-referrer');
+  assert.equal(
+    values.get('Permissions-Policy'),
+    'camera=(), geolocation=(), microphone=(), payment=(), usb=()',
+  );
+  assert.equal(values.get('X-Permitted-Cross-Domain-Policies'), 'none');
+  const csp = values.get('Content-Security-Policy');
+  assert.ok(csp);
+  for (const directive of [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    "connect-src 'self'",
+    'upgrade-insecure-requests',
+  ]) {
+    assert.match(csp, new RegExp(directive.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+
+  const production = createSkyosNextConfig('production');
+  assert.equal(typeof production.headers, 'function');
+  const routes = await production.headers!();
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0]?.source, '/:path*');
+  assert.deepEqual(routes[0]?.headers, headers);
+
+  const development = createSkyosNextConfig('development');
+  assert.equal(development.headers, undefined);
 });
 
 test('keeps existing Next configuration values intact', () => {
